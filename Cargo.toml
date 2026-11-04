@@ -36,3 +36,7 @@ unwrap_used = "deny"
 
 [profile.release]
 strip = true
+# NF5 (< 40 MB): without these the Linux binary is 48 MB. Fat LTO with one
+# codegen unit cut the macOS binary by 20 % (22.8 → 18.2 MB).
+lto = "fat"
+codegen-units = 1
