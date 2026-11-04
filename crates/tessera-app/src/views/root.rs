@@ -158,7 +158,6 @@ impl Render for RootView {
             }))
             .bg(theme.background)
             .text_color(theme.foreground)
-            .when(prod, |el| el.child(div().flex_none().h(px(4.)).bg(red)))
             .child(TitleBar::new().child(switcher))
             .child(
                 h_flex()
@@ -168,6 +167,7 @@ impl Render for RootView {
                         div()
                             .id("sidebar")
                             .test_support()
+                            .overflow_y_scroll()
                             .w(px(SIDEBAR_WIDTH))
                             .h_full()
                             .bg(theme.sidebar)
@@ -178,9 +178,21 @@ impl Render for RootView {
                     .child(div().flex_1().h_full().min_w_0().child(main)),
             )
             .child(status_bar::render(selected, cx))
-            // Last, so it draws over the content; it has no listeners, so clicks pass through.
+            // Last, so they draw over the content without moving it; they have no listeners,
+            // so clicks pass through.
             .when(prod, |el| {
                 el.child(
+                    div()
+                        .id("window.prod_band")
+                        .test_support()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(4.))
+                        .bg(red),
+                )
+                .child(
                     div()
                         .id("window.prod_frame")
                         .test_support()

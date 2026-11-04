@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::kbd::Kbd;
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
@@ -19,7 +19,7 @@ use tessera_core::profile::Profile;
 use uuid::Uuid;
 
 use super::env_badge;
-use crate::actions::{ConnectSelected, NewConnection, SIDEBAR_ENTRY};
+use crate::actions::{ConnectSelected, DisconnectSelected, NewConnection, SIDEBAR_ENTRY};
 use crate::state::AppState;
 
 /// The sidebar view. Keeps one focus handle per entry so Tab and Enter work.
@@ -98,7 +98,10 @@ impl Sidebar {
             move |cx: &mut gpui_kit::App| state.update(cx, |s, cx| s.connect(id, None, cx))
         };
         let on_click = connect.clone();
-        let disconnect_state = self.state.clone();
+        let disconnect = {
+            let state = self.state.clone();
+            move |cx: &mut gpui_kit::App| state.update(cx, |s, cx| s.disconnect(id, cx))
+        };
         let row = h_flex()
             .id(SharedString::from(element_id.clone()))
             .test_support()
@@ -141,14 +144,20 @@ impl Sidebar {
                         ),
                 )
             })
-            .child(env_badge::render(&entry.profile.environment, cx))
+            .child(
+                div()
+                    .id(SharedString::from(format!("{element_id}.env")))
+                    .test_support()
+                    .aria_label(SharedString::from(env_badge::label(
+                        &entry.profile.environment,
+                    )))
+                    .child(env_badge::render(&entry.profile.environment, cx)),
+            )
             .context_menu(move |menu, _, _| {
                 if live {
-                    let state = disconnect_state.clone();
-                    menu.item(
-                        PopupMenuItem::new(t!("sidebar.disconnect").to_string()).on_click(
-                            move |_, _, cx| state.update(cx, |s, cx| s.disconnect(id, cx)),
-                        ),
+                    menu.menu(
+                        t!("sidebar.disconnect").to_string(),
+                        Box::new(DisconnectSelected),
                     )
                 } else {
                     menu.menu(t!("sidebar.connect").to_string(), Box::new(ConnectSelected))
@@ -158,6 +167,7 @@ impl Sidebar {
             // On the wrapper, so the context menu (a child of the row) resolves Enter too.
             .key_context(SIDEBAR_ENTRY)
             .on_action(move |_: &ConnectSelected, _, cx| connect(cx))
+            .on_action(move |_: &DisconnectSelected, _, cx| disconnect(cx))
             .child(row)
             .when_some(entry.error, |el, error| {
                 el.child(

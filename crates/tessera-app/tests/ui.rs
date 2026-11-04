@@ -67,6 +67,11 @@ const SELECT_ALL: &str = if cfg!(target_os = "macos") {
 } else {
     "ctrl-a"
 };
+const DISCONNECT: &str = if cfg!(target_os = "macos") {
+    "cmd-shift-d"
+} else {
+    "ctrl-shift-d"
+};
 const NEW_CONNECTION: &str = if cfg!(target_os = "macos") {
     "cmd-n"
 } else {
@@ -391,6 +396,9 @@ fn sidebar_lists_profiles_with_badges(cx: &mut TestAppContext) {
         assert!(window.find(entry(&staging)).visible());
         assert!(window.find(entry(&prod)).visible());
         assert!(window.find(format!("{}.readonly", entry(&prod))).visible());
+        let env = |p: &Profile| format!("{}.env", entry(p));
+        assert_eq!(window.find(env(&prod)).label(), Some("PROD"));
+        assert_eq!(window.find(env(&staging)).label(), Some("STAGING"));
         assert!(
             window
                 .try_find(format!("{}.readonly", entry(&staging)))
@@ -417,6 +425,12 @@ async fn enter_on_profile_connects(cx: &mut TestAppContext) {
     .unwrap();
     wait_for_label(cx, handle, "status.text".into(), "staging-eu").await;
     assert_eq!(*seen.lock().unwrap(), ["staging-eu"]);
+    cx.update_window(handle.into(), |_, window, cx| {
+        focus(window, &entry(&staging), cx);
+        window.press(DISCONNECT, cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "status.text".into(), "Not connected").await;
 }
 
 #[gpui_kit::test]
@@ -457,7 +471,10 @@ async fn prod_selection_draws_frame(cx: &mut TestAppContext) {
                 window.click(entry(p), cx);
                 window.render_frame(cx);
             }
-            window.try_find("window.prod_frame").is_some()
+            let frame = window.try_find("window.prod_frame").is_some();
+            let band = window.try_find("window.prod_band").is_some();
+            assert_eq!(frame, band, "band and frame go together");
+            frame
         })
         .unwrap()
     };
@@ -527,31 +544,78 @@ async fn context_menu_connects_and_disconnects(cx: &mut TestAppContext) {
 /// Shortcut labels come from GPUI Kit's `Kbd`, which formats them per platform.
 #[test]
 fn no_hardcoded_shortcut_labels() {
-    fn scan(dir: &std::path::Path, hits: &mut Vec<String>) {
+    const LABELS: [&str; 4] = ["Ctrl+", "Cmd+", "Strg+", "⌘"];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut hits = Vec::new();
+    let mut check = |path: &std::path::Path, text: &str| {
+        for label in LABELS {
+            if text.contains(label) {
+                hits.push(format!("{}: {label:?} in {text:?}", path.display()));
+            }
+        }
+    };
+    let mut dirs = vec![root.join("src")];
+    while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
-                scan(&path, hits);
+                dirs.push(path);
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();
-            // Unit tests sit at the end of a file and may spell shortcuts out.
-            let code = text.split("#[cfg(test)]").next().unwrap_or_default();
-            for (i, line) in code.lines().enumerate() {
-                if line.contains("\"Ctrl+") || line.contains("\"⌘") {
-                    hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
-                }
+            // The unit tests at the end of a file may spell shortcuts out.
+            let code = text
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or_default();
+            for literal in string_literals(code) {
+                check(&path, &literal);
             }
         }
     }
-    let mut hits = Vec::new();
-    scan(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut hits,
-    );
+    for entry in std::fs::read_dir(root.join("../../assets/locales")).unwrap() {
+        let path = entry.unwrap().path();
+        check(&path, &std::fs::read_to_string(&path).unwrap());
+    }
     assert!(
         hits.is_empty(),
         "hand-written shortcut labels:\n{}",
         hits.join("\n")
     );
+}
+
+/// The contents of the `"…"` literals in Rust source. Skips `'"'` char literals; raw strings
+/// are read as ordinary ones, which is enough to find a label inside them.
+fn string_literals(code: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut chars = code.chars().peekable();
+    let mut current: Option<String> = None;
+    while let Some(c) = chars.next() {
+        match (&mut current, c) {
+            (None, '\'') => {
+                // A char literal such as '"' or '\"' must not open a string.
+                let rest: String = chars.clone().take(3).collect();
+                if rest.starts_with("\"'") {
+                    chars.nth(1);
+                } else if rest.starts_with("\\\"'") {
+                    chars.nth(2);
+                }
+            }
+            (None, '"') => current = Some(String::new()),
+            (Some(literal), '\\') => {
+                literal.push(c);
+                literal.extend(chars.next());
+            }
+            (Some(_), '"') => literals.extend(current.take()),
+            (Some(literal), c) => literal.push(c),
+            (None, _) => {}
+        }
+    }
+    literals
+}
+
+#[test]
+fn string_literals_are_found() {
+    let code = r#"let a = "x ⌘N"; let q = '"'; let b = "Ctrl+\"N\""; // "c""#;
+    assert_eq!(string_literals(code), ["x ⌘N", r#"Ctrl+\"N\""#, "c"]);
 }

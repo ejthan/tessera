@@ -282,7 +282,7 @@ EOF
 
 ### 7.3 Environment visibility (UX rule 1)
 
-- **Title bar:** connection switcher with color dot, name and environment badge (`PROD` red and filled, other tags subdued), plus the read-only lock badge.
+- **Title bar:** connection label (no switcher, see D16) with color dot, name and environment badge (`PROD` red and filled, other tags subdued), plus the read-only lock badge.
 - **Sidebar and tabs:** as in §7.2.
 - **Status bar:** "Connected · staging-eu · v30.2.0 · leader · node-1 · 11 ms", "1 of 3 nodes unreachable", and on prod "prod · read-only".
 - **Prod (D11):** a 4 px red band across the top and a 2 px red frame inside the window edge while the **active tab** belongs to a prod connection. In PR A, before tabs exist, it is the selected connection. The band is drawn in the window content, which works the same with macOS's native title bar and the client-side decorations on Linux and Windows.
