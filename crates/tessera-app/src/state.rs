@@ -824,6 +824,9 @@ mod tests {
         let _rt = tokio(cx);
         // Poll the quit handler for the whole SHUTDOWN_TIMEOUT, not a random number of ticks.
         cx.executor().set_block_on_ticks(usize::MAX..=usize::MAX);
+        // The write runs on a real tokio thread; without parking the test scheduler gives up
+        // as soon as nothing is runnable instead of waiting out SHUTDOWN_TIMEOUT (flaky on CI).
+        cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("connections.json");
         let state = new_state(
