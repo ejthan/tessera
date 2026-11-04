@@ -116,9 +116,12 @@ pub fn error_text(err: &Error, host: &str) -> String {
         Error::InvalidUrl(_) => t!("connect.error.invalid_url").to_string(),
         Error::Network(_) => t!("connect.error.network", host = host).to_string(),
         Error::Timeout => t!("connect.error.timeout", host = host).to_string(),
-        Error::Http {
-            status, message, ..
-        } => t!("connect.error.http", status = status, message = message).to_string(),
+        Error::Http { status, .. } => match err.typesense_message() {
+            Some(message) => {
+                t!("connect.error.http", status = status, message = message).to_string()
+            }
+            None => t!("connect.error.not_typesense", host = host, status = status).to_string(),
+        },
         Error::Decode(_) => t!("connect.error.decode", host = host).to_string(),
     }
 }
@@ -158,6 +161,21 @@ mod tests {
         let connect = tokio_connector(Handle::current());
         let result = connect("localhost:8108".into(), SecretString::from("k")).await;
         assert!(matches!(result, Err(Error::InvalidUrl(_))));
+    }
+
+    #[test]
+    fn non_typesense_body_is_not_shown_as_typesense_message() {
+        rust_i18n::set_locale("en");
+        let html = "<!DOCTYPE html><html><body>404 Not Found</body></html>".to_string();
+        let err = Error::Http {
+            status: 404,
+            message: html.clone(),
+            body: html,
+        };
+        assert_eq!(
+            error_text(&err, "example.com:443"),
+            "example.com:443 answered HTTP 404, which does not look like Typesense. Check the URL and path prefix."
+        );
     }
 
     #[test]

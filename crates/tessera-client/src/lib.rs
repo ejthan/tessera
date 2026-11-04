@@ -67,7 +67,13 @@ impl Client {
             let path = format!("{}/", base.path());
             base.set_path(&path);
         }
-        let http = reqwest::Client::builder().build().map_err(Error::Network)?;
+        // Typesense never redirects. Following one would send X-TYPESENSE-API-KEY to
+        // whatever host the redirect names (reqwest strips only Authorization and cookies),
+        // for example an SSO proxy's login page. A 3xx surfaces as Error::Http instead.
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(Error::Network)?;
         Ok(Self {
             http,
             base,

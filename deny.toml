@@ -6,6 +6,10 @@ all-features = false
 
 [advisories]
 version = 2
+# Gate only Tessera's own direct dependencies on "unmaintained". The GPUI stack
+# pulls in several unmaintained crates (ttf-parser, rustybuzz, zvariant, …) that
+# we cannot replace; vulnerabilities still fail for every crate.
+unmaintained = "workspace"
 
 [licenses]
 version = 2
@@ -13,6 +17,7 @@ version = 2
 unused-allowed-license = "allow"
 allow = [
     "GPL-3.0-or-later",
+    "0BSD",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "MIT",

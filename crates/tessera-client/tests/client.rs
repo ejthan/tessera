@@ -201,3 +201,29 @@ async fn key_never_printed() {
     let shown = format!("{err} {err:?}").replace(&format!("bad key {KEY}?"), "");
     assert!(!shown.contains(KEY), "{shown}");
 }
+
+#[tokio::test]
+async fn redirect_is_not_followed_and_key_stays_home() {
+    let elsewhere = MockServer::start().await;
+    mock(&elsewhere, "/debug", 200, r#"{"state":1,"version":"30.2"}"#).await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/debug"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("Location", format!("{}/debug", elsewhere.uri())),
+        )
+        .mount(&server)
+        .await;
+    let client = Client::new(&server.uri(), key()).unwrap();
+    assert!(matches!(
+        client.debug().await,
+        Err(Error::Http { status: 302, .. })
+    ));
+    let leaked = elsewhere.received_requests().await.unwrap_or_default();
+    assert!(
+        leaked.is_empty(),
+        "redirect target received {} request(s)",
+        leaked.len()
+    );
+}

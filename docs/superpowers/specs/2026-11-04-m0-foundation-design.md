@@ -110,7 +110,7 @@ pub enum Error {
 }
 ```
 
-`Http.message` is the `message` field of a Typesense error body when present, otherwise the raw body. It is never truncated (NF7). Variants from product spec §5.5 that M0 cannot produce (`Tls`, `Cancelled`, `Unsupported`) are added when a code path first produces them.
+`Http.message` is the `message` field of a Typesense error body when present, otherwise the raw body. It is never truncated (NF7). `Error::typesense_message()` tells the two apart: the app shows a Typesense message in full, but a body without one (a proxy's HTML error page, a wrong path prefix) becomes "{host} answered HTTP {status}, which does not look like Typesense. Check the URL and path prefix." The client never follows redirects, so the API key cannot reach another host. Variants from product spec §5.5 that M0 cannot produce (`Tls`, `Cancelled`, `Unsupported`) are added when a code path first produces them.
 
 ### 4.2 tessera-core
 

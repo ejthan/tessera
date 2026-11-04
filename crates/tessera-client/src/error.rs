@@ -30,6 +30,16 @@ pub enum Error {
 }
 
 impl Error {
+    /// For an [`Error::Http`] whose body carried Typesense's `{"message": …}`, that message.
+    /// `None` when the body was something else, such as a proxy's HTML error page.
+    pub fn typesense_message(&self) -> Option<&str> {
+        match self {
+            // `http()` falls back to the raw body when there is no `message` field.
+            Self::Http { message, body, .. } if message != body => Some(message),
+            _ => None,
+        }
+    }
+
     pub(crate) fn from_reqwest(e: reqwest::Error) -> Self {
         if e.is_timeout() {
             Self::Timeout
