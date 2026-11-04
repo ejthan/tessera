@@ -16,6 +16,13 @@ const SERVICE: &str = "tessera";
 #[error("{0}")]
 pub struct SecretError(String);
 
+impl SecretError {
+    /// Builds an error from a platform message; it must not contain the key.
+    pub fn new(message: impl Into<String>) -> SecretError {
+        SecretError(message.into())
+    }
+}
+
 /// Storage for API keys, addressed by profile id. Calls block; run them off the render path.
 pub trait SecretStore: Send + Sync {
     /// Returns the key of profile `id`, or `None` if none is stored.
@@ -31,7 +38,18 @@ pub struct KeyringStore;
 
 impl KeyringStore {
     fn entry(id: Uuid) -> Result<keyring::Entry, SecretError> {
-        keyring::Entry::new(SERVICE, &id.to_string()).map_err(SecretError::from)
+        keyring::Entry::new(SERVICE, &id.to_string()).map_err(|e| match e {
+            keyring::Error::NoDefaultStore => store_unavailable(keyring::Entry::store_status()),
+            other => other.into(),
+        })
+    }
+}
+
+/// Explains a failed credential store setup, e.g. "no Secret Service is running" on Linux.
+fn store_unavailable(status: &Result<(), keyring::Error>) -> SecretError {
+    match status {
+        Err(e) => SecretError(format!("credential store unavailable: {e}")),
+        Ok(()) => SecretError(keyring::Error::NoDefaultStore.to_string()),
     }
 }
 
@@ -67,7 +85,7 @@ impl SecretStore for KeyringStore {
     }
 }
 
-/// In-memory store for tests.
+/// In-memory store for tests and temporary connections, whose keys live in memory only.
 #[derive(Default)]
 pub struct MemoryStore(Mutex<HashMap<Uuid, SecretString>>);
 
@@ -127,6 +145,28 @@ mod tests {
         let text = format!("{e} {e:?}");
         assert!(!text.contains(KEY), "{text}");
         assert!(!text.is_empty());
+
+        // A keyring bump that starts printing these bytes must fail here.
+        let bytes = KEY.as_bytes().to_vec();
+        let platform: keyring::Error = keyring::Error::BadDataFormat(bytes.clone(), "boom".into());
+        for err in [keyring::Error::BadEncoding(bytes), platform] {
+            let e: SecretError = err.into();
+            let text = format!("{e} {e:?}");
+            assert!(!text.contains(KEY), "{text}");
+            assert!(!text.contains(&format!("{:?}", KEY.as_bytes())), "{text}");
+        }
+    }
+
+    #[test]
+    fn store_unavailable_reports_the_cause() {
+        let cause = Err(keyring::Error::BadStoreFormat("no Secret Service".into()));
+        assert!(
+            store_unavailable(&cause)
+                .to_string()
+                .contains("no Secret Service")
+        );
+        assert!(!store_unavailable(&Ok(())).to_string().is_empty());
+        assert_eq!(SecretError::new("x").to_string(), "x");
     }
 
     #[test]
