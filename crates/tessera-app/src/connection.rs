@@ -164,7 +164,7 @@ pub struct ConnectionState {
     pub collections_error: Option<SharedString>,
     /// Polling is paused by the user.
     pub paused: bool,
-    /// Time between polling ticks, kept for the session.
+    /// Time between two polls of a node, kept for the session.
     pub interval: Duration,
     collections_task: Option<Task<()>>,
 }
@@ -198,9 +198,9 @@ impl ConnectionState {
         cx.notify();
     }
 
-    /// Sets the polling interval for the rest of the session and polls right away.
+    /// Sets the polling interval (at least 1 s) for the rest of the session and polls right away.
     pub fn set_interval(&mut self, interval: Duration, cx: &mut Context<Self>) {
-        self.interval = interval;
+        self.interval = interval.max(Duration::from_secs(1));
         cx.notify();
     }
 

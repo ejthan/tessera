@@ -42,12 +42,12 @@ pub type ConnectFuture = Pin<Box<dyn Future<Output = Result<Connected, Error>> +
 
 ## Polling
 
-Each open overview tab owns a `poller::Poller`, one GPUI task that ticks every `interval` (5 s by default, kept on `ConnectionState` for the session). The first tick runs at once.
+Each open overview tab owns a `poller::Poller`, which runs one GPUI task per node. Each loop asks its node right away, then again every `interval` (5 s by default, at least 1 s, kept on `ConnectionState` for the session), so a slow or hanging node never delays the others.
 
-- Each tick asks every node whose `next_retry` has passed, in parallel, through `PollFetcherGlobal`: the app installs `tokio_fetcher`, which runs `/health`, `/debug`, `/metrics.json` and `/stats.json` of one `NodeClient` concurrently on tokio, with `Origin::Polling`. Tests install fakes, as for the `Connector`.
-- A node whose `/health` or `/debug` fails backs off 5, 10, 20, 30, 30 s; success resets it. A failed `/metrics.json` or `/stats.json` alone shows its error but keeps the node on the interval.
-- The results of a tick land on `ConnectionState` in one update with one `notify`, so a reopened tab still has the history.
-- The task stops while the window is hidden, while paused, and when the tab closes; dropping it drops the fetches, and `AbortOnDrop` cancels them. Showing the window or resuming ticks at once.
+- A loop fetches through `PollFetcherGlobal`. The app installs `tokio_fetcher`, which runs `/health`, `/debug`, `/metrics.json` and `/stats.json` of one `NodeClient` concurrently on tokio, with `Origin::Polling`. Tests install fakes, as for the `Connector`.
+- A node whose `/health` or `/debug` fails, or whose `/health` says `ok: false`, waits 5, 10, 20, 30, 30 s before its next attempt (`next_retry` is set when the failure arrives); success resets it. A failed `/metrics.json` or `/stats.json` alone shows its error but keeps the node on the interval.
+- Each result lands on `ConnectionState` in one update with one `notify`, so a reopened tab still has the history.
+- The loops stop while the window is hidden, while paused, and when the tab closes; dropping them drops the fetches, and `AbortOnDrop` cancels them. Showing the window, resuming or changing the interval restarts them, which polls at once.
 - Collections load once when the tab opens, through `CollectionsFetcherGlobal` with the polling client, and on `ConnectionState::refresh_collections` with the user's client.
 
 ## The request log channel

@@ -17,7 +17,7 @@ use gpui_kit::{
 };
 use secrecy::ExposeSecret as _;
 use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
-use tessera_app::poller::{CollectionsFetcherGlobal, NodeSample, PollFetcherGlobal};
+use tessera_app::poller::{CollectionsFetcherGlobal, NodeSample, PollFetcherGlobal, SampleFuture};
 use tessera_app::runtime::Tokio;
 use tessera_app::state::AppState;
 use tessera_app::views::root::RootView;
@@ -165,13 +165,23 @@ pub fn fake_poll(
     cx: &mut TestAppContext,
     answer: impl Fn(&NodeClient) -> NodeSample + Send + Sync + 'static,
 ) -> Arc<Mutex<Vec<String>>> {
+    fake_poll_async(cx, move |node| {
+        let sample = answer(node);
+        Box::pin(async move { sample })
+    })
+}
+
+/// Like [`fake_poll`], with an answer that may take time or never come.
+pub fn fake_poll_async(
+    cx: &mut TestAppContext,
+    answer: impl Fn(&NodeClient) -> SampleFuture + Send + Sync + 'static,
+) -> Arc<Mutex<Vec<String>>> {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let record = seen.clone();
     cx.update(|cx| {
         cx.set_global(PollFetcherGlobal(Arc::new(move |node: NodeClient| {
             record.lock().unwrap().push(node.url().to_string());
-            let sample = answer(&node);
-            Box::pin(async move { sample })
+            answer(&node)
         })));
     });
     seen

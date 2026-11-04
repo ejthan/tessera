@@ -338,11 +338,11 @@ A file dialog, then a dialog listing the candidates:
 
 ### 7.8 Polling
 
-- One GPUI task per open Overview tab.
+- One GPUI task per node of each open Overview tab, owned by the tab's poller, so a hanging node never delays the others.
 - Each tick asks every node in parallel, through `node(i)` without failover and with `Origin::Polling`, for `/health`, `/debug`, `/metrics.json` and `/stats.json`.
 - Collection and document counts load when the tab opens and on ⌘R / Ctrl+R, not every tick, because `/collections` is expensive on large clusters.
 - Polling stops while the window is hidden (`observe_window_visibility`), while paused, and when the tab closes. Closing drops the task, and `AbortOnDrop` cancels requests in flight.
-- A failing node gets its own backoff (5 s doubling to at most 30 s) shown as a countdown on its card. Other nodes keep their interval. This is the §7.2 AC.
+- A failing node (an error from `/health` or `/debug`, or `/health` answering `ok: false`) gets its own backoff (5 s doubling to at most 30 s) shown as a countdown on its card. Other nodes keep their interval. This is the §7.2 AC.
 
 ### 7.9 i18n
 

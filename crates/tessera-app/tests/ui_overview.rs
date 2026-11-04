@@ -112,6 +112,10 @@ async fn failing_node_turns_red_others_update(cx: &mut TestAppContext) {
     conn.read_with(cx, |c, _| {
         let error = c.nodes[2].error.as_deref().unwrap_or_default();
         assert!(error.starts_with("n2:8108 did not answer"), "{error}");
+        assert!(
+            !error.contains('\n'),
+            "the same failure shows once: {error}"
+        );
         assert_eq!(c.nodes[2].healthy, None);
         for i in 0..2 {
             assert_eq!(c.nodes[i].error, None);
@@ -125,6 +129,35 @@ async fn failing_node_turns_red_others_update(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn hanging_node_keeps_others_on_interval(cx: &mut TestAppContext) {
+    let seen = fake_poll_async(cx, |node| {
+        if node.url().host_str() == Some("n2") {
+            Box::pin(std::future::pending())
+        } else {
+            Box::pin(async { ok_sample() })
+        }
+    });
+    let (_handle, conn, _rt) = cluster(cx).await;
+    advance(cx, Duration::from_secs(10));
+    conn.read_with(cx, |c, _| {
+        for i in 0..2 {
+            let ages: Vec<u64> = c.history[i]
+                .points(Series::Cpu)
+                .map(|(age, _)| age.as_secs())
+                .collect();
+            assert_eq!(ages, [10, 5, 0], "node {i} samples every 5 s");
+        }
+    });
+    let asked = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|u| u.contains("n2"))
+        .count();
+    assert_eq!(asked, 1);
+}
+
+#[gpui_kit::test]
 async fn backoff_caps_at_30s(cx: &mut TestAppContext) {
     let seen = fake_poll(cx, |node| {
         if node.url().host_str() == Some("n0") {
@@ -134,10 +167,7 @@ async fn backoff_caps_at_30s(cx: &mut TestAppContext) {
         }
     });
     let (_handle, conn, _rt) = cluster(cx).await;
-    let polls = |host: &str| {
-        let seen = seen.lock().unwrap();
-        seen.iter().filter(|u| u.contains(host)).count()
-    };
+    let polls = |host: &str| polls(&seen, host);
     let mut backoffs = vec![conn.read_with(cx, |c, _| c.nodes[0].backoff.as_secs())];
     let mut gaps = Vec::new();
     let (mut last, mut seconds) = (polls("n0"), 0);
@@ -158,6 +188,89 @@ async fn backoff_caps_at_30s(cx: &mut TestAppContext) {
         conn.read_with(cx, |c, _| c.nodes[1].backoff),
         Duration::ZERO
     );
+}
+
+/// How often each host was polled.
+fn polls(seen: &Arc<Mutex<Vec<String>>>, host: &str) -> usize {
+    let seen = seen.lock().unwrap();
+    seen.iter().filter(|u| u.contains(host)).count()
+}
+
+#[gpui_kit::test]
+async fn recovered_node_resets_backoff(cx: &mut TestAppContext) {
+    let calls = Arc::new(Mutex::new(0));
+    let counter = calls.clone();
+    let seen = fake_poll(cx, move |node| {
+        if node.url().host_str() != Some("n0") {
+            return ok_sample();
+        }
+        let mut calls = counter.lock().unwrap();
+        *calls += 1;
+        if *calls <= 3 { down() } else { ok_sample() }
+    });
+    let (_handle, conn, _rt) = cluster(cx).await;
+    // Failures at 0, 5 and 15 s; the retry at 35 s succeeds.
+    advance(cx, Duration::from_secs(35));
+    assert_eq!(polls(&seen, "n0"), 4);
+    conn.read_with(cx, |c, _| {
+        assert_eq!(c.nodes[0].backoff, Duration::ZERO);
+        assert_eq!(c.nodes[0].next_retry, None);
+        assert_eq!(c.nodes[0].error, None);
+    });
+    advance(cx, Duration::from_secs(10));
+    assert_eq!(polls(&seen, "n0"), 6, "back on the 5 s interval");
+}
+
+#[gpui_kit::test]
+async fn metrics_failure_keeps_node_up(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    let seen = fake_poll(cx, |node| {
+        let mut sample = ok_sample();
+        if node.url().host_str() == Some("n1") {
+            sample.metrics = Err(Error::Timeout);
+        }
+        sample
+    });
+    let (_handle, conn, _rt) = cluster(cx).await;
+    advance(cx, Duration::from_secs(10));
+    assert_eq!(polls(&seen, "n1"), 3);
+    conn.read_with(cx, |c, _| {
+        let node = &c.nodes[1];
+        assert!(
+            node.error
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("n1:8108")
+        );
+        assert_eq!(node.backoff, Duration::ZERO);
+        assert_eq!(node.healthy, Some(true));
+        assert_eq!(c.history[1].points(Series::Cpu).count(), 0);
+    });
+}
+
+#[gpui_kit::test]
+async fn not_ready_node_backs_off(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    let seen = fake_poll(cx, |node| {
+        let mut sample = ok_sample();
+        if node.url().host_str() == Some("n2") {
+            sample.health = Ok(tessera_client::Health { ok: false });
+        }
+        sample
+    });
+    let (_handle, conn, _rt) = cluster(cx).await;
+    advance(cx, Duration::from_secs(10));
+    assert_eq!(polls(&seen, "n2"), 2, "asked at 0 and 5 s, then after 10 s");
+    conn.read_with(cx, |c, _| {
+        let node = &c.nodes[2];
+        assert_eq!(node.healthy, Some(false));
+        assert_eq!(node.backoff, Duration::from_secs(10));
+        let error = node.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("n2:8108") && error.contains("not ready"),
+            "{error}"
+        );
+    });
 }
 
 #[gpui_kit::test]
@@ -195,10 +308,7 @@ async fn closing_tab_stops_polling(cx: &mut TestAppContext) {
     let (handle, state, _rt) = open_app(cx, vec![a.clone(), b.clone()], store(&[&a, &b]));
     open_tab(cx, handle, &state, &a).await;
     open_tab(cx, handle, &state, &b).await;
-    let polls = |host: &str| {
-        let seen = seen.lock().unwrap();
-        seen.iter().filter(|u| u.contains(host)).count()
-    };
+    let polls = |host: &str| polls(&seen, host);
     assert!(polls("//a:") > 0);
     let tab = format!("tab.{}.overview", a.id);
     // Clicking the tab focuses it, so the close shortcut reaches its tab group.
