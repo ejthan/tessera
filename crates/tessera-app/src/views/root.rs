@@ -12,7 +12,7 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 
-use super::{connect_dialog::ConnectDialog, status_bar, welcome};
+use super::{connect_dialog::ConnectDialog, overview, status_bar, welcome};
 use crate::actions::NewConnection;
 use crate::connection::Connection;
 
@@ -76,19 +76,56 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let connection = SharedString::from(t!("titlebar.no_connection").to_string());
-        let this = cx.entity();
-        let copy_target = this.clone();
-        let main = welcome::render(
-            self.copied,
-            move |_, window, cx| {
-                this.update(cx, |view, cx| view.open_connect(window, cx));
-            },
-            move |_, _, cx| {
-                copy_target.update(cx, |view, cx| view.copy_docker_command(cx));
-            },
-            cx,
+        let info = self.connection.read(cx).info.clone();
+        let title = SharedString::from(
+            info.as_ref()
+                .map(|i| i.host_label())
+                .unwrap_or_else(|| t!("titlebar.no_connection").to_string()),
         );
+        let main = match &info {
+            Some(info) => overview::render(info, cx).into_any_element(),
+            None => {
+                let this = cx.entity();
+                let copy_target = this.clone();
+                welcome::render(
+                    self.copied,
+                    move |_, window, cx| {
+                        this.update(cx, |view, cx| view.open_connect(window, cx));
+                    },
+                    move |_, _, cx| {
+                        copy_target.update(cx, |view, cx| view.copy_docker_command(cx));
+                    },
+                    cx,
+                )
+                .into_any_element()
+            }
+        };
+        let sidebar = info.as_ref().map(|info| {
+            let overview = SharedString::from(t!("sidebar.overview").to_string());
+            v_flex()
+                .gap_1()
+                .p_2()
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_sm()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(info.host_label()),
+                )
+                .child(
+                    div()
+                        .id("sidebar.overview")
+                        .test_support()
+                        .aria_label(overview.clone())
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme.secondary)
+                        .text_sm()
+                        .child(overview),
+                )
+        });
         v_flex()
             .size_full()
             .track_focus(&self.focus_handle)
@@ -102,10 +139,10 @@ impl Render for RootView {
                     div()
                         .id("titlebar.connection")
                         .test_support()
-                        .aria_label(connection.clone())
+                        .aria_label(title.clone())
                         .text_sm()
                         .text_color(theme.muted_foreground)
-                        .child(connection),
+                        .child(title),
                 ),
             )
             .child(
@@ -120,10 +157,11 @@ impl Render for RootView {
                             .h_full()
                             .bg(theme.sidebar)
                             .border_r_1()
-                            .border_color(theme.sidebar_border),
+                            .border_color(theme.sidebar_border)
+                            .children(sidebar),
                     )
                     .child(div().flex_1().h_full().min_w_0().child(main)),
             )
-            .child(status_bar::render())
+            .child(status_bar::render(info.as_ref(), cx))
     }
 }

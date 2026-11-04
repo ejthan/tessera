@@ -195,3 +195,66 @@ fn shell_shows_not_connected(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+fn server(version: &str, healthy: bool) -> ServerInfo {
+    ServerInfo {
+        url: "http://localhost:8108/".parse().unwrap(),
+        version: version.into(),
+        state: tessera_client::RaftState::Leader,
+        healthy,
+        capabilities: tessera_core::ServerCapabilities::from_version(version),
+        latency: Duration::from_millis(11),
+    }
+}
+
+async fn connect(cx: &mut TestAppContext, info: ServerInfo) -> WindowHandle<Root> {
+    fake_connector(cx, move |_| Ok(info.clone()));
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| window.press("enter", cx))
+        .unwrap();
+    cx.wait_for(handle.into(), Duration::from_millis(1000), |window, _| {
+        window.try_find("connect.url").is_none() && window.try_find("overview.version").is_some()
+    })
+    .await;
+    handle
+}
+
+fn label(window: &mut gpui_kit::Window, id: &'static str) -> String {
+    window.find(id).label().unwrap_or_default().to_string()
+}
+
+#[gpui_kit::test]
+async fn connect_success_shows_version_in_status_bar(cx: &mut TestAppContext) {
+    let handle = connect(cx, server("30.2", true)).await;
+    cx.update_window(handle.into(), |_, window, _| {
+        let status = label(window, "status.text");
+        for part in ["Connected", "localhost:8108", "v30.2", "Leader", "11 ms"] {
+            assert!(status.contains(part), "{part:?} missing in {status:?}");
+        }
+        assert!(label(window, "overview.version").contains("30.2"));
+        assert!(label(window, "overview.role").contains("Leader"));
+        assert!(window.find("sidebar.overview").visible());
+        assert!(label(window, "titlebar.connection").contains("localhost:8108"));
+        assert!(window.try_find("overview.unsupported").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn old_server_shows_warning(cx: &mut TestAppContext) {
+    let handle = connect(cx, server("29.0", true)).await;
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(label(window, "overview.unsupported").contains("29.0"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn unhealthy_server_shows_unhealthy(cx: &mut TestAppContext) {
+    let handle = connect(cx, server("30.2", false)).await;
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(label(window, "overview.health").contains("Unhealthy"));
+    })
+    .unwrap();
+}
