@@ -2,6 +2,7 @@
 
 //! Command-line flags and `TYPESENSE_*` variables: decides how the app launches.
 
+use std::ffi::OsString;
 use std::fmt;
 
 use secrecy::SecretString;
@@ -78,6 +79,18 @@ impl fmt::Debug for Launch {
                 .finish(),
         }
     }
+}
+
+/// Converts the arguments (without argv[0]) to UTF-8. The error names only the position:
+/// the argument itself may be anything.
+pub fn utf8_args(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>, CliError> {
+    args.into_iter()
+        .enumerate()
+        .map(|(i, a)| {
+            a.into_string()
+                .map_err(|_| CliError(format!("argument {} is not valid UTF-8", i + 1)))
+        })
+        .collect()
 }
 
 /// Parses `args` (without argv[0]) and the environment into a [`Launch`].
@@ -233,6 +246,21 @@ mod tests {
                 .map(|(_, v)| v.to_string())
         };
         parse(&args, &env)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_argument_is_an_error_without_its_text() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+        let args = [
+            OsString::from("--host"),
+            OsString::from_vec(b"k\xffsecret".to_vec()),
+        ];
+        let e = utf8_args(args).unwrap_err().0;
+        assert_eq!(e, "argument 2 is not valid UTF-8");
+        let ok = utf8_args([OsString::from("--read-only")]).unwrap();
+        assert_eq!(ok, ["--read-only"]);
     }
 
     fn temp(args: &[&str], vars: &[(&str, &str)]) -> (Profile, bool, Option<SecretString>) {

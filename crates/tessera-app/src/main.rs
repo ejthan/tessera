@@ -5,8 +5,9 @@ use std::process::ExitCode;
 use tessera_core::cli::{self, Launch};
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let launch = match cli::parse(&args, &|k| std::env::var(k).ok()) {
+    let launch = match cli::utf8_args(std::env::args_os().skip(1))
+        .and_then(|args| cli::parse(&args, &|k| std::env::var(k).ok()))
+    {
         Ok(Launch::Help) => {
             print!("{}", cli::HELP);
             return ExitCode::SUCCESS;

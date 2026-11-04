@@ -292,6 +292,7 @@ impl ImportDialog {
                 ImportNote::DifferingClusterKeys => t!("import.note.differing_keys"),
                 ImportNote::SkippedSameHost => t!("import.note.same_host"),
                 ImportNote::InvalidNode => t!("import.note.invalid_node"),
+                ImportNote::DuplicateInFile => t!("import.note.duplicate_in_file"),
             }
             .to_string()
         }));

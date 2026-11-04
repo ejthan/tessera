@@ -5,6 +5,7 @@
 use std::time::{Instant, SystemTime};
 
 use reqwest::Method;
+use reqwest::header::HeaderValue;
 use secrecy::ExposeSecret;
 
 use crate::event::{Body, RequestEvent, next_id};
@@ -15,7 +16,8 @@ impl Client {
     ///
     /// Returns the status and body for any HTTP answer; only transport failures are errors.
     /// A read-only client refuses every method but [`READ_METHODS`](crate::READ_METHODS)
-    /// here, before anything is sent or reported, so no caller can get around it.
+    /// here, before anything is sent or reported, so no caller can get around it. A key that
+    /// is no valid header value is [`Error::InvalidKey`], also before anything is reported.
     pub(crate) async fn send(
         &self,
         node: usize,
@@ -33,6 +35,10 @@ impl Client {
             .map_err(|_| Error::InvalidUrl(base.to_string()))?;
         url.set_query(query);
         let key = self.key.expose_secret();
+        // Checked before sending: reqwest would report a bad value as a network error, which
+        // fails over. Sensitive, so HTTP/2 never indexes it and `Debug` never prints it.
+        let mut key_header = HeaderValue::from_str(key).map_err(|_| Error::InvalidKey)?;
+        key_header.set_sensitive(true);
         let mut request_headers = Vec::new();
         // Event copies of the body are only made when someone listens.
         let request_body = self
@@ -42,7 +48,7 @@ impl Client {
         let mut request = self
             .http
             .request(method.clone(), url.clone())
-            .header("X-TYPESENSE-API-KEY", key)
+            .header("X-TYPESENSE-API-KEY", key_header)
             .timeout(self.timeout);
         if let Some(body) = body {
             request_headers.push(("content-type".to_string(), "application/json".to_string()));

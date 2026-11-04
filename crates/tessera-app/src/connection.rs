@@ -178,13 +178,24 @@ pub fn host_label(url: &str) -> String {
         .unwrap_or_else(|| url.to_string())
 }
 
+/// `e` and its sources joined by ": ", e.g. down to "Connection refused". reqwest errors
+/// name the URL, never a header, so the key cannot appear.
+fn chain(e: &(dyn std::error::Error + 'static)) -> String {
+    std::iter::successors(Some(e), |e| e.source())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
 /// User-facing text for a failed connect attempt to `profile`.
 pub fn error_text(err: &Error, profile: &Profile) -> String {
     let host = profile.nodes.first().map(|n| n.label()).unwrap_or_default();
     let host = host.as_str();
     match err {
         Error::InvalidUrl(_) => t!("connect.error.invalid_url").to_string(),
-        Error::Network(_) => t!("connect.error.network", host = host).to_string(),
+        Error::Network(e) => {
+            t!("connect.error.network", host = host, detail = chain(e)).to_string()
+        }
         Error::Timeout => t!(
             "connect.error.timeout",
             host = host,
@@ -200,6 +211,7 @@ pub fn error_text(err: &Error, profile: &Profile) -> String {
         Error::Decode(_) => t!("connect.error.decode", host = host).to_string(),
         Error::Tls(detail) => t!("connect.error.tls", host = host, detail = detail).to_string(),
         Error::ReadOnly { method } => t!("connect.error.read_only", method = method).to_string(),
+        Error::InvalidKey => t!("connect.error.invalid_key").to_string(),
     }
 }
 
@@ -292,6 +304,41 @@ mod tests {
         assert_eq!(
             error_text(&err, &profile),
             "example.com:443 answered HTTP 404, which does not look like Typesense. Check the URL and path prefix."
+        );
+    }
+
+    #[tokio::test]
+    async fn network_error_text_names_the_cause() {
+        rust_i18n::set_locale("en");
+        let client = tessera_client::Client::new(
+            &["http://127.0.0.1:9"],
+            SecretString::from("k-secret-1234"),
+            tessera_client::ClientOptions {
+                retries: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let err = client.health().await.unwrap_err();
+        assert!(matches!(err, Error::Network(_)), "{err:?}");
+        let profile = Profile::new("t", vec![node("127.0.0.1", 9)]);
+        let text = error_text(&err, &profile);
+        assert!(text.starts_with("Could not reach 127.0.0.1:9: "), "{text}");
+        // The cause chain down to the refused connection, without the key.
+        assert!(
+            text.contains("/health") && text.contains("connect"),
+            "{text}"
+        );
+        assert!(!text.contains("k-secret"), "{text}");
+    }
+
+    #[test]
+    fn invalid_key_text_does_not_show_the_key() {
+        rust_i18n::set_locale("en");
+        let profile = Profile::new("t", vec![node("localhost", 8108)]);
+        assert_eq!(
+            error_text(&Error::InvalidKey, &profile),
+            "The API key contains a character that cannot be sent, such as a line break. Enter the key again."
         );
     }
 

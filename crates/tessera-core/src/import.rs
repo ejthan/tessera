@@ -28,6 +28,8 @@ pub enum ImportNote {
     SkippedSameHost,
     /// A node failed [`Node::validate`]; the row stays visible but unselected.
     InvalidNode,
+    /// An earlier row of the same file has the same nodes; this one is unselected.
+    DuplicateInFile,
 }
 
 /// One profile the user may import, with its key and preview state.
@@ -60,7 +62,7 @@ impl fmt::Debug for ImportCandidate {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawConfig {
-    #[serde(rename = "apiKey")]
+    #[serde(rename = "apiKey", deserialize_with = "key_string")]
     api_key: String,
     node: Option<RawNode>,
     #[serde(rename = "connectionTimeoutSeconds")]
@@ -71,7 +73,7 @@ struct RawConfig {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawEntry {
-    #[serde(rename = "apiKey")]
+    #[serde(rename = "apiKey", deserialize_with = "key_string")]
     api_key: String,
     node: RawNode,
     #[serde(rename = "clusterTag")]
@@ -92,7 +94,7 @@ struct RawNode {
 impl RawNode {
     /// Protocol comes from `protocol`, else from `tls`, else `http`; port defaults to 8108.
     fn node(&self) -> Node {
-        let protocol = match (self.protocol.as_deref(), self.tls) {
+        let protocol = match (self.protocol.as_deref().map(str::trim), self.tls) {
             (Some(p), _) if p.eq_ignore_ascii_case("https") => Protocol::Https,
             (Some(p), _) if p.eq_ignore_ascii_case("http") => Protocol::Http,
             (_, Some(true)) => Protocol::Https,
@@ -105,6 +107,11 @@ impl RawNode {
             path: self.path.clone().unwrap_or_default(),
         }
     }
+}
+
+/// Accepts only a string. serde's own message would echo a non-string value, which may be a key.
+fn key_string<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    String::deserialize(d).map_err(|_| serde::de::Error::custom("apiKey must be a string"))
 }
 
 /// Accepts `"8108"`, `8108`, an empty string or null.
@@ -134,7 +141,7 @@ struct Group {
 ///
 /// The top-level node and every history entry become a profile; entries sharing a
 /// `clusterTag` become one profile with several nodes. Candidates equal to a profile in
-/// `existing` are unselected duplicates. `host: "SAME"` entries and nodes that fail
+/// `existing`, or to an earlier candidate of the same file, are unselected duplicates. `host: "SAME"` entries and nodes that fail
 /// [`Node::validate`] are kept as unselected rows with a note, so the user can see them.
 pub fn dashboard_config(
     json: &str,
@@ -169,39 +176,41 @@ pub fn dashboard_config(
         }
     }
 
-    Ok(groups
-        .into_iter()
-        .map(|g| {
-            let mut notes = Vec::new();
-            let first_key = g.rows[0].1.clone();
-            if g.same {
-                notes.push(ImportNote::SkippedSameHost);
-            } else {
-                if g.rows.iter().any(|r| r.1 != first_key) {
-                    notes.push(ImportNote::DifferingClusterKeys);
-                }
-                if g.rows.iter().any(|r| r.0.validate().is_err()) {
-                    notes.push(ImportNote::InvalidNode);
-                }
+    let mut candidates: Vec<ImportCandidate> = Vec::with_capacity(groups.len());
+    for g in groups {
+        let mut notes = Vec::new();
+        let first_key = g.rows[0].1.clone();
+        if g.same {
+            notes.push(ImportNote::SkippedSameHost);
+        } else {
+            if g.rows.iter().any(|r| r.1 != first_key) {
+                notes.push(ImportNote::DifferingClusterKeys);
             }
-            let nodes: Vec<Node> = g.rows.into_iter().map(|r| r.0).collect();
-            let duplicate_of = existing.iter().find(|p| p.nodes == nodes).map(|p| p.id);
-            let mut profile = Profile::new(g.name, nodes);
-            if let Some(t) = raw.timeout {
-                profile.timeout_secs = t;
+            if g.rows.iter().any(|r| r.0.validate().is_err()) {
+                notes.push(ImportNote::InvalidNode);
             }
-            // Differing keys are only a remark; every other note or a duplicate unchecks the row.
-            let selected = duplicate_of.is_none()
-                && notes.iter().all(|n| *n == ImportNote::DifferingClusterKeys);
-            ImportCandidate {
-                profile,
-                key: SecretString::from(first_key),
-                notes,
-                duplicate_of,
-                selected,
-            }
-        })
-        .collect())
+        }
+        let nodes: Vec<Node> = g.rows.into_iter().map(|r| r.0).collect();
+        let duplicate_of = existing.iter().find(|p| p.nodes == nodes).map(|p| p.id);
+        if duplicate_of.is_none() && candidates.iter().any(|c| c.profile.nodes == nodes) {
+            notes.push(ImportNote::DuplicateInFile);
+        }
+        let mut profile = Profile::new(g.name, nodes);
+        if let Some(t) = raw.timeout {
+            profile.timeout_secs = t;
+        }
+        // Differing keys are only a remark; every other note or a duplicate unchecks the row.
+        let selected =
+            duplicate_of.is_none() && notes.iter().all(|n| *n == ImportNote::DifferingClusterKeys);
+        candidates.push(ImportCandidate {
+            profile,
+            key: SecretString::from(first_key),
+            notes,
+            duplicate_of,
+            selected,
+        });
+    }
+    Ok(candidates)
 }
 
 /// Serializes profiles as pretty JSON `{ "schema_version", "profiles" }`. Keys are never
@@ -333,15 +342,63 @@ mod tests {
             dashboard_config("{", &[]),
             Err(ImportError::Json(_))
         ));
-        let c = dashboard_config(SAMPLE, &[]).unwrap();
-        assert!(!format!("{:?}", c[0]).contains("abc"));
+        let c = dashboard_config(&SAMPLE.replace("abc", "k-secret"), &[]).unwrap();
+        assert!(!format!("{:?}", c[0]).contains("k-secret"));
+    }
+
+    #[test]
+    fn duplicate_inside_the_file_is_unselected() {
+        let j = with_history(&[
+            r#"{"apiKey":"abc","node":{"host":"localhost","port":"8108","protocol":"http","path":""}}"#
+                .to_string(),
+        ]);
+        let c = dashboard_config(&j, &[]).unwrap();
+        assert_eq!(c.len(), 2);
+        assert!(c[0].selected && c[0].notes.is_empty());
+        assert_eq!(c[1].notes, [ImportNote::DuplicateInFile]);
+        assert!(!c[1].selected);
+    }
+
+    #[test]
+    fn protocol_is_trimmed() {
+        let j = r#"{"apiKey":"abc","node":{"host":"ts.example","protocol":" HTTPS ","tls":false}}"#;
+        let n = &dashboard_config(j, &[]).unwrap()[0].profile.nodes[0];
+        assert_eq!(n.protocol, Protocol::Https);
+        let j = r#"{"apiKey":"abc","node":{"host":"ts.example","protocol":"ftp","tls":true}}"#;
+        let n = &dashboard_config(j, &[]).unwrap()[0].profile.nodes[0];
+        assert_eq!(
+            n.protocol,
+            Protocol::Https,
+            "unknown protocol falls back to tls"
+        );
+    }
+
+    #[test]
+    fn non_string_key_is_not_echoed() {
+        for key in [
+            "123456789",
+            "true",
+            r#"{"k":"s3cr3t-value"}"#,
+            r#"["s3cr3t-value"]"#,
+        ] {
+            let top = format!(r#"{{"apiKey":{key},"node":{{"host":"a"}}}}"#);
+            let entry = format!(r#"{{"history":[{{"apiKey":{key},"node":{{"host":"a"}}}}]}}"#);
+            for j in [top, entry] {
+                let Err(ImportError::Json(e)) = dashboard_config(&j, &[]) else {
+                    panic!("{j} must fail");
+                };
+                assert!(!e.contains("123456789") && !e.contains("s3cr3t"), "{e}");
+                assert!(e.contains("apiKey"), "{e}");
+            }
+        }
     }
 
     #[test]
     fn export_has_no_keys() {
-        let c = dashboard_config(SAMPLE, &[]).unwrap();
+        // Not "abc": that can occur in the hex of the random profile id.
+        let c = dashboard_config(&SAMPLE.replace("abc", "k-secret"), &[]).unwrap();
         let out = export_profiles(&[c[0].profile.clone()]);
-        assert!(!out.contains("abc"));
+        assert!(!out.contains("k-secret"));
         assert!(out.contains("\"schema_version\": 1"));
     }
 }

@@ -29,6 +29,10 @@ pub enum Error {
     /// The base URL is not an `http` or `https` URL, or there is no node.
     #[error("invalid server URL: {0}")]
     InvalidUrl(String),
+    /// The API key holds a character that cannot be sent in an HTTP header, such as a line
+    /// break or a non-ASCII character. Never retried.
+    #[error("the API key contains a character that is not allowed in an HTTP header")]
+    InvalidKey,
     /// The connection is read-only and the request would write.
     #[error("read-only connection: {method} is not allowed")]
     ReadOnly {

@@ -87,6 +87,7 @@ impl Render for ConnectDialog {
             .any(|r| r.is_remote_http(cx));
         let fresh = self.fresh(cx);
         let busy = self.running();
+        let blocked = self.blocked(cx);
         let save_label = if matches!(self.phase, Phase::TestFailed) && fresh {
             t!("connect.save_anyway")
         } else {
@@ -214,6 +215,11 @@ impl Render for ConnectDialog {
                     .map(|o| result::render(o, !fresh, cx)),
             )
             .children(self.render_save_error(cx))
+            .children(
+                blocked
+                    .clone()
+                    .map(|text| super::error_line("connect.blocked".into(), text, cx)),
+            )
             .child(
                 h_flex()
                     .justify_end()
@@ -243,7 +249,7 @@ impl Render for ConnectDialog {
                                 self.phase,
                                 Phase::Testing { then_save: true } | Phase::Saving
                             ))
-                            .disabled(busy)
+                            .disabled(busy || blocked.is_some())
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),
             )

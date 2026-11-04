@@ -17,7 +17,7 @@ use gpui_kit::{AppContext as _, Size, WindowOptions, px};
 use rust_i18n::t;
 use secrecy::SecretString;
 use tessera_core::cli::Launch;
-use tessera_core::secrets::{KeyringStore, SecretStore};
+use tessera_core::secrets::KeyringStore;
 use tessera_core::store;
 use tracing_subscriber::EnvFilter;
 
@@ -72,8 +72,7 @@ pub fn run(launch: Launch) -> Result<(), String> {
     let loaded = store_path
         .as_deref()
         .map_or_else(|| Ok(store::ConnectionsFile::default()), store::load);
-    let secrets: Arc<dyn SecretStore> = Arc::new(KeyringStore);
-    let mut state = state::AppState::new(loaded, store_path, secrets.clone());
+    let mut state = state::AppState::new(loaded, store_path, Arc::new(KeyringStore));
     let open = state.resolve(launch)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -89,7 +88,6 @@ pub fn run(launch: Launch) -> Result<(), String> {
             handle.clone(),
         )));
         cx.set_global(runtime::Tokio(handle));
-        cx.set_global(state::SecretStoreGlobal(secrets));
         gpui_kit::init(cx);
         i18n::init();
         actions::bind_keys(cx);

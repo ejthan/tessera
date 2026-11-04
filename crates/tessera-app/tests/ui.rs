@@ -1624,6 +1624,116 @@ async fn load_error_blocks_the_import(cx: &mut TestAppContext) {
     state.read_with(cx, |s, _| assert!(s.profiles.is_empty()));
 }
 
+/// A store that only counts its writes.
+#[derive(Default)]
+struct CountingStore(AtomicUsize);
+
+impl SecretStore for CountingStore {
+    fn get(&self, _: Uuid) -> Result<Option<SecretString>, SecretError> {
+        Ok(None)
+    }
+    fn set(&self, _: Uuid, _: &SecretString) -> Result<(), SecretError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn delete(&self, _: Uuid) -> Result<(), SecretError> {
+        Ok(())
+    }
+}
+
+#[gpui_kit::test]
+async fn load_error_blocks_saving_a_connection(cx: &mut TestAppContext) {
+    let seen = recording_connector(cx, server("30.2", true));
+    let _rt = tokio(cx);
+    let store = Arc::new(CountingStore::default());
+    let (handle, state) = open_state(cx, Err(StoreError::NewerSchema(9)), store.clone());
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.key", "k", cx);
+        window.render_frame(cx);
+        assert!(label(window, "connect.blocked").contains("schema version 9"));
+        assert_eq!(window.find("connect.save").disabled(), Some(true));
+        window.press(SAVE, cx);
+        window.click("connect.save", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(seen.lock().unwrap().is_empty(), "Save does not even test");
+    assert_eq!(store.0.load(Ordering::SeqCst), 0, "nothing in the keychain");
+    state.read_with(cx, |s, _| {
+        assert!(s.profiles.is_empty());
+        assert!(s.connections.is_empty());
+    });
+    // Testing writes nothing, so it still works.
+    cx.update_window(handle.into(), |_, window, cx| window.press(TEST, cx))
+        .unwrap();
+    wait_for_label(cx, handle, "connect.result".into(), "Admin key").await;
+    assert_eq!(store.0.load(Ordering::SeqCst), 0);
+}
+
+#[gpui_kit::test]
+async fn save_anyway_closes_the_old_connection_of_an_edited_profile(cx: &mut TestAppContext) {
+    // Staging connects; the edited prod values fail their test.
+    fake_connector(cx, |p| {
+        if p.environment == Environment::Prod {
+            Err(Error::Timeout)
+        } else {
+            Ok(server("30.2", true))
+        }
+    });
+    let (staging, _, secrets) = two_profiles();
+    let (handle, state, _rt) = open_app(cx, vec![staging.clone()], secrets);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(entry(&staging), cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "status.text".into(), "staging-eu").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        focus(window, &entry(&staging), cx);
+        window.press(EDIT, cx);
+    })
+    .unwrap();
+    wait_for_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("connect.env.prod", cx);
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "connect.result".into(), "did not answer").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(window.find("connect.save").label(), Some("Save anyway"));
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_close(cx, handle).await;
+    cx.run_until_parked();
+    state.read_with(cx, |s, _| {
+        assert_eq!(s.profiles[0].environment, Environment::Prod);
+        assert!(s.profiles[0].read_only);
+        assert!(
+            s.connections.is_empty(),
+            "the old staging connection is closed"
+        );
+        assert_eq!(s.selected, None);
+    });
+    // Sidebar and window agree: the profile is prod, and no stale staging connection shows.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(format!("{}.env", entry(&staging))).label(),
+            Some("PROD")
+        );
+        assert_eq!(
+            window.find("titlebar.connection").label(),
+            Some("No connection")
+        );
+        assert_eq!(window.find("status.text").label(), Some("Not connected"));
+        assert!(window.try_find("window.prod_band").is_none());
+    })
+    .unwrap();
+}
+
 #[gpui_kit::test]
 async fn prefill_of_a_saved_profile_gets_a_new_id(cx: &mut TestAppContext) {
     fake_connector(cx, |_| Ok(server("30.2", true)));

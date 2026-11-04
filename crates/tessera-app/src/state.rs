@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::{App, AppContext as _, Context, Entity, Global, Subscription, Task};
+use gpui_kit::{App, AppContext as _, Context, Entity, Subscription, Task};
 use rust_i18n::t;
 use secrecy::{ExposeSecret as _, SecretString};
 use tessera_core::cli::Launch;
@@ -22,11 +22,6 @@ use uuid::Uuid;
 
 use crate::connection::{Connected, ConnectionState, ConnectorGlobal, client_options, error_text};
 use crate::runtime::Tokio;
-
-/// The secret store dialogs use. The app installs `KeyringStore`; tests install a `MemoryStore`.
-pub struct SecretStoreGlobal(pub Arc<dyn SecretStore>);
-
-impl Global for SecretStoreGlobal {}
 
 /// Why saving a profile failed. Neither variant holds the key.
 #[derive(Debug)]

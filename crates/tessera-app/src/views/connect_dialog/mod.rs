@@ -337,6 +337,13 @@ impl ConnectDialog {
         result.ok()
     }
 
+    /// The note shown while `connections.json` could not be loaded. Nothing would be written
+    /// then, so saving is blocked and no key goes to the keychain.
+    fn blocked(&self, cx: &App) -> Option<SharedString> {
+        let error = self.state.read(cx).load_error.as_ref()?;
+        Some(t!("connect.blocked", error = error).to_string().into())
+    }
+
     /// Whether the last test ran for the current values.
     fn fresh(&self, cx: &App) -> bool {
         let Some(outcome) = &self.outcome else {
@@ -356,7 +363,7 @@ impl ConnectDialog {
 
     /// Saves: reuses a test of the current values, else tests first.
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.running() {
+        if self.running() || self.blocked(cx).is_some() {
             return;
         }
         let Some((profile, typed)) = self.form(cx) else {
@@ -544,7 +551,8 @@ impl ConnectDialog {
         }));
     }
 
-    /// Shows the tested connection (no second probe round) and closes.
+    /// Shows the tested connection (no second probe round), or after "Save anyway" closes the
+    /// profile's open connection, and closes the dialog.
     fn finish(
         &mut self,
         profile: Profile,
@@ -553,14 +561,17 @@ impl ConnectDialog {
         cx: &mut Context<Self>,
     ) {
         self.phase = Phase::Idle;
-        if let Then::Connect(connected) = then {
-            let id = profile.id;
-            self.state.update(cx, |s, cx| {
+        let id = profile.id;
+        self.state.update(cx, |s, cx| match then {
+            Then::Connect(connected) => {
                 s.add_connected(profile, *connected, cx);
                 s.last_used = Some(id);
                 s.save(cx).detach();
-            });
-        }
+            }
+            // The new values failed their test, so an open connection with the old profile
+            // and client must not stay: the title bar and the read-only guard read it.
+            Then::Close => s.disconnect(id, cx),
+        });
         window.close_dialog(cx);
     }
 

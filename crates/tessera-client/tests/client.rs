@@ -613,6 +613,28 @@ async fn no_failover_on_http_500() {
 }
 
 #[tokio::test]
+async fn key_that_is_no_header_value_fails_once_without_the_key() {
+    let (a, b) = (MockServer::start().await, MockServer::start().await);
+    mock(&a, "/health", 200, r#"{"ok":true}"#).await;
+    mock(&b, "/health", 200, r#"{"ok":true}"#).await;
+    let (hook, events) = recorder();
+    let client = Client::new(
+        &[&a.uri(), &b.uri()],
+        SecretString::from("pasted-secret\n"),
+        ClientOptions::default(),
+    )
+    .unwrap()
+    .with_hook(hook);
+    let err = client.health().await.unwrap_err();
+    assert!(matches!(err, Error::InvalidKey), "{err:?}");
+    assert!(!err.to_string().contains("pasted-secret"), "{err}");
+    assert!(!format!("{err:?}").contains("pasted-secret"));
+    assert_eq!(a.received_requests().await.unwrap().len(), 0);
+    assert_eq!(b.received_requests().await.unwrap().len(), 0);
+    assert!(events.lock().unwrap().is_empty(), "no failover attempts");
+}
+
+#[tokio::test]
 async fn retries_bound_attempts() {
     let options = ClientOptions {
         retries: 1,

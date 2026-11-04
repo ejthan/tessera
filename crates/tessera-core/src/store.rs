@@ -2,6 +2,7 @@
 
 //! Persistence of connection profiles in `connections.json`. Keys never end up here.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
@@ -91,7 +92,8 @@ pub fn load(path: &Path) -> Result<ConnectionsFile, StoreError> {
     serde_json::from_value(value).map_err(parse_err)
 }
 
-/// Writes `file` as pretty JSON via a temporary file and a rename, creating parent directories.
+/// Writes `file` as pretty JSON via a synced temporary file and a rename, creating parent
+/// directories.
 pub fn save(path: &Path, file: &ConnectionsFile) -> Result<(), StoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -101,7 +103,10 @@ pub fn save(path: &Path, file: &ConnectionsFile) -> Result<(), StoreError> {
         message: e.to_string(),
     })?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
+    // Synced before the rename, so a power loss cannot leave an empty file in its place.
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(json.as_bytes())?;
+    f.sync_all()?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
