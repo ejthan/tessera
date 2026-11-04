@@ -538,11 +538,11 @@ async fn space_pauses_polling(cx: &mut TestAppContext) {
     assert_eq!(text(cx, handle, "overview.pause"), "Resume");
     assert_eq!(text(cx, handle, "overview.live"), "Paused");
     assert!(conn.read_with(cx, |c, _| c.paused));
+    press_on(cx, handle, "node.1", "space");
     let active = conn.read_with(cx, |c, _| {
         c.connected.as_ref().unwrap().client.active_node()
     });
     assert_eq!(active, 0, "Space does not also click the focused card");
-    press_on(cx, handle, "node.0", "space");
     assert_eq!(text(cx, handle, "overview.pause"), "Pause");
 }
 
@@ -566,4 +566,85 @@ async fn status_bar_counts_unreachable_nodes(cx: &mut TestAppContext) {
         text(cx, handle, "status.unreachable"),
         "1 of 3 nodes unreachable"
     );
+}
+
+/// Draws a frame the way the platform does, reusing cached views, and returns the label of
+/// node 2's retry line.
+fn draw(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> String {
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+        window
+            .try_find("node.2.retry")
+            .and_then(|e| e.label().map(String::from))
+            .unwrap_or_default()
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+async fn countdown_tick_does_not_rebuild_charts(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    fake_poll(cx, sample_for);
+    let (handle, _conn, _rt) = cluster(cx).await;
+    let builds = tessera_app::views::metric_chart::builds;
+    draw(cx, handle);
+    let before = builds();
+    advance(cx, Duration::from_secs(1));
+    assert_eq!(draw(cx, handle), "retry in 4 s", "the cards were redrawn");
+    assert_eq!(builds(), before, "a countdown tick keeps the chart points");
+    // Samples of the other nodes at 5 s do not either; the active node's does.
+    advance(cx, Duration::from_secs(4));
+    draw(cx, handle);
+    assert_eq!(builds(), before + 1);
+}
+
+#[gpui_kit::test]
+async fn countdown_shows_retrying_and_paused(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    let calls = Arc::new(Mutex::new(0));
+    fake_poll_async(cx, move |node| {
+        if node.url().host_str() != Some("n2") {
+            return Box::pin(async { ok_sample() });
+        }
+        let mut calls = calls.lock().unwrap();
+        *calls += 1;
+        // Down at once, then the retry hangs.
+        if *calls == 1 {
+            Box::pin(async { down() })
+        } else {
+            Box::pin(std::future::pending())
+        }
+    });
+    let (handle, conn, _rt) = cluster(cx).await;
+    advance(cx, Duration::from_secs(6));
+    assert_eq!(text(cx, handle, "node.2.retry"), "retrying…");
+    conn.update(cx, |c, cx| c.set_paused(true, cx));
+    cx.run_until_parked();
+    assert_eq!(text(cx, handle, "node.2.retry"), "Paused");
+}
+
+#[gpui_kit::test]
+async fn down_active_node_shows_sample_age(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    let calls = Arc::new(Mutex::new(0));
+    fake_poll(cx, move |node| {
+        if node.url().host_str() != Some("n0") {
+            return ok_sample();
+        }
+        let mut calls = calls.lock().unwrap();
+        *calls += 1;
+        if *calls == 1 { ok_sample() } else { down() }
+    });
+    let (handle, _conn, _rt) = cluster(cx).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("overview.last_sample").is_none());
+    })
+    .unwrap();
+    advance(cx, TICK);
+    let age = text(cx, handle, "overview.last_sample");
+    assert!(age.contains("last sample, 5 s ago"), "{age}");
+    assert_eq!(text(cx, handle, "figure.cpu"), "12.5 %", "kept, dimmed");
+    advance(cx, Duration::from_secs(2));
+    assert!(text(cx, handle, "overview.last_sample").contains("7 s ago"));
 }

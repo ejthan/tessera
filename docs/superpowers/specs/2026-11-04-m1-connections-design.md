@@ -325,14 +325,15 @@ A file dialog, then a dialog listing the candidates:
 
 - **Header:** "Live · every 5 s" with Pause/Resume (Space, shown on the button) and an interval menu (2, 5, 10, 30 s). The interval is kept for the session.
 - **Node cards** side by side:
-  - Each card shows name, `host:port`, role (leader highlighted), latency, and "active node" on the active one.
-  - An unreachable node's card is red, with the full error text and "retry in N s".
+  - Each card is titled "Node N" (`Node` has no name field) and shows `host:port`, role (leader highlighted), latency, and "active node" on the active one.
+  - An unreachable node's card is red, with the full error text and "retry in N s"; "retrying…" while the retry runs, "Paused" while polling is paused.
+  - While the active node is down, the key figures and charts keep its last sample, dimmed, with "last sample N s ago" (D17).
   - Click or Enter on a card makes that node active.
   - A single-node profile shows one card; there is no special case.
 - **Key figures:**
   - Version, collections, documents and Typesense memory (`typesense_memory_active_bytes`)
   - CPU, system memory, disk and network rx · tx
-- **Charts:** four line charts (GPUI Kit `LineChart`) for CPU, memory, disk and network with 15 minutes of the active node's history. Switching the active node switches the curves; history is kept per node.
+- **Charts:** four charts with 15 minutes of the active node's history: GPUI Kit `LineChart` for CPU, memory and disk, and `AreaChart` without fill for network rx · tx (`LineChart` draws one series only). Switching the active node switches the curves; history is kept per node.
 - **API stats:** a table of endpoint, requests per second and average latency from the active node's `/stats.json`, sorted by clicking a header (Enter on a focused header). An empty `latency_ms` (a fresh server) shows a sentence explaining that the table fills once the server receives requests.
 - **Old servers:** the warning banner below 30.0 from M0 stays.
 
@@ -425,5 +426,5 @@ Recorded in `docs/spec.md` together with this design:
 | `keyring` plus `jiff` push the Linux binary over 40 MB (NF5) | Build job fails | Use GPUI's own credential API (`cx.read_credentials` …) behind the same `SecretStore` trait (its Linux items carry the label `zed-github-account`); format log times with `std` in UTC |
 | Secret Service missing or locked on Linux desktops | Saving a profile fails | "Use for this session only" (§7.4); the error names the missing service |
 | `DockArea` in 0.9.0 does not support a panel the way the canvas shows it (bottom dock with its own split) | PR B slower | The detail view becomes a resizable split inside the panel's own view; the plan starts PR B with a dock spike |
-| `LineChart` redraw cost with four charts × 180 points every tick | Idle CPU above NF6 | Redraw only on new data; drop to one combined chart if needed |
+| Chart redraw cost with four charts (`LineChart` for CPU, memory, disk; `AreaChart` without fill for network rx · tx) × 180 points every tick | Idle CPU above NF6 | Points rebuilt only on new samples and shared with each render; plots reuse their tessellated paths. GPUI 0.3.11 re-renders the charts with every redraw of the tab, so drop to one combined chart if NF6 fails |
 | Failover hides a dead node from the user | Confusing state | The log shows every attempt; the status bar and node cards show unreachable nodes |

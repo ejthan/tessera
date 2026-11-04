@@ -12,19 +12,19 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FocusHandle, FontWeight, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, FocusHandle, FontWeight, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Subscription, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
 use tessera_client::{Metrics, RaftState};
 use tessera_core::metrics::{MetricsHistory, Series};
 
-use super::metric_chart::{self, ChartData};
-use super::node_card::{self, Card};
+use super::metric_chart::{self, Charts};
+use super::node_card::NodeCards;
 use super::request_detail::size;
 use super::stats_table::{self, Empty, Sort};
 use crate::actions::{OVERVIEW, Refresh, TogglePolling};
-use crate::connection::{ConnectionState, host_label};
+use crate::connection::ConnectionState;
 
 /// Intervals the header offers, in seconds.
 const INTERVALS: [u64; 4] = [2, 5, 10, 30];
@@ -42,63 +42,30 @@ pub fn role_text(state: RaftState) -> String {
 /// The overview of one connection, inside its tab.
 pub struct Overview {
     connection: Entity<ConnectionState>,
-    /// One per node card, so Tab and Enter reach them.
-    cards: Vec<FocusHandle>,
+    cards: Entity<NodeCards>,
+    charts: Entity<Charts>,
     /// The stats headers: endpoint, rps, latency.
     headers: [FocusHandle; 3],
     sort: Sort,
-    /// Chart points of (active node, history revision); rebuilt only when either changes.
-    charts: Option<((usize, u64), ChartData)>,
-    /// A task redraws the retry countdowns once a second.
-    counting_down: bool,
     _subscription: Subscription,
 }
 
 impl Overview {
     /// The overview of `connection`, redrawn whenever it changes.
-    pub fn new(connection: Entity<ConnectionState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        connection: Entity<ConnectionState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let tab_stop = |cx: &mut Context<Self>| cx.focus_handle().tab_stop(true);
         Self {
-            _subscription: cx.observe(&connection, |this, _, cx| {
-                this.count_down(cx);
-                cx.notify();
-            }),
+            _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
+            cards: cx.new(|cx| NodeCards::new(connection.clone(), window, cx)),
+            charts: cx.new(|cx| Charts::new(connection.clone(), cx)),
             connection,
-            cards: Vec::new(),
             headers: [tab_stop(cx), tab_stop(cx), tab_stop(cx)],
             sort: Sort::default(),
-            charts: None,
-            counting_down: false,
         }
-    }
-
-    /// Whether a node waits for its retry while polling runs.
-    fn waiting_for_retry(&self, cx: &App) -> bool {
-        let conn = self.connection.read(cx);
-        !conn.paused && conn.nodes.iter().any(|n| n.next_retry.is_some())
-    }
-
-    /// Redraws once a second while a node waits for its retry, so the countdown moves.
-    fn count_down(&mut self, cx: &mut Context<Self>) {
-        if self.counting_down || !self.waiting_for_retry(cx) {
-            return;
-        }
-        self.counting_down = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                let more = this.update(cx, |this, cx| {
-                    let more = this.waiting_for_retry(cx);
-                    this.counting_down = more;
-                    cx.notify();
-                    more
-                });
-                if !matches!(more, Ok(true)) {
-                    return;
-                }
-            }
-        })
-        .detach();
     }
 
     fn header(&self, conn: &ConnectionState, window: &Window) -> AnyElement {
@@ -218,9 +185,6 @@ fn network(last: Option<&Metrics>, history: Option<&MetricsHistory>) -> String {
 
 impl Render for Overview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let count = self.connection.read(cx).nodes.len();
-        self.cards
-            .resize_with(count, || cx.focus_handle().tab_stop(true));
         let conn = self.connection.read(cx);
         let Some(connected) = &conn.connected else {
             return div().into_any_element();
@@ -229,34 +193,11 @@ impl Render for Overview {
         let info = &connected.info;
         let active = connected.client.active_node();
         let history = conn.history.get(active);
-        let key = (active, history.map_or(0, MetricsHistory::revision));
-        if self.charts.as_ref().map(|(k, _)| *k) != Some(key) {
-            self.charts = Some((key, history.map(ChartData::new).unwrap_or_default()));
-        }
-        let now = cx.background_executor().now();
-        let cards = connected
-            .client
-            .nodes()
-            .iter()
-            .zip(&conn.nodes)
-            .zip(&self.cards)
-            .enumerate()
-            .map(|(index, ((url, status), focus))| {
-                let connection = self.connection.clone();
-                node_card::render(
-                    Card {
-                        index,
-                        host: host_label(url.as_str()),
-                        status,
-                        active: index == active,
-                        now,
-                    },
-                    focus,
-                    move |cx| connection.update(cx, |c, cx| c.set_active_node(index, cx)),
-                    window,
-                    cx,
-                )
-            });
+        // The active node is down: the figures are its last sample.
+        let stale = conn
+            .nodes
+            .get(active)
+            .is_some_and(|n| n.next_retry.is_some());
 
         let last = history.and_then(MetricsHistory::last);
         let version = conn
@@ -365,12 +306,6 @@ impl Render for Overview {
                 .ok();
             })
         };
-        let charts = self
-            .charts
-            .as_ref()
-            .map(|(_, data)| metric_chart::render(data, cx))
-            .unwrap_or_default();
-
         v_flex()
             .id("overview")
             .test_support()
@@ -396,10 +331,16 @@ impl Render for Overview {
                         .child(text),
                 )
             })
-            .child(h_flex().flex_wrap().gap_3().children(cards))
-            .child(h_flex().flex_wrap().gap_3().children(figures))
+            .child(self.cards.clone())
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .when(stale, |el| el.opacity(0.5))
+                    .children(figures),
+            )
             .children(collections_error)
-            .child(h_flex().flex_wrap().gap_3().children(charts))
+            .child(Charts::cached_element(self.charts.clone()))
             .child(
                 v_flex()
                     .gap_2()

@@ -116,7 +116,7 @@ impl OverviewPanel {
         Self {
             _poller: Poller::start(connection.clone(), window, cx),
             _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
-            overview: cx.new(|cx| Overview::new(connection.clone(), cx)),
+            overview: cx.new(|cx| Overview::new(connection.clone(), window, cx)),
             connection,
             focus_handle: cx.focus_handle(),
         }

@@ -94,6 +94,11 @@ impl MetricsHistory {
         self.revision += 1;
     }
 
+    /// When the newest sample still in the window was taken.
+    pub fn newest_at(&self) -> Option<Instant> {
+        self.samples.back().map(|s| s.at)
+    }
+
     /// Changes with every push, so a chart can rebuild only when the history changed.
     pub fn revision(&self) -> u64 {
         self.revision
@@ -150,6 +155,7 @@ mod tests {
         }
         let ages: Vec<_> = h.points(Series::Cpu).map(|(a, _)| a).collect();
         assert_eq!(ages, vec![S5 * 2, S5, Duration::ZERO]);
+        assert_eq!(h.newest_at(), Some(t0 + S5 * 3));
     }
 
     #[test]

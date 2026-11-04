@@ -2,20 +2,125 @@
 
 //! The overview's metric charts: CPU, memory and disk in percent, network rx · tx.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::chart::{AreaChart, LineChart};
-use gpui_kit::component::{ActiveTheme as _, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, IntoElement, ParentElement as _, SharedString, Styled as _, div, prelude::*,
-    px, transparent_black,
+    AnyElement, App, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
+    StyleRefinement, Styled as _, Subscription, Window, div, prelude::*, px, transparent_black,
 };
 use rust_i18n::t;
 use tessera_core::metrics::{MetricsHistory, Series};
 
 use super::request_detail::size;
+use crate::connection::ConnectionState;
+
+/// Height of one chart box.
+const FRAME_HEIGHT: f32 = 170.;
+/// Space between the chart boxes.
+const GAP: f32 = 12.;
+
+thread_local! {
+    static BUILDS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How often chart points were built on this thread. Tests use it to check that charts
+/// change only with new samples (spec §14).
+#[doc(hidden)]
+pub fn builds() -> usize {
+    BUILDS.with(Cell::get)
+}
+
+/// What the charts show: active node, its history revision, and whether it is down.
+type Key = (usize, u64, bool);
+
+/// The four charts of the active node, as their own view. Its points are rebuilt, and it is
+/// notified, only when the active node, its history or its reachability changes. It is
+/// embedded with [`Charts::cached_element`], but GPUI 0.3.11 re-renders a cached view whose
+/// cached ancestor re-renders (`view.rs` `prepaint_view` sets `refreshing`), and the dock
+/// caches the whole tab, so a redraw of the tab (countdown, hover) still renders the charts.
+/// That render only shares the built points (`Rc`), and the plots reuse their tessellated
+/// paths while the points are unchanged.
+pub struct Charts {
+    connection: Entity<ConnectionState>,
+    key: Option<Key>,
+    data: ChartData,
+    _subscription: Subscription,
+}
+
+impl Charts {
+    /// The charts of `connection`'s active node.
+    pub fn new(connection: Entity<ConnectionState>, cx: &mut Context<Self>) -> Self {
+        let mut this = Self {
+            _subscription: cx.observe(&connection, |this, _, cx| {
+                if this.update_data(cx) {
+                    cx.notify();
+                }
+            }),
+            connection,
+            key: None,
+            data: ChartData::default(),
+        };
+        this.update_data(cx);
+        this
+    }
+
+    /// Rebuilds the points when the key changed; returns whether it did.
+    fn update_data(&mut self, cx: &App) -> bool {
+        let conn = self.connection.read(cx);
+        let Some(connected) = &conn.connected else {
+            return false;
+        };
+        let active = connected.client.active_node();
+        let history = conn.history.get(active);
+        let down = conn
+            .nodes
+            .get(active)
+            .is_some_and(|n| n.next_retry.is_some());
+        let key = (active, history.map_or(0, MetricsHistory::revision), down);
+        if self.key == Some(key) {
+            return false;
+        }
+        self.key = Some(key);
+        BUILDS.with(|b| b.set(b.get() + 1));
+        self.data = history.map(ChartData::new).unwrap_or_default();
+        true
+    }
+
+    /// `charts` as a cached element of a fixed size: two rows of two boxes.
+    pub fn cached_element(charts: Entity<Self>) -> impl IntoElement {
+        charts.cached(
+            StyleRefinement::default()
+                .w_full()
+                .h(px(2. * FRAME_HEIGHT + GAP)),
+        )
+    }
+}
+
+impl Render for Charts {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let down = self.key.is_some_and(|(_, _, down)| down);
+        let mut frames = frames(&self.data, cx).into_iter();
+        let mut row = || {
+            h_flex()
+                .gap(px(GAP))
+                .children(frames.next())
+                .children(frames.next())
+        };
+        v_flex()
+            .size_full()
+            .gap(px(GAP))
+            // The active node is down: these are its last samples.
+            .when(down, |el| el.opacity(0.5))
+            .child(row())
+            .child(row())
+    }
+}
 
 /// One point: x label (age) and value.
 pub type Point = (SharedString, f64);
@@ -25,10 +130,10 @@ pub type NetPoint = (SharedString, f64, f64);
 /// The points of one node's four charts.
 #[derive(Default)]
 pub struct ChartData {
-    cpu: Vec<Point>,
-    memory: Vec<Point>,
-    disk: Vec<Point>,
-    network: Vec<NetPoint>,
+    cpu: Rc<[Point]>,
+    memory: Rc<[Point]>,
+    disk: Rc<[Point]>,
+    network: Rc<[NetPoint]>,
 }
 
 impl ChartData {
@@ -85,14 +190,16 @@ pub fn network_text(rx: f64, tx: f64) -> String {
 }
 
 /// The four charts, labeled with their title and newest value for assistive technology.
-pub fn render(data: &ChartData, cx: &App) -> Vec<AnyElement> {
+fn frames(data: &ChartData, cx: &App) -> Vec<AnyElement> {
     let theme = cx.theme();
-    let percent = |id: &'static str, title: String, points: &[Point], color| {
+    // Each render hands the plots indexes into the shared points, not copies of them.
+    let percent = |id: &'static str, title: String, points: &Rc<[Point]>, color| {
         let latest = points.last().map(|(_, v)| percent_text(*v));
-        let chart = LineChart::new(points.iter().cloned())
+        let (xs, ys) = (points.clone(), points.clone());
+        let chart = LineChart::new(0..points.len())
             .id(SharedString::from(format!("{id}.plot")))
-            .x(|(x, _)| x.clone())
-            .y(|(_, y)| *y)
+            .x(move |i| xs[*i].0.clone())
+            .y(move |i| ys[*i].1)
             .y_domain(0., 100.)
             .stroke(color)
             .linear()
@@ -107,14 +214,19 @@ pub fn render(data: &ChartData, cx: &App) -> Vec<AnyElement> {
         .last()
         .map(|(_, rx, tx)| network_text(*rx, *tx));
     // LineChart draws one series; AreaChart draws several on shared axes, here without fill.
-    let network = AreaChart::new(data.network.iter().cloned())
+    let (xs, rx, tx) = (
+        data.network.clone(),
+        data.network.clone(),
+        data.network.clone(),
+    );
+    let network = AreaChart::new(0..data.network.len())
         .id("chart.network.plot")
-        .x(|(x, _, _)| x.clone())
-        .y(|(_, rx, _)| *rx)
+        .x(move |i| xs[*i].0.clone())
+        .y(move |i| rx[*i].1)
         .stroke(theme.chart_1)
         .fill(transparent_black())
         .name(t!("chart.rx").to_string())
-        .y(|(_, _, tx)| *tx)
+        .y(move |i| tx[*i].2)
         .stroke(theme.chart_3)
         .fill(transparent_black())
         .name(t!("chart.tx").to_string())
@@ -165,8 +277,8 @@ fn frame(
         None => format!("{title} · {}", t!("chart.no_data")),
     };
     v_flex()
-        .min_w(px(240.))
         .flex_1()
+        .h(px(FRAME_HEIGHT))
         .gap_1()
         .p_3()
         .border_1()
