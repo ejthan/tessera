@@ -7,13 +7,14 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
 use secrecy::SecretString;
 use tessera_app::connection::{ConnectorGlobal, tokio_connector};
+use tessera_app::runtime::Tokio;
 use tessera_app::state::AppState;
 use tessera_client::{Body, Method, Origin, RequestEvent};
 use tessera_core::log::{Filter, LogEntry};
@@ -23,6 +24,27 @@ use tessera_core::store::ConnectionsFile;
 use uuid::Uuid;
 
 use common::*;
+
+/// A `tracing` writer into a shared buffer.
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 fn event(id: u64, method: Method, path: &str, status: Option<u16>, origin: Origin) -> RequestEvent {
     RequestEvent {
@@ -320,7 +342,30 @@ async fn full_secret_session_scan(cx: &mut TestAppContext) {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const KEY: &str = "sk-live-test-1234";
-    let rt = tokio(cx);
+    // Everything traced at any level, on this thread and on the runtime's threads.
+    let traced = Capture::default();
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer({
+                let traced = traced.clone();
+                move || traced.clone()
+            })
+            .finish(),
+    );
+    let _trace_guard = tracing::dispatcher::set_default(&dispatch);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .on_thread_start(move || {
+            // The guard would end the capture when dropped; the threads end with the runtime.
+            std::mem::forget(tracing::dispatcher::set_default(&dispatch));
+        })
+        .build()
+        .unwrap();
+    cx.update(|cx| cx.set_global(Tokio(rt.handle().clone())));
+    cx.executor().allow_parking();
     let server = rt.block_on(async {
         let server = MockServer::start().await;
         for (route, status, body) in [
@@ -389,40 +434,65 @@ async fn full_secret_session_scan(cx: &mut TestAppContext) {
     })
     .await;
 
-    let (debug, first) = state.read_with(cx, |s, _| {
+    let (debug, entries) = state.read_with(cx, |s, _| {
         let entries = s.log().entries(&Filter {
             show_polling: true,
             ..Default::default()
         });
-        (format!("{entries:?}"), entries[0].event.id)
+        let ids = entries.iter().map(|e| (e.event.id, e.event.path.clone()));
+        (format!("{entries:?}"), ids.collect::<Vec<_>>())
     });
     assert!(!debug.contains(KEY), "key in log entries");
     assert!(debug.contains("sk-l"), "the redacted prefix is kept");
 
-    wait_for_element(cx, handle, row(first), true).await;
     cx.update_window(handle.into(), |_, window, cx| {
-        window.click(row(first), cx);
+        window.click("log.filter.polling", cx)
     })
     .unwrap();
-    cx.update_window(handle.into(), |_, window, cx| window.press(COPY_CURL, cx))
-        .unwrap();
-    let clip = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
-    assert!(clip.contains("$TYPESENSE_API_KEY"), "{clip}");
-    assert!(!clip.contains(KEY), "key on the clipboard");
+    for (id, path) in entries {
+        wait_for_element(cx, handle, row(id), true).await;
+        assert!(!row_label(cx, handle, id).contains(KEY), "key in row {id}");
+        cx.update_window(handle.into(), |_, window, cx| window.click(row(id), cx))
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.press(COPY_CURL, cx))
+            .unwrap();
+        let clip = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
+        assert!(
+            clip.contains("$TYPESENSE_API_KEY") && clip.contains(&path),
+            "{clip}"
+        );
+        assert!(!clip.contains(KEY), "key on the clipboard");
+        let request_line = format!("GET http://{addr}{path}");
+        cx.wait_for(
+            handle.into(),
+            Duration::from_millis(1000),
+            move |window, _| {
+                window
+                    .try_find("log.detail")
+                    .and_then(|d| d.label().map(|l| l.contains(&request_line)))
+                    .unwrap_or(false)
+            },
+        )
+        .await;
+        let detail = cx
+            .update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                window
+                    .find("log.detail")
+                    .label()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .unwrap();
+        assert!(!detail.contains(KEY), "key in the detail of {path}");
+    }
 
-    wait_for_label(cx, handle, "log.detail".into(), "Headers").await;
-    let detail = cx
-        .update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            window
-                .find("log.detail")
-                .label()
-                .unwrap_or_default()
-                .to_string()
-        })
-        .unwrap();
-    assert!(!detail.contains(KEY), "key in the detail");
-
+    let traced = traced.text();
+    assert!(
+        traced.contains("/debug"),
+        "the capture saw the client: {traced}"
+    );
+    assert!(!traced.contains(KEY), "key in tracing output");
     let saved = std::fs::read_to_string(&file_path).unwrap();
     assert!(!saved.contains(KEY), "key in connections.json");
 }
@@ -440,4 +510,51 @@ fn copy_as_curl_shows_its_shortcut(cx: &mut TestAppContext) {
         .debug_bounds(key("kbd:cmd-shift-c", "kbd:ctrl-shift-c"))
         .expect("a Kbd for the shortcut is drawn");
     assert!(button.contains(&kbd.center()), "{kbd:?} not in {button:?}");
+}
+
+#[gpui_kit::test]
+async fn query_key_is_masked_in_row(cx: &mut TestAppContext) {
+    let (handle, state, _rt) = open_log(cx);
+    let mut e = event(8, Method::GET, "/health", Some(200), Origin::User);
+    e.query = Some("x-typesense-api-key=sk-query".into());
+    send(cx, &state, vec![entry(e)]);
+    wait_for_element(cx, handle, row(8), true).await;
+    let label = row_label(cx, handle, 8);
+    assert!(
+        label.contains("/health?x-typesense-api-key=••••"),
+        "{label}"
+    );
+    assert!(!label.contains("sk-query"), "{label}");
+}
+
+#[gpui_kit::test]
+async fn copy_as_curl_does_nothing_while_the_log_is_hidden(cx: &mut TestAppContext) {
+    let (handle, state, _rt) = open_log(cx);
+    send(
+        cx,
+        &state,
+        vec![entry(event(
+            9,
+            Method::GET,
+            "/health",
+            Some(200),
+            Origin::User,
+        ))],
+    );
+    wait_for_element(cx, handle, row(9), true).await;
+    cx.update_window(handle.into(), |_, window, cx| window.click(row(9), cx))
+        .unwrap();
+    toggle_log(cx, handle);
+    wait_for_element(cx, handle, "dock.bottom".into(), false).await;
+    cx.update_window(handle.into(), |_, window, cx| window.press(COPY_CURL, cx))
+        .unwrap();
+    assert!(cx.read_from_clipboard().is_none());
+    toggle_log(cx, handle);
+    wait_for_element(cx, handle, "dock.bottom".into(), true).await;
+    cx.update_window(handle.into(), |_, window, cx| window.press(COPY_CURL, cx))
+        .unwrap();
+    assert!(
+        cx.read_from_clipboard().is_some(),
+        "the selection survives hiding"
+    );
 }

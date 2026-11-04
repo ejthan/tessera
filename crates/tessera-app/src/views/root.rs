@@ -8,8 +8,9 @@ use gpui_kit::component::dock::{
 };
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Theme, TitleBar, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, div, prelude::*, px, rgb,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, prelude::*,
+    px, rgb,
 };
 use rust_i18n::t;
 
@@ -327,12 +328,20 @@ impl Render for RootView {
                 ConnectDialog::open_new(this.state.clone(), None, window, cx);
             }))
             .on_action(cx.listener(|this, _: &CopyAsCurl, _, cx| {
-                this.log.update(cx, |log, cx| log.copy_as_curl(cx));
+                // A hidden log has no visible selection to copy.
+                if this.dock.read(cx).is_dock_open(DockPlacement::Bottom) {
+                    this.log.update(cx, |log, cx| log.copy_as_curl(cx));
+                }
             }))
             .on_action(cx.listener(|this, _: &ToggleRequestLog, window, cx| {
+                // Focus inside the hidden log would leave no element to receive ⌘J again.
+                let had_focus = this.log.focus_handle(cx).contains_focused(window, cx);
                 this.dock.update(cx, |area, cx| {
                     area.toggle_dock(DockPlacement::Bottom, window, cx);
                 });
+                if had_focus {
+                    this.focus_handle.focus(window, cx);
+                }
             }))
             .bg(theme.background)
             .text_color(theme.foreground)

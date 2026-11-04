@@ -32,7 +32,7 @@ impl LogEntry {
 }
 
 /// Which entries [`RequestLog::entries`] returns. The default shows everything except polling.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Filter {
     /// Only failed requests. Overrides `show_polling`: failed polling requests are included.
     pub errors_only: bool,
@@ -107,6 +107,22 @@ impl RequestLog {
         out
     }
 
+    /// Number of entries in both buffers.
+    pub fn len(&self) -> usize {
+        self.user.len() + self.polling.len()
+    }
+
+    /// Whether the log holds no entry.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The highest event id in the log. With [`Self::len`] it tells whether the log changed.
+    pub fn last_id(&self) -> Option<u64> {
+        let last = |buf: &VecDeque<LogEntry>| buf.back().map(|e| e.event.id);
+        last(&self.user).max(last(&self.polling))
+    }
+
     /// The entry with this event id, if it is still in the log.
     pub fn get(&self, id: u64) -> Option<&LogEntry> {
         self.user
@@ -178,6 +194,10 @@ pub(crate) mod tests {
         assert_eq!(ids(&log, &Filter::default()), [3, 4, 5]);
         assert!(log.get(2).is_none());
         assert!(log.get(3).is_some());
+        // Eviction keeps the length, so the last id tells that the log changed.
+        assert_eq!((log.len(), log.last_id()), (3, Some(5)));
+        log.push(entry(6, Method::GET, Origin::Polling, Some(200)));
+        assert_eq!((log.len(), log.last_id()), (4, Some(6)));
     }
 
     #[test]

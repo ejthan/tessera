@@ -26,6 +26,21 @@ pub fn key(prefix: &str) -> String {
     format!("{prefix}{MASK}")
 }
 
+/// A query string with the value of an `x-typesense-api-key` parameter (any case) masked.
+/// Typesense accepts the key as a query parameter too.
+pub fn query(query: &str) -> String {
+    query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name, _)) if name.eq_ignore_ascii_case(KEY_PARAM) => format!("{name}={MASK}"),
+            _ => pair.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+const KEY_PARAM: &str = "x-typesense-api-key";
+
 fn mask_value(v: &mut Value) {
     match v {
         Value::Object(map) => {
@@ -106,6 +121,15 @@ mod tests {
         let out = json(r#"{"a":{"api_key":"sk"},"keys":[{"value":"abc"}]}"#);
         assert!(!out.contains("sk\"") && !out.contains("abc"));
         assert_eq!(out.matches(MASK).count(), 2);
+    }
+
+    #[test]
+    fn query_masks_the_key_parameter_in_any_case() {
+        assert_eq!(
+            query("q=dune&X-TYPESENSE-API-KEY=sk-live&x-typesense-api-key=s2&k=v"),
+            "q=dune&X-TYPESENSE-API-KEY=••••&x-typesense-api-key=••••&k=v"
+        );
+        assert_eq!(query("q=a=b&flag"), "q=a=b&flag");
     }
 
     #[test]

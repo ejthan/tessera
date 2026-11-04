@@ -11,6 +11,8 @@ use tessera_client::Body;
 use tessera_core::log::LogEntry;
 use tessera_core::redact;
 
+use super::request_log::path_and_query;
+
 /// The display text of an entry, built once per selection: redacting and pretty-printing a
 /// 1 MiB body takes too long for every frame.
 pub struct Detail {
@@ -26,9 +28,12 @@ impl Detail {
     /// [`redact::key`].
     pub fn new(entry: &LogEntry) -> Self {
         let e = &entry.event;
-        let mut url = e.node.clone();
-        url.set_path(&e.path);
-        url.set_query(e.query.as_deref());
+        // Built as text: `Url` would percent-encode the mask in the query.
+        let url = format!(
+            "{}{}",
+            e.node.origin().ascii_serialization(),
+            path_and_query(&e.path, e.query.as_deref())
+        );
         let mut sections = vec![(t!("log.detail.request"), format!("{} {url}", e.method))];
         let outcome = match (e.status, &e.error) {
             (Some(status), _) => t!(
@@ -159,7 +164,7 @@ mod tests {
                 node: "http://localhost:8108".parse().expect("url"),
                 method: Method::POST,
                 path: "/keys".into(),
-                query: Some("a=1".into()),
+                query: Some("a=1&x-typesense-api-key=sk-query".into()),
                 request_headers: vec![("Content-Type".into(), "application/json".into())],
                 key_prefix: String::new(),
                 request_body: Some(Body {
@@ -175,10 +180,13 @@ mod tests {
             },
         };
         let d = Detail::new(&entry);
-        assert!(d.label.contains("POST http://localhost:8108/keys?a=1"));
+        assert!(
+            d.label
+                .contains("POST http://localhost:8108/keys?a=1&x-typesense-api-key=••••")
+        );
         assert!(d.label.contains("X-TYPESENSE-API-KEY: ••••\n"));
         assert!(d.label.contains("Content-Type: application/json"));
         assert!(d.label.contains("connection refused"));
-        assert!(!d.label.contains("secret"));
+        assert!(!d.label.contains("secret") && !d.label.contains("sk-query"));
     }
 }

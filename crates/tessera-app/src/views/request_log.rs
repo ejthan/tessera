@@ -21,8 +21,8 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use tessera_client::Method;
-use tessera_core::curl;
 use tessera_core::log::{Filter, LogEntry};
+use tessera_core::{curl, redact};
 use uuid::Uuid;
 
 use super::request_detail::{self, Detail};
@@ -89,10 +89,55 @@ impl Col {
     }
 }
 
+/// One table row: the cell texts of a log entry, built once when the entry arrives.
+struct Row {
+    id: u64,
+    failed: bool,
+    /// One text per entry of [`COLUMNS`], in that order.
+    cells: [SharedString; COLUMNS.len()],
+}
+
+impl Row {
+    fn new(entry: &LogEntry) -> Self {
+        let e = &entry.event;
+        let node = match (e.node.host_str(), e.node.port_or_known_default()) {
+            (Some(host), Some(port)) => format!("{host}:{port}"),
+            _ => e.node.to_string(),
+        };
+        Self {
+            id: e.id,
+            failed: entry.is_error(),
+            cells: COLUMNS.map(|col| {
+                match col {
+                    Col::Time => local_time(e.started_at),
+                    Col::Connection => entry.connection_name.to_string(),
+                    Col::Method => e.method.to_string(),
+                    Col::Path => path_and_query(&e.path, e.query.as_deref()),
+                    Col::Node => node.clone(),
+                    Col::Status => e
+                        .status
+                        .map_or_else(|| t!("log.status.failed").to_string(), |s| s.to_string()),
+                    Col::Duration => t!("units.ms", n = e.duration.as_millis()).to_string(),
+                    Col::Size => e.size.map(request_detail::size).unwrap_or_default(),
+                }
+                .into()
+            }),
+        }
+    }
+}
+
+/// `path?query`, with a key in the query masked.
+pub(crate) fn path_and_query(path: &str, query: Option<&str>) -> String {
+    match query {
+        Some(q) => format!("{path}?{}", redact::query(q)),
+        None => path.to_string(),
+    }
+}
+
 /// The rows the table shows: the log entries that pass the filter, oldest first.
 #[derive(Default)]
 struct LogRows {
-    rows: Vec<LogEntry>,
+    rows: Vec<Row>,
     show_connection: bool,
 }
 
@@ -107,29 +152,11 @@ impl LogRows {
         self.columns().nth(col_ix).unwrap_or(Col::Path)
     }
 
-    fn text(&self, row_ix: usize, col: Col) -> String {
-        let Some(entry) = self.rows.get(row_ix) else {
-            return String::new();
-        };
-        let e = &entry.event;
-        match col {
-            Col::Time => local_time(e.started_at),
-            Col::Connection => entry.connection_name.to_string(),
-            Col::Method => e.method.to_string(),
-            Col::Path => match &e.query {
-                Some(q) => format!("{}?{q}", e.path),
-                None => e.path.clone(),
-            },
-            Col::Node => match (e.node.host_str(), e.node.port_or_known_default()) {
-                (Some(host), Some(port)) => format!("{host}:{port}"),
-                _ => e.node.to_string(),
-            },
-            Col::Status => e
-                .status
-                .map_or_else(|| t!("log.status.failed").to_string(), |s| s.to_string()),
-            Col::Duration => t!("units.ms", n = e.duration.as_millis()).to_string(),
-            Col::Size => e.size.map(request_detail::size).unwrap_or_default(),
-        }
+    fn text(&self, row_ix: usize, col: Col) -> SharedString {
+        self.rows
+            .get(row_ix)
+            .map(|r| r.cells[col as usize].clone())
+            .unwrap_or_default()
     }
 }
 
@@ -169,16 +196,16 @@ impl TableDelegate for LogRows {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) -> Stateful<gpui_kit::Div> {
-        let Some(entry) = self.rows.get(row_ix) else {
+        let Some(row) = self.rows.get(row_ix) else {
             return div().id(("log.filler", row_ix));
         };
         let label = self
             .columns()
-            .map(|c| self.text(row_ix, c))
+            .map(|c| row.cells[c as usize].as_ref())
             .collect::<Vec<_>>()
             .join(" · ");
         div()
-            .id(SharedString::from(format!("log.row.{}", entry.event.id)))
+            .id(SharedString::from(format!("log.row.{}", row.id)))
             .aria_label(label)
     }
 
@@ -190,7 +217,7 @@ impl TableDelegate for LogRows {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let col = self.col(col_ix);
-        let failed = col == Col::Status && self.rows.get(row_ix).is_some_and(|e| e.is_error());
+        let failed = col == Col::Status && self.rows.get(row_ix).is_some_and(|r| r.failed);
         div()
             .truncate()
             .when(failed, |el| el.text_color(cx.theme().danger))
@@ -198,11 +225,11 @@ impl TableDelegate for LogRows {
     }
 
     fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
-        Some(self.text(row_ix, self.col(col_ix)).into())
+        Some(self.text(row_ix, self.col(col_ix)))
     }
 
     fn cell_text(&self, row_ix: usize, col_ix: usize, _: &App) -> String {
-        self.text(row_ix, self.col(col_ix))
+        self.text(row_ix, self.col(col_ix)).to_string()
     }
 }
 
@@ -223,9 +250,14 @@ pub struct RequestLogPanel {
     selected: Option<u64>,
     detail: Option<Detail>,
     detail_task: Option<Task<()>>,
+    /// What the rows were built from; an unchanged stamp skips the rebuild.
+    stamp: Option<Stamp>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
+
+/// Log length, last event id, filter and open connections at the last refresh.
+type Stamp = (usize, Option<u64>, Filter, Vec<(Uuid, String)>);
 
 impl RequestLogPanel {
     /// The log of `state`, refreshed whenever new entries arrive.
@@ -251,6 +283,7 @@ impl RequestLogPanel {
             selected: None,
             detail: None,
             detail_task: None,
+            stamp: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
@@ -291,17 +324,39 @@ impl RequestLogPanel {
         self.filter
             .connections
             .retain(|id| connections.iter().any(|(c, _)| c == id));
-        let rows: Vec<LogEntry> = self
+        let log = self.state.read(cx).log();
+        let stamp = (
+            log.len(),
+            log.last_id(),
+            self.filter.clone(),
+            connections.clone(),
+        );
+        // AppState also notifies for changes that leave the log as it was.
+        if self.stamp.as_ref() == Some(&stamp) {
+            return;
+        }
+        self.stamp = Some(stamp);
+        let mut old = self
+            .table
+            .update(cx, |t, _| std::mem::take(&mut t.delegate_mut().rows))
+            .into_iter()
+            .peekable();
+        // Both lists are ordered by id, so a row built earlier is found by walking along.
+        let rows: Vec<Row> = self
             .state
             .read(cx)
             .log()
             .entries(&self.filter)
             .into_iter()
-            .cloned()
+            .map(|e| {
+                while old.next_if(|r| r.id < e.event.id).is_some() {}
+                old.next_if(|r| r.id == e.event.id)
+                    .unwrap_or_else(|| Row::new(e))
+            })
             .collect();
         let selected = self
             .selected
-            .and_then(|id| rows.iter().position(|e| e.event.id == id));
+            .and_then(|id| rows.iter().position(|r| r.id == id));
         if selected.is_none() {
             self.deselect(cx);
         }
@@ -333,12 +388,15 @@ impl RequestLogPanel {
 
     /// Selects row `ix` and builds its detail off the GPUI thread.
     fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(entry) = self.table.read(cx).delegate().rows.get(ix).cloned() else {
+        let Some(id) = self.table.read(cx).delegate().rows.get(ix).map(|r| r.id) else {
             return;
         };
-        if self.selected == Some(entry.event.id) {
+        if self.selected == Some(id) {
             return;
         }
+        let Some(entry) = self.state.read(cx).log().get(id).cloned() else {
+            return;
+        };
         self.selected = Some(entry.event.id);
         self.detail = None;
         self.detail_task = Some(cx.spawn(async move |this, cx| {

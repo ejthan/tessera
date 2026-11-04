@@ -13,7 +13,7 @@ pub fn command(entry: &LogEntry) -> String {
     let e = &entry.event;
     let mut url = e.node.clone();
     url.set_path(&e.path);
-    url.set_query(e.query.as_deref());
+    url.set_query(e.query.as_deref().map(redact::query).as_deref());
     url.set_fragment(None);
 
     let mut head = String::new();
@@ -119,6 +119,15 @@ mod tests {
         let mut e = entry(1, Method::PUT, Origin::User, Some(200));
         e.event.request_body = Some(body(r#"{"a":"b","c":"#, 2_000_000));
         insta::assert_snapshot!(command(&e));
+    }
+
+    #[test]
+    fn curl_masks_key_in_query() {
+        let mut e = entry(1, Method::GET, Origin::User, Some(200));
+        e.event.query = Some("q=a&X-Typesense-Api-Key=s3cr3t".into());
+        let out = command(&e);
+        assert!(!out.contains("s3cr3t"), "{out}");
+        assert!(out.contains("q=a&X-Typesense-Api-Key="), "{out}");
     }
 
     #[test]
