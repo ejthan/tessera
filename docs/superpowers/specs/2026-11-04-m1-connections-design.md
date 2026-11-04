@@ -143,14 +143,14 @@ pub trait SecretStore: Send + Sync {
 pub struct ClientOptions {
     pub timeout: Duration,
     pub retries: u32,
-    pub nearest_node: Option<Url>,
+    pub nearest_node: Option<String>,
     pub ca_file: Option<PathBuf>,
     pub allow_insecure: bool,
     pub read_only: bool,
 }
 
 impl Client {
-    pub fn new(nodes: Vec<Url>, key: SecretString, options: ClientOptions) -> Result<Self, Error>;
+    pub fn new(nodes: &[&str], key: SecretString, options: ClientOptions) -> Result<Self, Error>;  // validates each URL as in M0
     pub fn with_hook(self, hook: RequestHook) -> Self;
     pub fn active_node(&self) -> usize;
     pub fn set_active_node(&self, index: usize);
@@ -162,7 +162,7 @@ impl Client {
 - All nodes share one `reqwest::Client`. The CA file and `danger_accept_invalid_certs` are applied when it is built. Redirects stay off (M0).
 - The active node starts as the nearest node if set, else the first node. It is shared state (`Arc<AtomicUsize>`), so clones of the client agree on it.
 - `NodeClient` offers the same endpoint methods for exactly one node. The cluster view uses it, because failover would make a dead node look alive.
-- The endpoint methods (`health`, `debug`, `metrics`, `stats`, `collections_summary`, `keys`) are implemented once and work on both `Client` and `NodeClient` through one internal `send` path.
+- The endpoint methods (`health`, `debug`, `metrics`, `stats`, `collections_summary`, `keys_probe`) are implemented once and work on both `Client` and `NodeClient` through one internal `send` path.
 
 ### 5.2 Failover (D14)
 
@@ -215,7 +215,7 @@ Each gets an integration test against the dev server before any UI uses it (CLAU
 | `metrics()` | `GET /metrics.json` | All values are **strings**. Typed fields for `system_cpu_active_percentage`, `system_memory_used/total_bytes`, `system_disk_used/total_bytes`, `system_network_received/sent_bytes` (cumulative), plus every `typesense_memory_*` and per-CPU field kept in a `BTreeMap<String, String>` for forward compatibility |
 | `stats()` | `GET /stats.json` | Numbers. `latency_ms` and `requests_per_second` are maps keyed by `"GET /collections"` style endpoint names; the scalar totals (`search_latency_ms`, `total_requests_per_second` …) are typed; unknown keys kept as `serde_json::Value` |
 | `collections_summary()` | `GET /collections?exclude_fields=fields` | name and `num_documents` per collection |
-| `keys()` | `GET /keys` | Only the status matters in M1 (permission probe) |
+| `keys_probe()` | `GET /keys` | Only the status matters in M1: 200 → `KeyAccess::Admin`, 401/403 → `KeyAccess::Restricted` |
 
 `Error` gains `ReadOnly` and `Tls`. `Tls` is produced when rustls reports a certificate problem, so the dialog can say "The certificate of {host} is not trusted" instead of "Could not reach".
 
