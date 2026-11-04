@@ -17,10 +17,14 @@ use gpui_kit::{
 };
 use secrecy::ExposeSecret as _;
 use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
+use tessera_app::poller::{CollectionsFetcherGlobal, NodeSample, PollFetcherGlobal};
 use tessera_app::runtime::Tokio;
 use tessera_app::state::AppState;
 use tessera_app::views::root::RootView;
-use tessera_client::{Client, ClientOptions, Error, KeyAccess};
+use tessera_client::{
+    Client, ClientOptions, CollectionSummary, Debug, Error, Health, KeyAccess, Metrics, NodeClient,
+    Origin, Stats,
+};
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::secrets::{MemoryStore, SecretStore};
 use tessera_core::store::{ConnectionsFile, StoreError};
@@ -55,6 +59,7 @@ pub fn open_state_at(
         gpui_kit::init(cx);
         gpui_kit::component::set_locale("en");
         tessera_app::actions::bind_keys(cx);
+        install_poll_fakes(cx);
         let bounds = Bounds {
             origin: Point::default(),
             size: size(px(1200.), px(800.)),
@@ -109,6 +114,95 @@ pub fn open_app(
     };
     let (handle, state) = open_state(cx, Ok(file), secrets);
     (handle, state, rt)
+}
+
+/// A node sample where every request succeeded.
+pub fn ok_sample() -> NodeSample {
+    NodeSample {
+        health: Ok(Health { ok: true }),
+        debug: Ok(Debug {
+            version: "30.2".into(),
+            state: tessera_client::RaftState::Leader,
+        }),
+        metrics: Ok(Metrics {
+            cpu_percent: Some(12.5),
+            memory_used: Some(1),
+            memory_total: Some(4),
+            disk_used: Some(1),
+            disk_total: Some(2),
+            net_received: Some(0),
+            net_sent: Some(0),
+            typesense_memory_active: Some(1),
+            raw: Default::default(),
+        }),
+        stats: Ok(Stats {
+            latency_ms: Default::default(),
+            requests_per_second: Default::default(),
+            total_requests_per_second: None,
+            raw: Default::default(),
+        }),
+        latency: Duration::from_millis(3),
+    }
+}
+
+/// Unless the test installed its own, a node fetcher that answers with [`ok_sample`] and a
+/// collections loader that answers with no collections.
+fn install_poll_fakes(cx: &mut gpui_kit::App) {
+    if !cx.has_global::<PollFetcherGlobal>() {
+        cx.set_global(PollFetcherGlobal(Arc::new(|_| {
+            Box::pin(async { ok_sample() })
+        })));
+    }
+    if !cx.has_global::<CollectionsFetcherGlobal>() {
+        cx.set_global(CollectionsFetcherGlobal(Arc::new(|_| {
+            Box::pin(async { Ok(Vec::new()) })
+        })));
+    }
+}
+
+/// Installs a node fetcher that answers with `answer` and records every node URL it polls.
+pub fn fake_poll(
+    cx: &mut TestAppContext,
+    answer: impl Fn(&NodeClient) -> NodeSample + Send + Sync + 'static,
+) -> Arc<Mutex<Vec<String>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    cx.update(|cx| {
+        cx.set_global(PollFetcherGlobal(Arc::new(move |node: NodeClient| {
+            record.lock().unwrap().push(node.url().to_string());
+            let sample = answer(&node);
+            Box::pin(async move { sample })
+        })));
+    });
+    seen
+}
+
+/// Installs a collections loader that records the origin of each client it loads through.
+pub fn fake_collections(cx: &mut TestAppContext) -> Arc<Mutex<Vec<Origin>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    cx.update(|cx| {
+        cx.set_global(CollectionsFetcherGlobal(Arc::new(move |client: Client| {
+            record.lock().unwrap().push(client.origin());
+            Box::pin(async {
+                Ok(vec![CollectionSummary {
+                    name: "books".into(),
+                    num_documents: 7,
+                }])
+            })
+        })));
+    });
+    seen
+}
+
+/// A connection to the nodes of `profile`, as the fake connector answers it.
+pub fn server_for(profile: &Profile) -> Connected {
+    let (nodes, options) = tessera_app::connection::client_options(profile).unwrap();
+    let nodes: Vec<&str> = nodes.iter().map(String::as_str).collect();
+    let mut connected = server("30.2", true);
+    connected.client = Client::new(&nodes, "k".to_string().into(), options).unwrap();
+    connected.info.url = connected.client.base_url().clone();
+    connected
 }
 
 pub const fn key(mac: &'static str, other: &'static str) -> &'static str {

@@ -20,6 +20,7 @@ use super::import_dialog::ImportDialog;
 use super::sidebar::Sidebar;
 use super::{env_badge, overview, welcome};
 use crate::connection::ConnectionState;
+use crate::poller::Poller;
 use crate::state::AppState;
 
 /// How long the Copy button says "Copied".
@@ -98,13 +99,19 @@ impl Render for SidebarPanel {
 pub struct OverviewPanel {
     connection: Entity<ConnectionState>,
     focus_handle: FocusHandle,
+    _poller: Entity<Poller>,
     _subscription: Subscription,
 }
 
 impl OverviewPanel {
-    /// The overview of `connection`, redrawn whenever it changes.
-    pub fn new(connection: Entity<ConnectionState>, cx: &mut Context<Self>) -> Self {
+    /// The overview of `connection`, redrawn whenever it changes. Polls while it is open.
+    pub fn new(
+        connection: Entity<ConnectionState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
+            _poller: Poller::start(connection.clone(), window, cx),
             _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
             connection,
             focus_handle: cx.focus_handle(),

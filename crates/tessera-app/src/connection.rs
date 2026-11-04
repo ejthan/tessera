@@ -7,15 +7,19 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{Global, SharedString, Task};
+use gpui_kit::{Context, Global, SharedString, Task};
 use rust_i18n::t;
 use secrecy::SecretString;
-use tessera_client::{Client, ClientOptions, Error, KeyAccess, RaftState, RequestHook};
+use tessera_client::{
+    Client, ClientOptions, CollectionSummary, Error, KeyAccess, RaftState, RequestHook, Stats,
+};
 use tessera_core::ServerCapabilities;
+use tessera_core::metrics::MetricsHistory;
 use tessera_core::profile::{InvalidNode, Profile};
 use tokio::runtime::Handle;
 use url::Url;
 
+use crate::poller::{CollectionsFetcherGlobal, DEFAULT_INTERVAL, HISTORY_WINDOW, NodeStatus};
 use crate::runtime::AbortOnDrop;
 
 /// What Tessera learned about a server while connecting.
@@ -148,19 +152,91 @@ pub struct ConnectionState {
     pub missing_key: bool,
     /// The running attempt. Dropping the state drops it, which cancels the requests.
     pub(crate) task: Option<Task<()>>,
+    /// Polled status per node, indexed like `Client::nodes`.
+    pub nodes: Vec<NodeStatus>,
+    /// `/metrics.json` history per node, indexed like `nodes`. Kept while the tab is closed.
+    pub history: Vec<MetricsHistory>,
+    /// The active node's last `/stats.json`.
+    pub stats: Option<Stats>,
+    /// Collections and document counts; loaded when an overview opens and on refresh.
+    pub collections: Option<Vec<CollectionSummary>>,
+    /// Full text of the last failed collections load.
+    pub collections_error: Option<SharedString>,
+    /// Polling is paused by the user.
+    pub paused: bool,
+    /// Time between polling ticks, kept for the session.
+    pub interval: Duration,
+    collections_task: Option<Task<()>>,
 }
 
 impl ConnectionState {
     /// A connection that has not been attempted yet.
     pub fn new(profile: Profile) -> Self {
         Self {
-            profile,
             connected: None,
             connecting: false,
             error: None,
             missing_key: false,
             task: None,
+            nodes: vec![NodeStatus::default(); profile.nodes.len()],
+            history: (0..profile.nodes.len())
+                .map(|_| MetricsHistory::new(HISTORY_WINDOW))
+                .collect(),
+            stats: None,
+            collections: None,
+            collections_error: None,
+            paused: false,
+            interval: DEFAULT_INTERVAL,
+            collections_task: None,
+            profile,
         }
+    }
+
+    /// Pauses or resumes polling. Resuming polls right away.
+    pub fn set_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
+        self.paused = paused;
+        cx.notify();
+    }
+
+    /// Sets the polling interval for the rest of the session and polls right away.
+    pub fn set_interval(&mut self, interval: Duration, cx: &mut Context<Self>) {
+        self.interval = interval;
+        cx.notify();
+    }
+
+    /// Reloads the collections as a user action (⌘R / Ctrl+R).
+    pub fn refresh_collections(&mut self, cx: &mut Context<Self>) {
+        self.load_collections(false, cx);
+    }
+
+    /// Loads the collections through the polling client (`polling`) or the user's client.
+    /// A load still running is cancelled.
+    pub(crate) fn load_collections(&mut self, polling: bool, cx: &mut Context<Self>) {
+        let Some(connected) = &self.connected else {
+            return;
+        };
+        let client = if polling {
+            connected.client.polling()
+        } else {
+            connected.client.clone()
+        };
+        let load = (cx.global::<CollectionsFetcherGlobal>().0)(client);
+        self.collections_task = Some(cx.spawn(async move |this, cx| {
+            let result = load.await;
+            this.update(cx, |state, cx| {
+                match result {
+                    Ok(collections) => {
+                        state.collections = Some(collections);
+                        state.collections_error = None;
+                    }
+                    Err(e) => {
+                        state.collections_error = Some(error_text(&e, &state.profile).into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 }
 
@@ -190,7 +266,11 @@ fn chain(e: &(dyn std::error::Error + 'static)) -> String {
 /// User-facing text for a failed connect attempt to `profile`.
 pub fn error_text(err: &Error, profile: &Profile) -> String {
     let host = profile.nodes.first().map(|n| n.label()).unwrap_or_default();
-    let host = host.as_str();
+    node_error_text(err, &host, profile)
+}
+
+/// User-facing text for a failed request to `host` (`host:port`) of `profile`.
+pub fn node_error_text(err: &Error, host: &str, profile: &Profile) -> String {
     match err {
         Error::InvalidUrl(_) => t!("connect.error.invalid_url").to_string(),
         Error::Network(e) => {

@@ -5,6 +5,7 @@
 pub mod actions;
 pub mod connection;
 pub mod i18n;
+pub mod poller;
 pub mod runtime;
 pub mod state;
 pub mod views;
@@ -85,6 +86,12 @@ pub fn run(launch: Launch) -> Result<(), String> {
 
     gpui_kit::application().run(move |cx| {
         cx.set_global(connection::ConnectorGlobal(connection::tokio_connector(
+            handle.clone(),
+        )));
+        cx.set_global(poller::PollFetcherGlobal(poller::tokio_fetcher(
+            handle.clone(),
+        )));
+        cx.set_global(poller::CollectionsFetcherGlobal(poller::tokio_collections(
             handle.clone(),
         )));
         cx.set_global(runtime::Tokio(handle));
