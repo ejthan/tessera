@@ -1,0 +1,35 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cluster:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.3
+      - name: Start the 3-node cluster
+        run: docker compose -f dev/docker-compose.yml --profile cluster up -d ts1 ts2 ts3
+      - name: Wait for health
+        run: |
+          for port in 18111 18112 18113; do
+            for _ in $(seq 60); do
+              curl -sf "http://localhost:$port/health" >/dev/null && continue 2
+              sleep 1
+            done
+            echo "node on port $port did not become healthy" >&2
+            exit 1
+          done
+      # Single-threaded: two tests stop and start shared containers.
+      - run: cargo test -p tessera-client --test cluster --locked -- --ignored --test-threads=1
+      - if: always()
+        run: docker compose -f dev/docker-compose.yml --profile cluster down -v

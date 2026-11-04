@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Request log panel: every request with time, method, path, node, status, duration and size (plus the connection while several are open); filters for errors, writes, methods, connections and polling traffic; a detail view with headers and bodies, secrets masked; Copy as curl (⌘⇧C / Ctrl+Shift+C) with a `$TYPESENSE_API_KEY` placeholder. The log keeps 5000 user and 500 polling requests and masks `api_key` and `value` secrets and the `x-typesense-api-key` query parameter. ⌘W / Ctrl+W closes a tab without disconnecting; ⌘⇧↩ / Ctrl+Shift+Enter zooms a tab.
 - Command-line flags `--host`, `--port`, `--protocol`, `--path`, `--env`, `--read-only`, `--api-key-stdin`, `--profile` and `--help`, plus the `TYPESENSE_HOST`, `TYPESENSE_PORT`, `TYPESENSE_PROTOCOL`, `TYPESENSE_PATH` and `TYPESENSE_API_KEY` variables. A key is never accepted as a flag value.
 - `THIRD_PARTY_NOTICES.md` with the `webpki-root-certs` notice (CDLA-Permissive-2.0).
+- A 3-node dev cluster (compose profile `cluster`) and nightly cluster tests for leader detection and failover.
 - CI on macOS, Linux and Windows: lint, tests, integration tests against Typesense 30.0 and 30.2, release builds with a size check and a smoke start.
 
 ### Changed

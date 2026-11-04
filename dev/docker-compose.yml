@@ -14,5 +14,61 @@ services:
     # No healthcheck: the image ships without curl or wget. The live tests
     # poll /health themselves.
 
+  # 3-node Raft cluster for the cluster tests. Not started by a plain `up -d`:
+  #   docker compose -f dev/docker-compose.yml --profile cluster up -d ts1 ts2 ts3
+  # Host ports 18111-18113 (API); the single node above keeps its own port.
+  ts1: &ts
+    image: typesense/typesense:${TYPESENSE_VERSION:-30.2}
+    profiles: [cluster]
+    command: >-
+      --data-dir /data --api-key=${TYPESENSE_API_KEY:-xyz} --enable-cors=false
+      --api-address 0.0.0.0 --api-port 8108 --peering-address 172.30.111.11
+      --peering-port 8107 --nodes=/nodes
+    ports:
+      - "18111:8108"
+    volumes:
+      - ./cluster/nodes:/nodes:ro
+      - ts1-data:/data
+    networks:
+      cluster:
+        ipv4_address: 172.30.111.11
+  ts2:
+    <<: *ts
+    command: >-
+      --data-dir /data --api-key=${TYPESENSE_API_KEY:-xyz} --enable-cors=false
+      --api-address 0.0.0.0 --api-port 8108 --peering-address 172.30.111.12
+      --peering-port 8107 --nodes=/nodes
+    ports:
+      - "18112:8108"
+    volumes:
+      - ./cluster/nodes:/nodes:ro
+      - ts2-data:/data
+    networks:
+      cluster:
+        ipv4_address: 172.30.111.12
+  ts3:
+    <<: *ts
+    command: >-
+      --data-dir /data --api-key=${TYPESENSE_API_KEY:-xyz} --enable-cors=false
+      --api-address 0.0.0.0 --api-port 8108 --peering-address 172.30.111.13
+      --peering-port 8107 --nodes=/nodes
+    ports:
+      - "18113:8108"
+    volumes:
+      - ./cluster/nodes:/nodes:ro
+      - ts3-data:/data
+    networks:
+      cluster:
+        ipv4_address: 172.30.111.13
+
+networks:
+  cluster:
+    ipam:
+      config:
+        - subnet: 172.30.111.0/24
+
 volumes:
   typesense-data:
+  ts1-data:
+  ts2-data:
+  ts3-data:

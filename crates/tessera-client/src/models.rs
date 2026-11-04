@@ -26,7 +26,7 @@ pub struct Debug {
 pub enum RaftState {
     /// `state == 1`.
     Leader,
-    /// `state == 4`.
+    /// `state == 4` (confirmed against a 3-node 30.2 cluster by `tests/cluster.rs`).
     Follower,
     /// Any other reported state.
     Other(i64),
