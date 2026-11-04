@@ -48,3 +48,8 @@ strip = true
 # codegen unit cut the macOS binary by 20 % (22.8 → 18.2 MB).
 lto = "fat"
 codegen-units = 1
+# The request log and dock pushed Linux to 43.0 MB. Without unwind tables macOS
+# went from 21.4 to 17.7 MB. A panic already ended the app (GPUI main thread,
+# tokio tasks re-panic in the connector); only tests catch unwinds, and they
+# build with the test profile.
+panic = "abort"
