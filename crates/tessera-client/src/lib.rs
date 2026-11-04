@@ -15,10 +15,16 @@ use std::time::Duration;
 
 pub use error::Error;
 pub use event::{BODY_LIMIT, Body, Origin, RequestEvent, RequestHook};
-pub use models::{Debug, Health, RaftState};
+pub use models::{CollectionSummary, Debug, Health, KeyAccess, Metrics, RaftState, Stats};
 pub use reqwest::Method;
 use secrecy::SecretString;
 use url::Url;
+
+/// Methods a read-only client refuses. PUT is an upsert in Typesense, so it writes.
+pub const WRITE_METHODS: [Method; 4] = [Method::POST, Method::PATCH, Method::PUT, Method::DELETE];
+
+/// Methods retried on another node after a network error or timeout (idempotent ones).
+pub const FAILOVER_METHODS: [Method; 4] = [Method::GET, Method::HEAD, Method::PUT, Method::DELETE];
 
 /// Default timeout for every request.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -63,6 +69,8 @@ pub struct Client {
     active: Arc<AtomicUsize>,
     key: SecretString,
     timeout: Duration,
+    retries: u32,
+    read_only: bool,
     hook: Option<RequestHook>,
     origin: Origin,
 }
@@ -75,6 +83,8 @@ impl fmt::Debug for Client {
             .field("active", &self.active_node())
             .field("key", &"••••")
             .field("timeout", &self.timeout)
+            .field("retries", &self.retries)
+            .field("read_only", &self.read_only)
             .finish_non_exhaustive()
     }
 }
@@ -143,6 +153,8 @@ impl Client {
             active: Arc::new(AtomicUsize::new(active)),
             key,
             timeout: options.timeout,
+            retries: options.retries,
+            read_only: options.read_only,
             hook: None,
             origin: Origin::User,
         })
@@ -214,10 +226,38 @@ impl Client {
         self.debug_on(None).await
     }
 
+    /// `GET /metrics.json`: CPU, memory, disk and network of the node's host.
+    pub async fn metrics(&self) -> Result<Metrics, Error> {
+        self.metrics_on(None).await
+    }
+
+    /// `GET /stats.json`: request rates and latencies per endpoint.
+    pub async fn stats(&self) -> Result<Stats, Error> {
+        self.stats_on(None).await
+    }
+
+    /// `GET /collections?exclude_fields=fields`: name and document count of every collection.
+    pub async fn collections_summary(&self) -> Result<Vec<CollectionSummary>, Error> {
+        self.collections_summary_on(None).await
+    }
+
+    /// `GET /keys`, to learn whether the key is an admin key. Only the status counts:
+    /// `200` is [`KeyAccess::Admin`], `401` or `403` is [`KeyAccess::Restricted`].
+    pub async fn keys_probe(&self) -> Result<KeyAccess, Error> {
+        self.keys_probe_on(None).await
+    }
+
+    /// Sends `method` to `path` without a body, with failover. For tests of the read-only
+    /// guard and failover only; not part of the supported API.
+    #[doc(hidden)]
+    pub async fn request(&self, method: Method, path: &str) -> Result<(u16, String), Error> {
+        self.call(None, method, path, None).await
+    }
+
     // Endpoints are written once; `pin` is `Some` for a `NodeClient`, `None` for the cluster.
 
     async fn health_on(&self, pin: Option<usize>) -> Result<Health, Error> {
-        let (status, body) = self.get(pin, "health").await?;
+        let (status, body) = self.get(pin, "health", None).await?;
         if (200..300).contains(&status) {
             return serde_json::from_str(&body).map_err(Error::Decode);
         }
@@ -230,10 +270,7 @@ impl Client {
     }
 
     async fn debug_on(&self, pin: Option<usize>) -> Result<Debug, Error> {
-        let (status, body) = self.get(pin, "debug").await?;
-        if !(200..300).contains(&status) {
-            return Err(Error::http(status, body));
-        }
+        let body = self.get_ok(pin, "debug", None).await?;
         let raw: models::RawDebug = serde_json::from_str(&body).map_err(Error::Decode)?;
         Ok(Debug {
             version: raw.version,
@@ -241,10 +278,96 @@ impl Client {
         })
     }
 
-    async fn get(&self, pin: Option<usize>, path: &str) -> Result<(u16, String), Error> {
-        // Task 7: failover over the other nodes goes here when `pin` is `None`.
-        let node = pin.unwrap_or_else(|| self.active_node());
-        self.send(node, Method::GET, path, None, None).await
+    async fn metrics_on(&self, pin: Option<usize>) -> Result<Metrics, Error> {
+        let body = self.get_ok(pin, "metrics.json", None).await?;
+        Metrics::from_json(&body).map_err(Error::Decode)
+    }
+
+    async fn stats_on(&self, pin: Option<usize>) -> Result<Stats, Error> {
+        let body = self.get_ok(pin, "stats.json", None).await?;
+        serde_json::from_str(&body).map_err(Error::Decode)
+    }
+
+    async fn collections_summary_on(
+        &self,
+        pin: Option<usize>,
+    ) -> Result<Vec<CollectionSummary>, Error> {
+        let body = self
+            .get_ok(pin, "collections", Some("exclude_fields=fields"))
+            .await?;
+        serde_json::from_str(&body).map_err(Error::Decode)
+    }
+
+    async fn keys_probe_on(&self, pin: Option<usize>) -> Result<KeyAccess, Error> {
+        match self.get(pin, "keys", None).await? {
+            (200, _) => Ok(KeyAccess::Admin),
+            (401 | 403, _) => Ok(KeyAccess::Restricted),
+            (status, body) => Err(Error::http(status, body)),
+        }
+    }
+
+    async fn get(
+        &self,
+        pin: Option<usize>,
+        path: &str,
+        query: Option<&str>,
+    ) -> Result<(u16, String), Error> {
+        self.call(pin, Method::GET, path, query).await
+    }
+
+    /// The body of a `2xx` answer; any other status is [`Error::Http`].
+    async fn get_ok(
+        &self,
+        pin: Option<usize>,
+        path: &str,
+        query: Option<&str>,
+    ) -> Result<String, Error> {
+        match self.get(pin, path, query).await? {
+            (200..300, body) => Ok(body),
+            (status, body) => Err(Error::http(status, body)),
+        }
+    }
+
+    /// Sends to node `pin`, or to the active node with failover (spec §5.2): after a network
+    /// error or timeout, a [`FAILOVER_METHODS`] request tries the following nodes in list
+    /// order, each at most once and at most `retries` of them, waiting 100 ms × 2ⁿ before
+    /// each. The node that answers becomes the active node.
+    async fn call(
+        &self,
+        pin: Option<usize>,
+        method: Method,
+        path: &str,
+        query: Option<&str>,
+    ) -> Result<(u16, String), Error> {
+        if let Some(node) = pin {
+            return self.send(node, method, path, query, None).await;
+        }
+        let start = self.active_node();
+        let retries = if FAILOVER_METHODS.contains(&method) {
+            self.retries as usize
+        } else {
+            0
+        };
+        let attempts = 1 + retries.min(self.nodes.len() - 1);
+        let mut attempt = 0;
+        loop {
+            let node = (start + attempt) % self.nodes.len();
+            match self.send(node, method.clone(), path, query, None).await {
+                Err(Error::Network(_) | Error::Timeout) if attempt + 1 < attempts => {
+                    let backoff = Duration::from_millis(100) * 2u32.saturating_pow(attempt as u32);
+                    tokio::time::sleep(backoff).await;
+                    attempt += 1;
+                }
+                result => {
+                    // Only move it when another node answered, so a concurrent
+                    // set_active_node() is not undone by a request that started earlier.
+                    if result.is_ok() && node != start {
+                        self.active.store(node, Ordering::Relaxed);
+                    }
+                    return result;
+                }
+            }
+        }
     }
 }
 
@@ -264,5 +387,32 @@ impl NodeClient {
     /// `GET /debug` on this node. See [`Client::debug`].
     pub async fn debug(&self) -> Result<Debug, Error> {
         self.client.debug_on(Some(self.index)).await
+    }
+
+    /// `GET /metrics.json` on this node. See [`Client::metrics`].
+    pub async fn metrics(&self) -> Result<Metrics, Error> {
+        self.client.metrics_on(Some(self.index)).await
+    }
+
+    /// `GET /stats.json` on this node. See [`Client::stats`].
+    pub async fn stats(&self) -> Result<Stats, Error> {
+        self.client.stats_on(Some(self.index)).await
+    }
+
+    /// `GET /collections?exclude_fields=fields` on this node. See [`Client::collections_summary`].
+    pub async fn collections_summary(&self) -> Result<Vec<CollectionSummary>, Error> {
+        self.client.collections_summary_on(Some(self.index)).await
+    }
+
+    /// `GET /keys` on this node. See [`Client::keys_probe`].
+    pub async fn keys_probe(&self) -> Result<KeyAccess, Error> {
+        self.client.keys_probe_on(Some(self.index)).await
+    }
+
+    /// Sends `method` to `path` on this node only. For tests of the read-only guard only;
+    /// not part of the supported API.
+    #[doc(hidden)]
+    pub async fn request(&self, method: Method, path: &str) -> Result<(u16, String), Error> {
+        self.client.call(Some(self.index), method, path, None).await
     }
 }

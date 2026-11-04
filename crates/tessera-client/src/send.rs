@@ -14,6 +14,8 @@ impl Client {
     /// Sends one request to node `node` and reports it to the hook.
     ///
     /// Returns the status and body for any HTTP answer; only transport failures are errors.
+    /// A read-only client refuses [`WRITE_METHODS`](crate::WRITE_METHODS) here, before
+    /// anything is sent or reported, so no caller can get around it.
     pub(crate) async fn send(
         &self,
         node: usize,
@@ -22,6 +24,9 @@ impl Client {
         query: Option<&str>,
         body: Option<String>,
     ) -> Result<(u16, String), Error> {
+        if self.read_only && crate::WRITE_METHODS.contains(&method) {
+            return Err(Error::ReadOnly { method });
+        }
         let base = &self.nodes[node];
         let mut url = base
             .join(path)
@@ -30,7 +35,10 @@ impl Client {
         let key = self.key.expose_secret();
         let mut request_headers = Vec::new();
         // Event copies of the body are only made when someone listens.
-        let request_body = self.hook.as_ref().and(body.as_deref().map(Body::new));
+        let request_body = self
+            .hook
+            .as_ref()
+            .and_then(|_| body.as_deref().map(Body::new));
         let mut request = self
             .http
             .request(method.clone(), url.clone())

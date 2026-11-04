@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 use tessera_client::{
-    BODY_LIMIT, Client, ClientOptions, Error, Health, Method, Origin, RaftState, RequestEvent,
-    RequestHook,
+    BODY_LIMIT, Client, ClientOptions, Error, Health, KeyAccess, Method, Origin, RaftState,
+    RequestEvent, RequestHook,
 };
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -540,4 +540,293 @@ async fn status_survives_a_failed_body_read() {
     assert_eq!(event.status, Some(200));
     assert!(event.error.is_some());
     assert!(event.response_body.is_none());
+}
+
+/// Closed ports on 127.0.0.1: connecting fails at once with "connection refused".
+const DEAD: [&str; 3] = [
+    "http://127.0.0.1:9",
+    "http://127.0.0.1:1",
+    "http://127.0.0.1:2",
+];
+
+fn cluster(nodes: &[&str], options: ClientOptions) -> (Client, Arc<Mutex<Vec<RequestEvent>>>) {
+    let (hook, events) = recorder();
+    (
+        Client::new(nodes, key(), options)
+            .expect("valid nodes")
+            .with_hook(hook),
+        events,
+    )
+}
+
+#[tokio::test]
+async fn failover_on_refused_connection() {
+    let server = MockServer::start().await;
+    mock(&server, "/health", 200, r#"{"ok":true}"#).await;
+    let (client, events) = cluster(&[DEAD[0], &server.uri()], ClientOptions::default());
+    assert!(client.health().await.unwrap().ok);
+    assert_eq!(client.active_node(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].node.as_str(), "http://127.0.0.1:9/");
+    assert!(events[0].status.is_none() && events[0].error.is_some());
+    assert_eq!(events[1].status, Some(200));
+}
+
+#[tokio::test]
+async fn failover_on_timeout() {
+    let (slow, fast) = (MockServer::start().await, MockServer::start().await);
+    Mock::given(method("GET"))
+        .and(path("/health"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"{"ok":true}"#)
+                .set_delay(Duration::from_millis(500)),
+        )
+        .mount(&slow)
+        .await;
+    mock(&fast, "/health", 200, r#"{"ok":true}"#).await;
+    let options = ClientOptions {
+        timeout: Duration::from_millis(100),
+        ..ClientOptions::default()
+    };
+    let (client, events) = cluster(&[&slow.uri(), &fast.uri()], options);
+    assert!(client.health().await.unwrap().ok);
+    assert_eq!(client.active_node(), 1);
+    assert_eq!(events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn no_failover_on_http_500() {
+    let (a, b) = (MockServer::start().await, MockServer::start().await);
+    mock(&a, "/debug", 500, "oops").await;
+    mock(&b, "/debug", 200, r#"{"state":1,"version":"30.2"}"#).await;
+    let (client, events) = cluster(&[&a.uri(), &b.uri()], ClientOptions::default());
+    assert!(matches!(
+        client.debug().await,
+        Err(Error::Http { status: 500, .. })
+    ));
+    assert_eq!(b.received_requests().await.unwrap().len(), 0);
+    assert_eq!(client.active_node(), 0);
+    assert_eq!(events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn retries_bound_attempts() {
+    let options = ClientOptions {
+        retries: 1,
+        ..ClientOptions::default()
+    };
+    let (client, events) = cluster(&DEAD, options);
+    assert!(matches!(client.health().await, Err(Error::Network(_))));
+    let events = events.lock().unwrap();
+    let nodes: Vec<&str> = events.iter().map(|e| e.node.as_str()).collect();
+    assert_eq!(nodes, ["http://127.0.0.1:9/", "http://127.0.0.1:1/"]);
+    assert_eq!(client.active_node(), 0, "no node answered");
+}
+
+#[tokio::test]
+async fn failover_starts_at_active_node_and_wraps() {
+    let server = MockServer::start().await;
+    mock(&server, "/health", 200, r#"{"ok":true}"#).await;
+    let (client, events) = cluster(&[&server.uri(), DEAD[0], DEAD[1]], ClientOptions::default());
+    client.set_active_node(1);
+    let start = std::time::Instant::now();
+    assert!(client.health().await.unwrap().ok);
+    // Backoff 100 ms before the first retry, 200 ms before the second.
+    assert!(
+        start.elapsed() >= Duration::from_millis(300),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(client.active_node(), 0);
+    let nodes: Vec<u16> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e.node.port().unwrap())
+        .collect();
+    assert_eq!(nodes, [9, 1, server.address().port()]);
+}
+
+#[tokio::test]
+async fn node_client_never_fails_over() {
+    let server = MockServer::start().await;
+    mock(&server, "/health", 200, r#"{"ok":true}"#).await;
+    let (client, events) = cluster(&[DEAD[0], &server.uri()], ClientOptions::default());
+    assert!(matches!(
+        client.node(0).health().await,
+        Err(Error::Network(_))
+    ));
+    assert_eq!(server.received_requests().await.unwrap().len(), 0);
+    assert_eq!(events.lock().unwrap().len(), 1);
+    assert_eq!(client.active_node(), 0);
+}
+
+#[tokio::test]
+async fn writes_never_fail_over() {
+    let server = MockServer::start().await;
+    let (client, events) = cluster(&[DEAD[0], &server.uri()], ClientOptions::default());
+    assert!(matches!(
+        client.request(Method::POST, "collections").await,
+        Err(Error::Network(_))
+    ));
+    assert_eq!(server.received_requests().await.unwrap().len(), 0);
+    assert_eq!(events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn read_only_blocks_writes_before_sending() {
+    let server = MockServer::start().await;
+    let read_only = ClientOptions {
+        read_only: true,
+        ..ClientOptions::default()
+    };
+    let (client, events) = cluster(&[&server.uri()], read_only);
+    for m in [Method::POST, Method::PATCH, Method::PUT, Method::DELETE] {
+        match client.request(m.clone(), "collections").await {
+            Err(Error::ReadOnly { method }) => assert_eq!(method, m),
+            other => panic!("{m}: expected ReadOnly, got {other:?}"),
+        }
+        // The pinned path takes the same guard.
+        assert!(matches!(
+            client.node(0).request(m.clone(), "collections").await,
+            Err(Error::ReadOnly { .. })
+        ));
+    }
+    assert!(events.lock().unwrap().is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn read_only_allows_get() {
+    let server = MockServer::start().await;
+    mock(&server, "/health", 200, r#"{"ok":true}"#).await;
+    let read_only = ClientOptions {
+        read_only: true,
+        ..ClientOptions::default()
+    };
+    let (client, events) = cluster(&[&server.uri()], read_only);
+    assert!(client.health().await.unwrap().ok);
+    let (status, _) = client.request(Method::GET, "health").await.unwrap();
+    assert_eq!(status, 200);
+    assert!(client.node(0).health().await.unwrap().ok);
+    assert_eq!(events.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn metrics_tolerates_missing_fields() {
+    let server = MockServer::start().await;
+    mock(
+        &server,
+        "/metrics.json",
+        200,
+        r#"{"system_cpu_active_percentage":"12.50","system_memory_total_bytes":"not a number"}"#,
+    )
+    .await;
+    let metrics = client(&server.uri()).unwrap().metrics().await.unwrap();
+    assert_eq!(metrics.cpu_percent, Some(12.5));
+    assert_eq!(metrics.memory_total, None, "unparseable value");
+    assert_eq!((metrics.net_received, metrics.net_sent), (None, None));
+    assert_eq!(metrics.raw.len(), 2);
+}
+
+#[tokio::test]
+async fn metrics_parses_typed_fields() {
+    let server = MockServer::start().await;
+    mock(
+        &server,
+        "/metrics.json",
+        200,
+        r#"{"system_cpu_active_percentage":"3.20","system_memory_used_bytes":"100",
+            "system_memory_total_bytes":"200","system_disk_used_bytes":"300",
+            "system_disk_total_bytes":"400","system_network_received_bytes":"500",
+            "system_network_sent_bytes":"600","typesense_memory_active_bytes":"700",
+            "system_cpu1_active_percentage":"1.00"}"#,
+    )
+    .await;
+    let m = client(&server.uri()).unwrap().metrics().await.unwrap();
+    assert_eq!(m.cpu_percent, Some(3.2));
+    assert_eq!(
+        [m.memory_used, m.memory_total, m.disk_used, m.disk_total],
+        [Some(100), Some(200), Some(300), Some(400)]
+    );
+    assert_eq!(
+        [m.net_received, m.net_sent, m.typesense_memory_active],
+        [Some(500), Some(600), Some(700)]
+    );
+    assert_eq!(m.raw["system_cpu1_active_percentage"], "1.00");
+}
+
+#[tokio::test]
+async fn stats_parses_endpoint_maps() {
+    let server = MockServer::start().await;
+    mock(
+        &server,
+        "/stats.json",
+        200,
+        r#"{"latency_ms":{"GET /collections":1.5},"requests_per_second":{"GET /collections":2.0}}"#,
+    )
+    .await;
+    let stats = client(&server.uri()).unwrap().stats().await.unwrap();
+    assert_eq!(stats.latency_ms["GET /collections"], 1.5);
+    assert_eq!(stats.requests_per_second["GET /collections"], 2.0);
+    assert_eq!(stats.total_requests_per_second, None);
+}
+
+#[tokio::test]
+async fn stats_keeps_other_fields() {
+    let server = MockServer::start().await;
+    mock(
+        &server,
+        "/stats.json",
+        200,
+        r#"{"latency_ms":{},"requests_per_second":{},"total_requests_per_second":4.5,"search_latency_ms":3}"#,
+    )
+    .await;
+    let stats = client(&server.uri()).unwrap().stats().await.unwrap();
+    assert!(stats.latency_ms.is_empty());
+    assert_eq!(stats.total_requests_per_second, Some(4.5));
+    assert_eq!(stats.raw["search_latency_ms"], 3);
+}
+
+#[tokio::test]
+async fn collections_summary_excludes_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/collections"))
+        .and(wiremock::matchers::query_param("exclude_fields", "fields"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{"name":"books","num_documents":42,"created_at":1},{"name":"x","num_documents":0}]"#,
+        ))
+        .mount(&server)
+        .await;
+    let summary = client(&server.uri())
+        .unwrap()
+        .collections_summary()
+        .await
+        .unwrap();
+    let pairs: Vec<(&str, u64)> = summary
+        .iter()
+        .map(|c| (c.name.as_str(), c.num_documents))
+        .collect();
+    assert_eq!(pairs, [("books", 42), ("x", 0)]);
+}
+
+#[tokio::test]
+async fn keys_probe_maps_status() {
+    for (status, expected) in [
+        (200, Some(KeyAccess::Admin)),
+        (401, Some(KeyAccess::Restricted)),
+        (403, Some(KeyAccess::Restricted)),
+        (500, None),
+    ] {
+        let server = MockServer::start().await;
+        mock(&server, "/keys", status, r#"{"keys":[]}"#).await;
+        let probe = client(&server.uri()).unwrap().keys_probe().await;
+        match expected {
+            Some(access) => assert_eq!(probe.unwrap(), access, "{status}"),
+            None => assert!(matches!(probe, Err(Error::Http { status: 500, .. }))),
+        }
+    }
 }
