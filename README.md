@@ -8,7 +8,11 @@ Tessera is not affiliated with or endorsed by Typesense, Inc.
 
 ## Building
 
-See [`docs/building.md`](docs/building.md).
+```bash
+cargo run -p tessera-app
+```
+
+Platform prerequisites, the local Typesense server and the test commands are in [`docs/building.md`](docs/building.md).
 
 ## Contributing
 
