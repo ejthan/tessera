@@ -3,7 +3,7 @@
 //! Tests against a real Typesense server.
 //!
 //! Start one with `docker compose -f dev/docker-compose.yml up -d`, then run
-//! `cargo test -p tessera-client -- --ignored`. `TESSERA_IT_URL` and
+//! `cargo test -p tessera-client --test live -- --ignored`. `TESSERA_IT_URL` and
 //! `TESSERA_IT_KEY` override the defaults `http://localhost:18108` and `xyz`.
 
 use std::time::Duration;

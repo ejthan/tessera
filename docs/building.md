@@ -73,6 +73,8 @@ cargo test -p tessera-client --test cluster -- --ignored --test-threads=1
 docker compose -f dev/docker-compose.yml --profile cluster stop ts1 ts2 ts3
 ```
 
+The cluster uses the fixed subnet 172.30.111.0/24 (static peering IPs); if Docker reports "Pool overlaps", change it in `dev/docker-compose.yml` and `dev/cluster/nodes`.
+
 Run them single-threaded: two tests stop and restart ts3. `TESSERA_CLUSTER_URLS` (comma separated, in the order ts1, ts2, ts3) overrides the URLs. CI runs them nightly (`.github/workflows/nightly.yml`).
 
 ## Smoke start

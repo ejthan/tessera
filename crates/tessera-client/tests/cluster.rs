@@ -33,7 +33,7 @@ fn client() -> Client {
         .expect("TESSERA_CLUSTER_URLS must be http(s) URLs")
 }
 
-fn compose(action: &str, service: &str) {
+fn compose(action: &str, service: &str) -> bool {
     let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/docker-compose.yml");
     let status = Command::new("docker")
         .args(["compose", "-f"])
@@ -41,10 +41,10 @@ fn compose(action: &str, service: &str) {
         .args(["--profile", "cluster", action, service])
         .status()
         .expect("docker is installed");
-    assert!(status.success(), "docker compose {action} {service}");
+    status.success()
 }
 
-/// Polls until `done` holds for every node, or panics after `limit`.
+/// Polls `done` until it returns true, or panics after `limit`.
 async fn wait_for<F, Fut>(what: &str, limit: Duration, mut done: F)
 where
     F: FnMut() -> Fut,
@@ -88,14 +88,18 @@ struct Stopped(&'static str);
 
 impl Stopped {
     fn new(service: &'static str) -> Self {
-        compose("stop", service);
+        assert!(compose("stop", service), "docker compose stop {service}");
         Self(service)
     }
 }
 
 impl Drop for Stopped {
     fn drop(&mut self) {
-        compose("start", self.0);
+        // Never panic here (a panic during unwinding aborts). After a failed assert, the
+        // next test's wait_until_ready covers the restart.
+        if !compose("start", self.0) {
+            eprintln!("docker compose start {} failed", self.0);
+        }
     }
 }
 
