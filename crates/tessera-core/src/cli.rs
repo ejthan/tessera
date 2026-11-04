@@ -118,17 +118,26 @@ pub fn parse(args: &[String], env: &dyn Fn(&str) -> Option<String>) -> Result<La
                     "a key is never accepted as a flag value (it would show in the process list); use --api-key-stdin or TYPESENSE_API_KEY".into(),
                 ));
             }
-            _ => return Err(CliError(format!("unknown option {arg:?} (see --help)"))),
-        };
-        *slot = Some(match inline {
-            Some(v) => v,
-            None => {
-                i += 1;
-                args.get(i - 1)
-                    .cloned()
-                    .ok_or_else(|| CliError(format!("{name} needs a value")))?
+            // Only the name is echoed: a mistyped `--apikey=SECRET` must not reach stderr.
+            _ if name.starts_with("--") => {
+                return Err(CliError(format!("unknown option {name} (see --help)")));
             }
-        });
+            _ => return Err(CliError("unexpected argument (see --help)".into())),
+        };
+        let value = match inline {
+            Some(v) => v,
+            None => match args.get(i) {
+                Some(next) if !next.starts_with("--") => {
+                    i += 1;
+                    next.clone()
+                }
+                _ => return Err(CliError(format!("{name} needs a value"))),
+            },
+        };
+        if value.trim().is_empty() && matches!(name, "--host" | "--profile") {
+            return Err(CliError(format!("{name} needs a value")));
+        }
+        *slot = Some(value);
     }
 
     let connection_flag = host.is_some()
@@ -336,6 +345,25 @@ mod tests {
         assert!(err(&["--host", "x", "--env", "qa"], &[]).contains("--env"));
         assert!(err(&["--host", "https://x/"], &[]).contains("host"));
         assert!(err(&["--host"], &[]).contains("--host"));
+    }
+
+    #[test]
+    fn unknown_option_error_does_not_echo_value() {
+        for a in [
+            "--apikey=sk-live-test-1234",
+            "--api_key=sk-live-test-1234",
+            "sk-live-test-1234=x",
+        ] {
+            assert!(!err(&[a], &[]).contains("sk-live-test-1234"), "{a}");
+        }
+    }
+
+    #[test]
+    fn missing_or_empty_values_are_errors() {
+        assert!(err(&["--host", "--read-only"], &[]).contains("--host needs a value"));
+        assert!(err(&["--profile="], &[]).contains("--profile"));
+        assert!(err(&["--profile", "  "], &[]).contains("--profile"));
+        assert!(err(&["--host="], &[]).contains("--host"));
     }
 
     #[test]
