@@ -1,0 +1,38 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+tessera-client = { path = "crates/tessera-client" }
+tessera-core = { path = "crates/tessera-core" }
+
+anyhow = "=1.0.104"
+gpui-kit = "=0.9.0"
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json", "http2", "charset"] }
+rust-i18n = "=4.2.4"
+secrecy = "=0.10.3"
+semver = "=1.0.28"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sys-locale = "=0.3.2"
+thiserror = "=2.0.21"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "time", "macros"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+url = "=2.5.8"
+wiremock = "=0.6.5"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+
+[profile.release]
+strip = true
