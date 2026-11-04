@@ -22,5 +22,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Profiles are stored in `connections.json` without keys; keys move to the OS keychain.
-- Live tests and the dev server docs use port 18108 by default instead of 8108.
+- Profiles are stored in `connections.json` without keys; keys are stored in the OS keychain.
+- The live tests use `http://localhost:18108` by default instead of port 8108. The dev server still starts on 8108 unless `TYPESENSE_PORT` is set.

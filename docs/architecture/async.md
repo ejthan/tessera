@@ -47,7 +47,8 @@ pub type ConnectFuture = Pin<Box<dyn Future<Output = Result<Connected, Error>> +
 - Saves are chained: each save's task awaits the previous one before it writes, so the last edit is the one on disk.
 - The save chain runs on GPUI's background executor, not the foreground one. On quit, GPUI blocks the main thread on the `on_app_quit` handlers and runs no foreground tasks meanwhile (`platform_scheduler.rs` `block`), so a foreground save could not finish.
 - On quit, `AppState` awaits the pending save, for at most GPUI's `SHUTDOWN_TIMEOUT` (200 ms). A save still running after that may be cut off when the process exits. Because `store::save` writes a temporary file and renames it, the previous `connections.json` then stays intact; only the last edits are lost.
-- `connect` takes an optional key. "Save and connect" passes the key it just stored, because a keychain `get` that runs alongside the `set` could still read nothing.
+- The connect dialog does not reconnect after saving: it hands the `Connected` from its test (the client and server info for the values it saved) to `AppState::add_connected`, so there is no second probe round and no keychain `get` racing the `set` it just did. After "Save anyway" (the test failed) it closes any open connection of that profile instead, so no connection keeps the old profile and client.
+- `connect` still takes an optional key, used instead of the stored one; no caller in the app passes one today.
 - After a failed load, `AppState::save` does nothing for the rest of the session, so a file that does not parse is never overwritten.
 - `connections.json` is read once, in `run`, before the window opens.
 - Tests that touch the secret store or the file install a real tokio runtime as the `Tokio` global and call `cx.executor().allow_parking()`, so the test scheduler waits for the wake-up from tokio's threads.
