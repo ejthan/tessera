@@ -12,11 +12,14 @@ use std::sync::Arc;
 use gpui_kit::{App, AppContext as _, Context, Entity, Subscription, Task};
 use rust_i18n::t;
 use secrecy::{ExposeSecret as _, SecretString};
+use tessera_client::{RequestEvent, RequestHook};
 use tessera_core::cli::Launch;
 use tessera_core::import;
+use tessera_core::log::{LogEntry, RequestLog};
 use tessera_core::profile::Profile;
 use tessera_core::secrets::{SecretError, SecretStore};
 use tessera_core::store::{self, ConnectionsFile, SCHEMA_VERSION, StoreError};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -59,7 +62,17 @@ pub struct AppState {
     save_task: Option<Task<()>>,
     /// Waits for `save_task` on quit; registered with the first save.
     on_quit: Option<Subscription>,
+    log: RequestLog,
+    log_tx: UnboundedSender<LogEntry>,
+    /// Taken by [`AppState::spawn_log_drain`].
+    log_rx: Option<UnboundedReceiver<LogEntry>>,
+    log_drain: Option<Task<()>>,
 }
+
+/// Entries kept for user-initiated requests.
+const LOG_USER_CAP: usize = 1000;
+/// Entries kept for background polling.
+const LOG_POLLING_CAP: usize = 200;
 
 impl AppState {
     /// State from the result of [`store::load`]. A failed load keeps the profiles in memory only.
@@ -75,7 +88,12 @@ impl AppState {
                 (ConnectionsFile::default(), Some(e.to_string()))
             }
         };
+        let (log_tx, log_rx) = unbounded_channel();
         Self {
+            log: RequestLog::new(LOG_USER_CAP, LOG_POLLING_CAP),
+            log_tx,
+            log_rx: Some(log_rx),
+            log_drain: None,
             profiles: file.profiles,
             last_used: file.last_used,
             reopen_last: file.reopen_last,
@@ -89,6 +107,57 @@ impl AppState {
             save_task: None,
             on_quit: None,
         }
+    }
+
+    /// The request log of all connections.
+    pub fn log(&self) -> &RequestLog {
+        &self.log
+    }
+
+    /// Where request events enter the log. Hooks send here from tokio; tests inject events here.
+    pub fn log_sender(&self) -> UnboundedSender<LogEntry> {
+        self.log_tx.clone()
+    }
+
+    /// A hook that sends the events of `profile`'s requests to the log. Never carries the key.
+    pub fn log_hook(&self, profile: &Profile) -> RequestHook {
+        let tx = self.log_tx.clone();
+        let (connection, connection_name): (Uuid, Arc<str>) =
+            (profile.id, profile.name.as_str().into());
+        Arc::new(move |event: &RequestEvent| {
+            // A closed channel means the app is quitting.
+            tx.send(LogEntry {
+                connection,
+                connection_name: connection_name.clone(),
+                event: event.clone(),
+            })
+            .ok();
+        })
+    }
+
+    /// Starts the task that moves queued events into the log, one `notify` per batch.
+    /// Call once, right after the entity is created: `cx.new(|cx| { s.spawn_log_drain(cx); s })`.
+    pub fn spawn_log_drain(&mut self, cx: &mut Context<Self>) {
+        let Some(mut rx) = self.log_rx.take() else {
+            return;
+        };
+        self.log_drain = Some(cx.spawn(async move |this, cx| {
+            while let Some(first) = rx.recv().await {
+                let mut batch = vec![first];
+                while let Ok(entry) = rx.try_recv() {
+                    batch.push(entry);
+                }
+                if this
+                    .update(cx, |s, cx| {
+                        batch.into_iter().for_each(|e| s.log.push(e));
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Applies the launch mode and returns the profile to connect at startup, if any.
@@ -311,6 +380,7 @@ impl AppState {
             blocking(cx, move || secrets.get(id))
         });
         let connect = cx.global::<ConnectorGlobal>().0.clone();
+        let hook = self.log_hook(&profile);
         let weak = conn.downgrade();
         let task = cx.spawn(async move |this, cx| {
             let key = match stored_key {
@@ -322,9 +392,11 @@ impl AppState {
             let missing_key =
                 matches!(&key, Ok(k) if k.as_ref().is_none_or(|k| k.expose_secret().is_empty()));
             let result = match key {
-                Ok(Some(key)) if !key.expose_secret().is_empty() => connect(profile.clone(), key)
-                    .await
-                    .map_err(|e| error_text(&e, &profile)),
+                Ok(Some(key)) if !key.expose_secret().is_empty() => {
+                    connect(profile.clone(), key, hook)
+                        .await
+                        .map_err(|e| error_text(&e, &profile))
+                }
                 Ok(_) => Err(t!("connect.error.no_key").to_string()),
                 Err(e) => Err(t!("connect.error.keychain", detail = e.to_string()).to_string()),
             };
@@ -470,14 +542,16 @@ mod tests {
         let record = seen.clone();
         let result = Arc::new(result);
         cx.update(|cx| {
-            cx.set_global(ConnectorGlobal(Arc::new(move |profile: Profile, key| {
-                record
-                    .lock()
-                    .unwrap()
-                    .push((profile.name, key.expose_secret().to_string()));
-                let r = result();
-                Box::pin(async move { r })
-            })));
+            cx.set_global(ConnectorGlobal(Arc::new(
+                move |profile: Profile, key, _hook| {
+                    record
+                        .lock()
+                        .unwrap()
+                        .push((profile.name, key.expose_secret().to_string()));
+                    let r = result();
+                    Box::pin(async move { r })
+                },
+            )));
         });
         seen
     }

@@ -97,7 +97,10 @@ pub fn run(launch: Launch) -> Result<(), String> {
             window_min_size: Some(MIN_WINDOW),
             ..Default::default()
         };
-        let state = cx.new(|_| state);
+        let state = cx.new(|cx| {
+            state.spawn_log_drain(cx);
+            state
+        });
         if let Some(id) = open {
             state.update(cx, |s, cx| s.connect(id, None, cx));
         }

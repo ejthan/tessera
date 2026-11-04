@@ -22,8 +22,9 @@ use tessera_app::state::AppState;
 use tessera_app::views::connect_dialog::ConnectDialog;
 use tessera_app::views::import_dialog::ImportDialog;
 use tessera_app::views::root::RootView;
-use tessera_client::{Client, ClientOptions, Error, KeyAccess};
+use tessera_client::{Client, ClientOptions, Error, KeyAccess, Method, Origin, RequestEvent};
 use tessera_core::cli::Launch;
+use tessera_core::log::{Filter, LogEntry};
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::secrets::{MemoryStore, SecretError, SecretStore};
 use tessera_core::store::{self, ConnectionsFile, StoreError};
@@ -63,7 +64,11 @@ fn open_state_at(
             origin: Point::default(),
             size: size(px(1200.), px(800.)),
         };
-        let state = cx.new(|_| AppState::new(loaded, path, secrets));
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(loaded, path, secrets);
+            state.spawn_log_drain(cx);
+            state
+        });
         let root_state = state.clone();
         let (window, _) = gpui_kit::open_window(
             WindowOptions {
@@ -134,10 +139,12 @@ fn fake_connector(
 ) {
     let answer = Arc::new(answer);
     cx.update(|cx| {
-        cx.set_global(ConnectorGlobal(Arc::new(move |profile: Profile, _key| {
-            let result = answer(&profile);
-            Box::pin(async move { result })
-        })));
+        cx.set_global(ConnectorGlobal(Arc::new(
+            move |profile: Profile, _key, _hook| {
+                let result = answer(&profile);
+                Box::pin(async move { result })
+            },
+        )));
     });
 }
 
@@ -146,7 +153,7 @@ fn recording_connector(cx: &mut TestAppContext, info: Connected) -> Arc<Mutex<Ve
     let seen = Arc::new(Mutex::new(Vec::new()));
     let record = seen.clone();
     cx.update(|cx| {
-        cx.set_global(ConnectorGlobal(Arc::new(move |_: Profile, key| {
+        cx.set_global(ConnectorGlobal(Arc::new(move |_: Profile, key, _hook| {
             record.lock().unwrap().push(key.expose_secret().to_string());
             let info = info.clone();
             Box::pin(async move { Ok(info) })
@@ -458,7 +465,7 @@ async fn cancel_during_test_does_not_connect(cx: &mut TestAppContext) {
     let called = Arc::new(AtomicBool::new(false));
     let (flag, call) = (dropped.clone(), called.clone());
     cx.update(|cx| {
-        cx.set_global(ConnectorGlobal(Arc::new(move |_: Profile, _| {
+        cx.set_global(ConnectorGlobal(Arc::new(move |_: Profile, _, _| {
             call.store(true, Ordering::SeqCst);
             let guard = Dropped(flag.clone());
             Box::pin(async move {
@@ -1837,4 +1844,37 @@ fn string_literals(code: &str) -> Vec<String> {
 fn string_literals_are_found() {
     let code = r#"let a = "x ⌘N"; let q = '"'; let b = "Ctrl+\"N\""; // "c""#;
     assert_eq!(string_literals(code), ["x ⌘N", r#"Ctrl+\"N\""#, "c"]);
+}
+
+#[gpui_kit::test]
+async fn events_reach_the_log(cx: &mut TestAppContext) {
+    let (_handle, state, _rt) = open_app(cx, Vec::new(), Arc::new(MemoryStore::default()));
+    let tx = state.read_with(cx, |s, _| s.log_sender());
+    for id in 0..2 {
+        tx.send(LogEntry {
+            connection: Uuid::nil(),
+            connection_name: "dev".into(),
+            event: RequestEvent {
+                id,
+                started_at: std::time::SystemTime::UNIX_EPOCH,
+                node: "http://localhost:8108".parse().unwrap(),
+                method: Method::GET,
+                path: "/health".into(),
+                query: None,
+                request_headers: vec![],
+                key_prefix: String::new(),
+                request_body: None,
+                response_body: None,
+                status: Some(200),
+                duration: Duration::ZERO,
+                size: None,
+                origin: Origin::User,
+                error: None,
+            },
+        })
+        .unwrap();
+    }
+    cx.run_until_parked();
+    let n = state.read_with(cx, |s, _| s.log().entries(&Filter::default()).len());
+    assert_eq!(n, 2);
 }

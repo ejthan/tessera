@@ -407,6 +407,7 @@ impl ConnectDialog {
                 .spawn_blocking(move || secrets.get(id))
         });
         let connect = cx.global::<ConnectorGlobal>().0.clone();
+        let hook = self.state.read(cx).log_hook(&profile);
         self.phase = Phase::Testing { then_save };
         self.outcome = None;
         cx.notify();
@@ -423,7 +424,7 @@ impl ConnectDialog {
             };
             let start = Instant::now();
             let result = match key {
-                Ok(key) => connect(profile.clone(), key)
+                Ok(key) => connect(profile.clone(), key, hook)
                     .await
                     .map_err(|e| error_text(&e, &profile)),
                 Err(e) => Err(e),
