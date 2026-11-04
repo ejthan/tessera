@@ -2,6 +2,8 @@
 
 //! Domain logic for Tessera that does not depend on the UI.
 
+pub mod profile;
+
 use semver::{Prerelease, Version};
 
 /// Oldest Typesense release (major, minor) that Tessera fully supports.
