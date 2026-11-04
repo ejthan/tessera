@@ -94,7 +94,8 @@ pub fn client_options(profile: &Profile) -> Result<(Vec<String>, ClientOptions),
 }
 
 /// The real connector, on the tokio runtime: `GET /health`, `GET /debug` (which also proves
-/// the key is valid), `GET /collections` and the `GET /keys` probe.
+/// the key is valid), `GET /collections?limit=1&exclude_fields=fields` and the `GET /keys`
+/// probe. `AppState::connect` checks the nodes first, so `InvalidUrl` here is a fallback.
 pub fn tokio_connector(handle: Handle) -> Connector {
     Arc::new(move |profile, key| {
         let task = AbortOnDrop::from_join_handle(handle.spawn(async move {
@@ -106,7 +107,7 @@ pub fn tokio_connector(handle: Handle) -> Connector {
             let start = Instant::now();
             let debug = client.debug().await?;
             let latency = start.elapsed();
-            client.collections_summary().await?;
+            client.collections_probe().await?;
             // Only after `debug` succeeded: a wrong key would also read as restricted.
             let access = client.keys_probe().await?;
             Ok(Connected {
@@ -209,13 +210,12 @@ mod tests {
 
     #[tokio::test]
     async fn tokio_connector_builds_connection() {
-        use wiremock::matchers::path;
+        use wiremock::matchers::{path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         for (route, status, body) in [
             ("/health", 200, r#"{"ok":true}"#),
             ("/debug", 200, r#"{"state":1,"version":"30.2"}"#),
-            ("/collections", 200, "[]"),
             ("/keys", 401, r#"{"message":"Forbidden"}"#),
         ] {
             Mock::given(path(route))
@@ -224,6 +224,13 @@ mod tests {
                 .mount(&server)
                 .await;
         }
+        Mock::given(path("/collections"))
+            .and(query_param("limit", "1"))
+            .and(query_param("exclude_fields", "fields"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .expect(1)
+            .mount(&server)
+            .await;
         let addr = server.address();
         let profile = Profile::new("t", vec![node(&addr.ip().to_string(), addr.port())]);
         let connect = tokio_connector(Handle::current());

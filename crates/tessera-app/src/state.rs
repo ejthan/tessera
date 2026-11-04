@@ -8,9 +8,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::{App, AppContext as _, Context, Entity, Global, Task};
+use gpui_kit::{App, AppContext as _, Context, Entity, Global, Subscription, Task};
 use rust_i18n::t;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret as _, SecretString};
 use tessera_core::cli::Launch;
 use tessera_core::profile::Profile;
 use tessera_core::secrets::{SecretError, SecretStore};
@@ -18,7 +18,7 @@ use tessera_core::store::{self, ConnectionsFile, SCHEMA_VERSION, StoreError};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::connection::{ConnectionState, ConnectorGlobal, error_text};
+use crate::connection::{Connected, ConnectionState, ConnectorGlobal, client_options, error_text};
 use crate::runtime::Tokio;
 
 /// The secret store dialogs use. The app installs `KeyringStore`; tests install a `MemoryStore`.
@@ -43,11 +43,14 @@ pub struct AppState {
     /// The connection the main area shows.
     pub selected: Option<Uuid>,
     /// The connection from CLI flags or `TYPESENSE_*`. Never saved; its key lives in memory.
+    /// An empty key means none was given.
     pub temporary: Option<(Profile, SecretString)>,
     /// Why `connections.json` could not be loaded. While set, the file is never written.
     pub load_error: Option<String>,
     /// The last save. Each save awaits the previous one, so writes land in order.
     save_task: Option<Task<()>>,
+    /// Waits for `save_task` on quit; registered with the first save.
+    on_quit: Option<Subscription>,
 }
 
 impl AppState {
@@ -75,6 +78,7 @@ impl AppState {
             temporary: None,
             load_error,
             save_task: None,
+            on_quit: None,
         }
     }
 
@@ -128,7 +132,9 @@ impl AppState {
         };
         let tokio = cx.global::<Tokio>().0.clone();
         let previous = self.save_task.take();
-        self.save_task = Some(cx.spawn(async move |_, _| {
+        // On the background executor: the quit handler blocks the main thread, which then
+        // runs no foreground tasks, so a foreground save chain could not finish.
+        self.save_task = Some(cx.background_spawn(async move {
             if let Some(previous) = previous {
                 previous.await;
             }
@@ -143,6 +149,17 @@ impl AppState {
                 Err(e) => tracing::error!("saving connections stopped: {e}"),
             }
         }));
+        if self.on_quit.is_none() {
+            // GPUI waits up to SHUTDOWN_TIMEOUT (200 ms) for this before the process exits.
+            self.on_quit = Some(cx.on_app_quit(|s, _| {
+                let pending = s.save_task.take();
+                async move {
+                    if let Some(pending) = pending {
+                        pending.await;
+                    }
+                }
+            }));
+        }
     }
 
     /// Adds or replaces a profile and saves. With `key`, stores it in the secret store; the
@@ -183,9 +200,11 @@ impl AppState {
         secret_task(blocking(cx, move || secrets.delete(id)), cx)
     }
 
-    /// Connects profile `id` (saved or temporary) and selects it. A connected profile is only
-    /// selected; a failed or running attempt is retried in place, cancelling the previous one.
-    pub fn connect(&mut self, id: Uuid, cx: &mut Context<Self>) {
+    /// Connects profile `id` (saved or temporary) and selects it. `key` is used instead of
+    /// the stored one, so a key that was just saved need not be read back from the keychain.
+    /// A connected profile is only selected; a failed or running attempt is retried in place
+    /// with the current profile, cancelling the previous attempt.
+    pub fn connect(&mut self, id: Uuid, key: Option<SecretString>, cx: &mut Context<Self>) {
         if let Some(conn) = self.connection(id, cx)
             && conn.read(cx).connected.is_some()
         {
@@ -196,14 +215,17 @@ impl AppState {
         let temporary = self.temporary.as_ref().filter(|(p, _)| p.id == id);
         let saved = temporary.is_none();
         let (profile, key) = match temporary {
-            Some((p, key)) => (p.clone(), Some(key.clone())),
+            Some((p, temp_key)) => (p.clone(), key.or_else(|| Some(temp_key.clone()))),
             None => match self.profiles.iter().find(|p| p.id == id) {
-                Some(p) => (p.clone(), None),
+                Some(p) => (p.clone(), key),
                 None => return,
             },
         };
         let conn = match self.connection(id, cx) {
-            Some(conn) => conn,
+            Some(conn) => {
+                conn.update(cx, |c, _| c.profile = profile.clone());
+                conn
+            }
             None => {
                 let conn = cx.new(|_| ConnectionState::new(profile.clone()));
                 cx.observe(&conn, |_, _, cx| cx.notify()).detach();
@@ -211,7 +233,22 @@ impl AppState {
                 conn
             }
         };
-        // A temporary connection's key is in memory; a saved profile's is in the secret store.
+        self.selected = Some(id);
+        cx.notify();
+        if let Err(e) = client_options(&profile) {
+            conn.update(cx, |c, cx| {
+                c.task = None;
+                c.connecting = false;
+                c.error = Some(
+                    t!("connect.error.invalid_node", reason = e.0)
+                        .to_string()
+                        .into(),
+                );
+                cx.notify();
+            });
+            return;
+        }
+        // Without a key in memory, read the stored one.
         let stored_key = key.is_none().then(|| {
             let secrets = self.secrets.clone();
             blocking(cx, move || secrets.get(id))
@@ -221,18 +258,16 @@ impl AppState {
         let weak = conn.downgrade();
         let task = cx.spawn(async move |this, cx| {
             let key = match stored_key {
-                None => Ok(key.unwrap_or_else(|| SecretString::from(""))),
-                Some(job) => match job.await {
-                    // Without a stored key, connect anyway and let the server say why it fails.
-                    Ok(Ok(key)) => Ok(key.unwrap_or_else(|| SecretString::from(""))),
-                    Ok(Err(e)) => Err(e),
-                    Err(e) => Err(SecretError::new(e.to_string())),
-                },
+                None => Ok(key),
+                Some(job) => job
+                    .await
+                    .unwrap_or_else(|e| Err(SecretError::new(e.to_string()))),
             };
             let result = match key {
-                Ok(key) => connect(profile, key)
+                Ok(Some(key)) if !key.expose_secret().is_empty() => connect(profile, key)
                     .await
                     .map_err(|e| error_text(&e, &host)),
+                Ok(_) => Err(t!("connect.error.no_key").to_string()),
                 Err(e) => Err(t!("connect.error.keychain", detail = e.to_string()).to_string()),
             };
             let ok = result.is_ok();
@@ -259,15 +294,13 @@ impl AppState {
             c.task = Some(task);
             cx.notify();
         });
-        self.selected = Some(id);
-        cx.notify();
     }
 
     /// Adds a connection that was established elsewhere (the connect dialog) and selects it.
     pub fn add_connected(
         &mut self,
         profile: Profile,
-        connected: crate::connection::Connected,
+        connected: Connected,
         cx: &mut Context<Self>,
     ) {
         let id = profile.id;
@@ -314,14 +347,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use gpui_kit::TestAppContext;
-    use secrecy::{ExposeSecret as _, SecretString};
+    use secrecy::SecretString;
     use tessera_client::{Client, ClientOptions, Error, KeyAccess, RaftState};
     use tessera_core::ServerCapabilities;
     use tessera_core::profile::{Node, Protocol};
     use tessera_core::secrets::MemoryStore;
 
     use super::*;
-    use crate::connection::{Connected, ConnectorGlobal, ServerInfo};
+    use crate::connection::ServerInfo;
     use crate::runtime::Tokio;
 
     fn node() -> Node {
@@ -467,7 +500,7 @@ mod tests {
             .unwrap()
             .expect("temporary connection opens");
         let state = cx.new(|_| s);
-        state.update(cx, |s, cx| s.connect(id, cx));
+        state.update(cx, |s, cx| s.connect(id, None, cx));
         cx.run_until_parked();
         state.read_with(cx, |s, cx| {
             assert!(s.profiles.is_empty());
@@ -500,7 +533,7 @@ mod tests {
         };
         let state = new_state(cx, Ok(file), None, secrets);
         let attempt = state.update(cx, |s, cx| {
-            s.connect(id, cx);
+            s.connect(id, None, cx);
             let c = s.connection(id, cx).unwrap();
             assert!(c.read(cx).connecting);
             c.update(cx, |c, _| c.task.take()).unwrap()
@@ -510,7 +543,7 @@ mod tests {
             let c = s.connection(id, cx).unwrap();
             assert!(c.read(cx).connected.is_some());
             assert_eq!(s.last_used, Some(id));
-            s.connect(id, cx);
+            s.connect(id, None, cx);
             assert!(
                 !c.read(cx).connecting,
                 "a connected profile is only selected"
@@ -541,12 +574,12 @@ mod tests {
             .resolve(Launch::Temporary {
                 profile: Profile::new("tmp", vec![node()]),
                 key_from_stdin: false,
-                key_from_env: None,
+                key_from_env: Some(SecretString::from("k")),
             })
             .unwrap()
             .unwrap();
         let state = cx.new(|_| s);
-        state.update(cx, |s, cx| s.connect(id, cx));
+        state.update(cx, |s, cx| s.connect(id, None, cx));
         cx.run_until_parked();
         state.read_with(cx, |s, cx| {
             let c = s.connection(id, cx).unwrap();
@@ -572,7 +605,7 @@ mod tests {
         stored.await.unwrap();
         assert!(secrets.get(id).unwrap().is_some());
         let attempt = state.update(cx, |s, cx| {
-            s.connect(id, cx);
+            s.connect(id, None, cx);
             s.connection(id, cx)
                 .unwrap()
                 .update(cx, |c, _| c.task.take())
@@ -588,6 +621,164 @@ mod tests {
             assert_eq!(s.last_used, None);
         });
         assert!(secrets.get(id).unwrap().is_none());
+    }
+
+    /// A store whose reads always fail, to prove a key was not read back.
+    struct NoReads;
+
+    impl SecretStore for NoReads {
+        fn get(&self, _: Uuid) -> Result<Option<SecretString>, SecretError> {
+            Err(SecretError::new("read attempted"))
+        }
+        fn set(&self, _: Uuid, _: &SecretString) -> Result<(), SecretError> {
+            Ok(())
+        }
+        fn delete(&self, _: Uuid) -> Result<(), SecretError> {
+            Ok(())
+        }
+    }
+
+    fn error_of(state: &Entity<AppState>, id: Uuid, cx: &mut TestAppContext) -> Option<String> {
+        state.read_with(cx, |s, cx| {
+            let c = s.connection(id, cx).unwrap();
+            let c = c.read(cx);
+            assert!(!c.connecting);
+            c.error.as_ref().map(|e| e.to_string())
+        })
+    }
+
+    #[gpui_kit::test]
+    async fn missing_key_does_not_call_the_connector(cx: &mut TestAppContext) {
+        rust_i18n::set_locale("en");
+        let _rt = tokio(cx);
+        let seen = fake(cx, || Ok(connected()));
+        let saved = Profile::new("saved", vec![node()]);
+        let saved_id = saved.id;
+        let file = ConnectionsFile {
+            profiles: vec![saved],
+            ..Default::default()
+        };
+        let mut s = AppState::new(Ok(file), None, Arc::new(MemoryStore::default()));
+        let temp_id = s
+            .resolve(Launch::Temporary {
+                profile: Profile::new("tmp", vec![node()]),
+                key_from_stdin: false,
+                key_from_env: None,
+            })
+            .unwrap()
+            .unwrap();
+        let state = cx.new(|_| s);
+        let attempt = state.update(cx, |s, cx| {
+            s.connect(temp_id, None, cx);
+            s.connect(saved_id, None, cx);
+            s.connection(saved_id, cx)
+                .unwrap()
+                .update(cx, |c, _| c.task.take())
+                .unwrap()
+        });
+        attempt.await;
+        cx.run_until_parked();
+        for id in [temp_id, saved_id] {
+            let error = error_of(&state, id, cx).expect("inline error");
+            assert!(error.contains("No API key"), "{error}");
+        }
+        assert!(seen.lock().unwrap().is_empty(), "connector was called");
+    }
+
+    #[gpui_kit::test]
+    fn given_key_skips_the_keychain(cx: &mut TestAppContext) {
+        let seen = fake(cx, || Ok(connected()));
+        let profile = Profile::new("saved", vec![node()]);
+        let id = profile.id;
+        let file = ConnectionsFile {
+            profiles: vec![profile],
+            ..Default::default()
+        };
+        let state = cx.new(|_| AppState::new(Ok(file), None, Arc::new(NoReads)));
+        state.update(cx, |s, cx| {
+            s.connect(id, Some(SecretString::from("k-new")), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(error_of(&state, id, cx), None);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [("saved".to_string(), "k-new".to_string())]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn reconnect_uses_the_edited_profile(cx: &mut TestAppContext) {
+        let seen = fake(cx, || Err(Error::Timeout));
+        let mut profile = Profile::new("before", vec![node()]);
+        let id = profile.id;
+        let state = new_state(cx, Ok(ConnectionsFile::default()), None, Arc::default());
+        state.update(cx, |s, cx| {
+            s.upsert_profile(profile.clone(), None, cx).detach();
+            s.connect(id, Some(SecretString::from("k")), cx);
+        });
+        cx.run_until_parked();
+        profile.name = "after".into();
+        state.update(cx, |s, cx| {
+            s.upsert_profile(profile.clone(), None, cx).detach();
+            s.connect(id, Some(SecretString::from("k")), cx);
+        });
+        cx.run_until_parked();
+        let names: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect();
+        assert_eq!(names, ["before", "after"]);
+        state.read_with(cx, |s, cx| {
+            assert_eq!(s.connection(id, cx).unwrap().read(cx).profile.name, "after");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn invalid_node_shows_its_reason(cx: &mut TestAppContext) {
+        rust_i18n::set_locale("en");
+        let seen = fake(cx, || Ok(connected()));
+        let mut bad = node();
+        bad.host = "ts.example.com/x".into();
+        let profile = Profile::new("bad", vec![bad]);
+        let id = profile.id;
+        let file = ConnectionsFile {
+            profiles: vec![profile],
+            ..Default::default()
+        };
+        let state = cx.new(|_| AppState::new(Ok(file), None, Arc::new(NoReads)));
+        state.update(cx, |s, cx| s.connect(id, Some(SecretString::from("k")), cx));
+        cx.run_until_parked();
+        let error = error_of(&state, id, cx).expect("inline error");
+        assert!(error.contains("ts.example.com/x"), "{error}");
+        assert!(
+            !error.contains("http://"),
+            "not the URL format text: {error}"
+        );
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn pending_save_finishes_on_quit(cx: &mut TestAppContext) {
+        let _rt = tokio(cx);
+        // Poll the quit handler for the whole SHUTDOWN_TIMEOUT, not a random number of ticks.
+        cx.executor().set_block_on_ticks(usize::MAX..=usize::MAX);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let state = new_state(
+            cx,
+            Ok(ConnectionsFile::default()),
+            Some(path.clone()),
+            Arc::default(),
+        );
+        state.update(cx, |s, cx| {
+            s.upsert_profile(Profile::new("kept", vec![node()]), None, cx)
+                .detach();
+        });
+        cx.quit();
+        let file = store::load(&path).unwrap();
+        assert_eq!(file.profiles.len(), 1, "save finished before quit returned");
     }
 
     #[test]

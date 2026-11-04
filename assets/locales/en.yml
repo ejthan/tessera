@@ -27,6 +27,8 @@ connect.error.decode: "Unexpected answer from %{host}. Is this a Typesense serve
 connect.error.not_typesense: "%{host} answered HTTP %{status}, which does not look like Typesense. Check the URL and path prefix."
 connect.error.tls: "The TLS connection to %{host} failed: %{detail}"
 connect.error.keychain: "Could not read the API key from the system credential store: %{detail}"
+connect.error.no_key: "No API key is stored for this connection. Edit it to add one."
+connect.error.invalid_node: "This connection has an invalid node: %{reason}. Edit it to fix the node."
 connect.error.read_only: "This connection is read-only, so %{method} requests are blocked."
 overview.title: "Overview"
 overview.version: "Version"

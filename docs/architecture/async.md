@@ -35,15 +35,19 @@ pub type ConnectFuture = Pin<Box<dyn Future<Output = Result<Connected, Error>> +
 // Connected { client: Client, info: ServerInfo, access: KeyAccess }
 ```
 
-- The app installs `tokio_connector`. It builds the `Client` from the profile (node URLs, timeout, retries capped at 10, nearest node, TLS options, read-only), then runs `GET /health`, `GET /debug`, `GET /collections` and the `GET /keys` probe on tokio. The probe comes after `/debug`, because Typesense answers `401` to a wrong key too. The latency shown is the duration of `/debug`.
+- The app installs `tokio_connector`. It builds the `Client` from the profile (node URLs, timeout, retries capped at 10, nearest node, TLS options, read-only), then runs `GET /health`, `GET /debug`, `GET /collections?limit=1&exclude_fields=fields` and the `GET /keys` probe on tokio. The probe comes after `/debug`, because Typesense answers `401` to a wrong key too. The latency shown is the duration of `/debug`.
 - It is the seam for UI tests. GPUI's test executor runs on a simulated clock and does not wait for real network I/O, so tests install a fake that answers immediately and can record which profile and key it was called with.
 - `AppState::connect` and the connect dialog are its only callers. Views never build a `Client` themselves.
+- `AppState::connect` does not call it for a profile whose nodes do not form URLs, or when no key is in memory or stored. The connection then shows the reason inline.
 
 ## Keychain and file I/O
 
-`SecretStore` calls (Keychain, Credential Manager, Secret Service) and writes of `connections.json` block. `AppState` runs them on tokio's `spawn_blocking` through the `Tokio` global and awaits the `JoinHandle` from a GPUI task. A blocking task cannot be aborted, so dropping the GPUI task only stops waiting for the result; the write itself always finishes.
+`SecretStore` calls (Keychain, Credential Manager, Secret Service) and writes of `connections.json` block. `AppState` runs them on tokio's `spawn_blocking` through the `Tokio` global and awaits the `JoinHandle` from a GPUI task. A blocking call that has started cannot be aborted, so dropping the GPUI task only stops waiting for its result. A save that has not reached `spawn_blocking` yet is lost when its task is dropped.
 
 - Saves are chained: each save's task awaits the previous one before it writes, so the last edit is the one on disk.
+- The save chain runs on GPUI's background executor, not the foreground one. On quit, GPUI blocks the main thread on the `on_app_quit` handlers and runs no foreground tasks meanwhile (`platform_scheduler.rs` `block`), so a foreground save could not finish.
+- On quit, `AppState` awaits the pending save, for at most GPUI's `SHUTDOWN_TIMEOUT` (200 ms). A save still running after that may be cut off when the process exits. Because `store::save` writes a temporary file and renames it, the previous `connections.json` then stays intact; only the last edits are lost.
+- `connect` takes an optional key. "Save and connect" passes the key it just stored, because a keychain `get` that runs alongside the `set` could still read nothing.
 - After a failed load, `AppState::save` does nothing for the rest of the session, so a file that does not parse is never overwritten.
 - `connections.json` is read once, in `run`, before the window opens.
 - Tests that touch the secret store or the file install a real tokio runtime as the `Tokio` global and call `cx.executor().allow_parking()`, so the test scheduler waits for the wake-up from tokio's threads.

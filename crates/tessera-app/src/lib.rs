@@ -101,7 +101,7 @@ pub fn run(launch: Launch) -> Result<(), String> {
         };
         let state = cx.new(|_| state);
         if let Some(id) = open {
-            state.update(cx, |s, cx| s.connect(id, cx));
+            state.update(cx, |s, cx| s.connect(id, None, cx));
         }
         let (window, _) = gpui_kit::open_window(options, cx, |window, cx| {
             window.set_window_title(&t!("app.title"));

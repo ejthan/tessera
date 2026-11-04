@@ -27,6 +27,8 @@ connect.error.decode: "Unerwartete Antwort von %{host}. Ist das ein Typesense-Se
 connect.error.not_typesense: "%{host} antwortete mit HTTP %{status}, das sieht nicht nach Typesense aus. Prüfe die URL und das Pfad-Präfix."
 connect.error.tls: "Die TLS-Verbindung zu %{host} ist fehlgeschlagen: %{detail}"
 connect.error.keychain: "Der API-Key konnte nicht aus dem Schlüsselspeicher des Systems gelesen werden: %{detail}"
+connect.error.no_key: "Für diese Verbindung ist kein API-Key gespeichert. Bearbeite sie, um einen hinzuzufügen."
+connect.error.invalid_node: "Diese Verbindung hat einen ungültigen Node: %{reason}. Bearbeite sie, um den Node zu korrigieren."
 connect.error.read_only: "Diese Verbindung ist schreibgeschützt, daher sind %{method}-Anfragen gesperrt."
 overview.title: "Übersicht"
 overview.version: "Version"
