@@ -42,6 +42,13 @@ docker compose -f dev/docker-compose.yml up -d
 
 This starts Typesense 30.2 on port 8108 with the local-only key `xyz`. If port 8108 is taken, set `TYPESENSE_PORT`, for example `TYPESENSE_PORT=18108`. `TYPESENSE_VERSION` picks another image tag.
 
+To run Tessera against a dev server on a custom port:
+
+```bash
+TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d
+cargo run -p tessera-app -- --host localhost --port 18108 --api-key-stdin <<< xyz
+```
+
 ## Tests
 
 ```bash
@@ -54,7 +61,7 @@ Integration tests against the local server are ignored by default:
 cargo test -p tessera-client -- --ignored
 ```
 
-They use `http://localhost:8108` and key `xyz`; override with `TESSERA_IT_URL` and `TESSERA_IT_KEY`.
+They use `http://localhost:18108` and key `xyz`; override with `TESSERA_IT_URL` and `TESSERA_IT_KEY`.
 
 ## Smoke start
 
