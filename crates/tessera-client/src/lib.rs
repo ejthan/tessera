@@ -242,6 +242,12 @@ impl Client {
         self.collections_summary_on(None).await
     }
 
+    /// `GET /collections?limit=1&exclude_fields=fields`: proves the key may read collections,
+    /// without listing every collection of a large cluster.
+    pub async fn collections_probe(&self) -> Result<(), Error> {
+        self.collections_probe_on(None).await
+    }
+
     /// `GET /keys`, to learn whether the key is an admin key. Only the status counts:
     /// `200` is [`KeyAccess::Admin`], `401` or `403` is [`KeyAccess::Restricted`].
     ///
@@ -300,6 +306,12 @@ impl Client {
             .get_ok(pin, "collections", Some("exclude_fields=fields"))
             .await?;
         serde_json::from_str(&body).map_err(Error::Decode)
+    }
+
+    async fn collections_probe_on(&self, pin: Option<usize>) -> Result<(), Error> {
+        self.get_ok(pin, "collections", Some("limit=1&exclude_fields=fields"))
+            .await
+            .map(drop)
     }
 
     async fn keys_probe_on(&self, pin: Option<usize>) -> Result<KeyAccess, Error> {
@@ -417,6 +429,12 @@ impl NodeClient {
     /// `GET /collections?exclude_fields=fields` on this node. See [`Client::collections_summary`].
     pub async fn collections_summary(&self) -> Result<Vec<CollectionSummary>, Error> {
         self.client.collections_summary_on(Some(self.index)).await
+    }
+
+    /// `GET /collections?limit=1&exclude_fields=fields` on this node.
+    /// See [`Client::collections_probe`].
+    pub async fn collections_probe(&self) -> Result<(), Error> {
+        self.client.collections_probe_on(Some(self.index)).await
     }
 
     /// `GET /keys` on this node. See [`Client::keys_probe`].

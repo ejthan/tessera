@@ -145,6 +145,20 @@ async fn live_collections_summary() {
 
 #[tokio::test]
 #[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_collections_probe() {
+    let client = client();
+    wait_until_ready(&client).await;
+    client.collections_probe().await.unwrap();
+    client.node(0).collections_probe().await.unwrap();
+    let wrong = client_with("not-the-key").collections_probe().await;
+    assert!(
+        matches!(wrong, Err(Error::Http { status: 401, .. })),
+        "{wrong:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
 async fn live_keys_probe_admin() {
     let client = client();
     wait_until_ready(&client).await;

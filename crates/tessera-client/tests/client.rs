@@ -823,6 +823,33 @@ async fn collections_summary_excludes_fields() {
 }
 
 #[tokio::test]
+async fn collections_probe_asks_for_one_collection_without_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/collections"))
+        .and(wiremock::matchers::query_param("limit", "1"))
+        .and(wiremock::matchers::query_param("exclude_fields", "fields"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = client(&server.uri()).unwrap();
+    client.collections_probe().await.unwrap();
+    client.node(0).collections_probe().await.unwrap();
+}
+
+#[tokio::test]
+async fn collections_probe_reports_http_errors() {
+    let server = MockServer::start().await;
+    mock(&server, "/collections", 401, r#"{"message":"Forbidden"}"#).await;
+    let probe = client(&server.uri()).unwrap().collections_probe().await;
+    assert!(
+        matches!(probe, Err(Error::Http { status: 401, .. })),
+        "{probe:?}"
+    );
+}
+
+#[tokio::test]
 async fn keys_probe_maps_status() {
     for (status, expected) in [
         (200, Some(KeyAccess::Admin)),
