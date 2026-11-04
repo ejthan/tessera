@@ -30,7 +30,7 @@ self.task = Some(cx.spawn(async move |this, cx| {
 `connection::ConnectorGlobal` holds the function that turns a profile and an API key into a live connection:
 
 ```rust
-pub type Connector = Arc<dyn Fn(Profile, SecretString) -> ConnectFuture + Send + Sync>;
+pub type Connector = Arc<dyn Fn(Profile, SecretString, RequestHook) -> ConnectFuture + Send + Sync>;
 pub type ConnectFuture = Pin<Box<dyn Future<Output = Result<Connected, Error>> + Send>>;
 // Connected { client: Client, info: ServerInfo, access: KeyAccess }
 ```
@@ -39,6 +39,10 @@ pub type ConnectFuture = Pin<Box<dyn Future<Output = Result<Connected, Error>> +
 - It is the seam for UI tests. GPUI's test executor runs on a simulated clock and does not wait for real network I/O, so tests install a fake that answers immediately and can record which profile and key it was called with.
 - `AppState::connect` and the connect dialog are its only callers. Views never build a `Client` themselves.
 - `AppState::connect` does not call it for a profile whose nodes do not form URLs, or when no key is in memory or stored. The connection then shows the reason inline.
+
+## The request log channel
+
+Every `Client` gets a `RequestHook` that runs on tokio threads after each request. `AppState::log_hook` makes it: the hook only sends the `RequestEvent` into one unbounded `tokio::sync::mpsc` channel, so it never blocks a request. A single GPUI task drains the channel on the foreground executor and pushes the events into the core `RequestLog` (5000 user and 500 polling entries), then notifies the log panel.
 
 ## Keychain and file I/O
 
