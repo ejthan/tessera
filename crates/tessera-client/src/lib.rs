@@ -179,13 +179,11 @@ impl Client {
     }
 
     /// Makes `index` the active node, for this client and all its clones.
-    ///
-    /// # Panics
-    ///
-    /// If `index` is not below `nodes().len()`.
+    /// An index not below `nodes().len()` is ignored.
     pub fn set_active_node(&self, index: usize) {
-        assert!(index < self.nodes.len(), "node index {index} out of range");
-        self.active.store(index, Ordering::Relaxed);
+        if index < self.nodes.len() {
+            self.active.store(index, Ordering::Relaxed);
+        }
     }
 
     /// A client for node `index` alone. It never fails over.

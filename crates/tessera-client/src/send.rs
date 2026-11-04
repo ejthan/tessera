@@ -29,53 +29,70 @@ impl Client {
         url.set_query(query);
         let key = self.key.expose_secret();
         let mut request_headers = Vec::new();
+        // Event copies of the body are only made when someone listens.
+        let request_body = self.hook.as_ref().and(body.as_deref().map(Body::new));
         let mut request = self
             .http
             .request(method.clone(), url.clone())
             .header("X-TYPESENSE-API-KEY", key)
             .timeout(self.timeout);
-        if let Some(body) = &body {
+        if let Some(body) = body {
             request_headers.push(("content-type".to_string(), "application/json".to_string()));
             request = request
                 .header("content-type", "application/json")
-                .body(body.clone());
+                .body(body);
         }
+        let id = next_id();
         let started_at = SystemTime::now();
         let start = Instant::now();
+        // Kept apart from `result`, so a body that fails to arrive still shows the status.
+        let mut status = None;
         let result = async {
             let response = request.send().await.map_err(Error::from_reqwest)?;
-            let status = response.status().as_u16();
+            let code = response.status().as_u16();
+            status = Some(code);
             let text = response.text().await.map_err(Error::from_reqwest)?;
-            Ok((status, text))
+            Ok((code, text))
         }
         .await;
-        let event = RequestEvent {
-            id: next_id(),
-            started_at,
-            node: base.clone(),
-            method,
-            path: url.path().to_string(),
-            query: url.query().map(str::to_string),
-            request_headers,
-            key_prefix: key.chars().take(4).collect(),
-            request_body: body.as_deref().map(Body::new),
-            response_body: result.as_ref().ok().map(|(_, text)| Body::new(text)),
-            status: result.as_ref().ok().map(|(status, _)| *status),
-            duration: start.elapsed(),
-            size: result.as_ref().ok().map(|(_, text)| text.len() as u64),
-            origin: self.origin,
-            error: result.as_ref().err().map(ToString::to_string),
-        };
+        let duration = start.elapsed();
         tracing::debug!(
-            method = %event.method,
-            path = %event.path,
-            status = ?event.status,
-            ms = event.duration.as_millis() as u64,
+            method = %method,
+            path = %url.path(),
+            status = ?status,
+            ms = duration.as_millis() as u64,
             "typesense request"
         );
         if let Some(hook) = &self.hook {
-            hook(&event);
+            let text = result.as_ref().ok().map(|(_, text)| text);
+            hook(&RequestEvent {
+                id,
+                started_at,
+                node: base.clone(),
+                method,
+                path: url.path().to_string(),
+                query: url.query().map(str::to_string),
+                request_headers,
+                key_prefix: key_prefix(key),
+                request_body,
+                response_body: text.map(|t| Body::new(t)),
+                status,
+                duration,
+                size: text.map(|t| t.len() as u64),
+                origin: self.origin,
+                error: result.as_ref().err().map(ToString::to_string),
+            });
         }
         result
+    }
+}
+
+/// The first 4 characters of keys longer than 8 characters, else nothing, so a short key
+/// never shows up whole.
+fn key_prefix(key: &str) -> String {
+    if key.chars().count() > 8 {
+        key.chars().take(4).collect()
+    } else {
+        String::new()
     }
 }

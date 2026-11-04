@@ -160,7 +160,7 @@ impl Client {
 ```
 
 - All nodes share one `reqwest::Client`. The CA file and `danger_accept_invalid_certs` are applied when it is built. Redirects stay off (M0).
-- The active node starts as the nearest node if set, else the first node. It is shared state (`Arc<AtomicUsize>`), so clones of the client agree on it.
+- The active node starts as the nearest node if set, else the first node. A nearest node that is not in the node list is inserted at index 0 of `nodes()`, so failover order and the cluster view index from there. It is shared state (`Arc<AtomicUsize>`), so clones of the client agree on it.
 - `NodeClient` offers the same endpoint methods for exactly one node. The cluster view uses it, because failover would make a dead node look alive.
 - The endpoint methods (`health`, `debug`, `metrics`, `stats`, `collections_summary`, `keys_probe`) are implemented once and work on both `Client` and `NodeClient` through one internal `send` path.
 
@@ -190,7 +190,7 @@ pub struct RequestEvent {
     pub path: String,
     pub query: Option<String>,
     pub request_headers: Vec<(String, String)>,  // never X-TYPESENSE-API-KEY
-    pub key_prefix: String,             // first 4 characters, for the redacted display
+    pub key_prefix: String,             // first 4 characters if the key is longer than 8, else empty
     pub request_body: Option<Body>,
     pub response_body: Option<Body>,
     pub status: Option<u16>,
@@ -229,7 +229,7 @@ Each gets an integration test against the dev server before any UI uses it (CLAU
 
 ### 6.2 Redaction
 
-- The API key is never in the event (§5.4). The display shows `abcd••••` from `key_prefix`.
+- The API key is never in the event (§5.4). The display shows `abcd••••` from `key_prefix`, or only `••••` when the prefix is empty.
 - `redact_json(body)` masks the values of `api_key` and `value` keys at any depth. `value` covers the key value in `POST /keys` responses. Bodies that are not JSON are shown as they are.
 - Redaction is applied when an entry is displayed or copied, never in place, and is tested with fixtures. These are the redaction tests CLAUDE.md rule 8 protects.
 

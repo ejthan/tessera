@@ -487,3 +487,57 @@ fn ca_file_must_exist_and_hold_a_certificate() {
         );
     }
 }
+
+#[tokio::test]
+async fn key_prefix_only_for_long_keys() {
+    let server = MockServer::start().await;
+    mock(&server, "/health", 200, r#"{"ok":true}"#).await;
+    for (key, prefix) in [("xyz", ""), ("abcdefgh", ""), ("abcdefghijkl", "abcd")] {
+        let (hook, events) = recorder();
+        Client::new(
+            &[&server.uri()],
+            SecretString::from(key),
+            ClientOptions::default(),
+        )
+        .unwrap()
+        .with_hook(hook)
+        .health()
+        .await
+        .unwrap();
+        let event = events.lock().unwrap()[0].clone();
+        assert_eq!(event.key_prefix, prefix, "{key}");
+        if key.len() <= 8 {
+            assert!(!format!("{event:?}").contains(key), "{key}");
+        }
+    }
+}
+
+#[test]
+fn set_active_node_ignores_out_of_range() {
+    let client = client("http://127.0.0.1:1").unwrap();
+    client.set_active_node(5);
+    assert_eq!(client.active_node(), 0);
+}
+
+#[tokio::test]
+async fn status_survives_a_failed_body_read() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut tcp, _)) = listener.accept() {
+            let _ = tcp.read(&mut [0u8; 4096]);
+            // Promises 100 bytes, sends 2, then hangs up.
+            let _ = tcp.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{}");
+        }
+    });
+    let (hook, events) = recorder();
+    let client = client(&format!("http://127.0.0.1:{port}"))
+        .unwrap()
+        .with_hook(hook);
+    assert!(client.health().await.is_err());
+    let event = events.lock().unwrap()[0].clone();
+    assert_eq!(event.status, Some(200));
+    assert!(event.error.is_some());
+    assert!(event.response_body.is_none());
+}

@@ -32,7 +32,8 @@ pub struct RequestEvent {
     pub query: Option<String>,
     /// Headers the client set, except `X-TYPESENSE-API-KEY`.
     pub request_headers: Vec<(String, String)>,
-    /// The first 4 characters of the API key, for a redacted display.
+    /// The first 4 characters of the API key if it is longer than 8 characters, else
+    /// empty. For a redacted display such as `abcd••••`.
     pub key_prefix: String,
     /// Request body, if one was sent.
     pub request_body: Option<Body>,
