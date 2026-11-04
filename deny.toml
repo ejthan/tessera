@@ -27,6 +27,13 @@ allow = [
     "BSL-1.0",
 ]
 
+# Mozilla's CA certificate data, pulled in by reqwest's rustls platform verifier.
+# CDLA-Permissive-2.0 is a permissive data license (attribution only); it covers
+# certificate data, not code linked into Tessera.
+[[licenses.exceptions]]
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "warn"
 
