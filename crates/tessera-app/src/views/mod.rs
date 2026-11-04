@@ -4,6 +4,7 @@
 
 pub mod confirm;
 pub mod connect_dialog;
+pub mod dock;
 pub mod env_badge;
 pub mod import_dialog;
 pub mod overview;

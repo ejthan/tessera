@@ -126,6 +126,8 @@ pub const TEST: &str = key("cmd-t", "ctrl-t");
 pub const SAVE: &str = key("cmd-enter", "ctrl-enter");
 pub const TOGGLE_KEY: &str = key("alt-cmd-k", "ctrl-alt-k");
 pub const DELETE: &str = key("cmd-backspace", "ctrl-backspace");
+pub const TOGGLE_LOG: &str = key("cmd-j", "ctrl-j");
+pub const CLOSE_TAB: &str = key("cmd-w", "ctrl-w");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 pub fn fake_connector(

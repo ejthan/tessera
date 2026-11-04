@@ -35,6 +35,8 @@ const EXPORT_NAME: &str = "tessera-profiles.json";
 pub struct Sidebar {
     state: Entity<AppState>,
     focus: HashMap<Uuid, FocusHandle>,
+    /// Focus handles of the "Overview" rows under connected entries.
+    overview_focus: HashMap<Uuid, FocusHandle>,
     /// Why the last header action (export, reopen toggle, delete) failed, shown under the header.
     header_error: Option<SharedString>,
     export_task: Option<Task<()>>,
@@ -61,6 +63,7 @@ impl Sidebar {
         Self {
             state,
             focus: HashMap::new(),
+            overview_focus: HashMap::new(),
             header_error: None,
             export_task: None,
             _subscription: subscription,
@@ -179,6 +182,7 @@ impl Sidebar {
             move |cx: &mut gpui_kit::App| state.update(cx, |s, cx| s.connect(id, None, cx))
         };
         let on_click = connect.clone();
+        let open_overview = connect.clone();
         let disconnect = {
             let state = self.state.clone();
             move |cx: &mut gpui_kit::App| state.update(cx, |s, cx| s.disconnect(id, cx))
@@ -377,19 +381,30 @@ impl Sidebar {
                         .child(error),
                 )
             })
-            .when(entry.selected && entry.connected, |el| {
+            // The connection's tree: Enter (ConnectSelected above) or a click opens the tab.
+            .when(entry.connected, |el| {
                 let overview = SharedString::from(t!("sidebar.overview").to_string());
+                let focus = self
+                    .overview_focus
+                    .entry(id)
+                    .or_insert_with(|| cx.focus_handle().tab_stop(true));
                 el.child(
                     div()
-                        .id("sidebar.overview")
+                        .id(SharedString::from(format!("{element_id}.overview")))
                         .test_support()
+                        .track_focus(focus)
                         .aria_label(overview.clone())
                         .ml_4()
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .bg(theme.secondary)
+                        .border_1()
+                        .border_color(transparent_black())
                         .text_sm()
+                        .when(entry.selected, |el| el.bg(theme.secondary))
+                        .hover(|s| s.bg(theme.secondary))
+                        .focus(|s| s.border_color(theme.ring))
+                        .on_click(move |_, _, cx| open_overview(cx))
                         .child(overview),
                 )
             });
@@ -405,6 +420,8 @@ impl Render for Sidebar {
         let entries = self.entries(cx);
         self.focus
             .retain(|id, _| entries.iter().any(|e| e.profile.id == *id));
+        self.overview_focus
+            .retain(|id, _| entries.iter().any(|e| e.profile.id == *id && e.connected));
         let rows: Vec<_> = entries
             .into_iter()
             .map(|entry| self.render_entry(entry, window, cx))

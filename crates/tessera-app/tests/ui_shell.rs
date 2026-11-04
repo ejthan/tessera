@@ -7,9 +7,11 @@
 
 mod common;
 
+use gpui_kit::WindowHandle;
+use gpui_kit::base::Root;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AppContext as _, TestAppContext};
-use tessera_core::profile::Profile;
+use tessera_core::profile::{Environment, Profile};
 use tessera_core::store::StoreError;
 
 use common::*;
@@ -50,7 +52,6 @@ async fn connect_success_shows_version_in_status_bar(cx: &mut TestAppContext) {
         }
         assert!(label(window, "overview.version").contains("30.2"));
         assert!(label(window, "overview.role").contains("Leader"));
-        assert!(window.find("sidebar.overview").visible());
         assert!(label(window, "titlebar.connection").contains("localhost:8108"));
         assert!(window.try_find("overview.unsupported").is_none());
     })
@@ -75,32 +76,180 @@ async fn unhealthy_server_shows_unhealthy(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// The id of `profile`'s overview tab title.
+fn tab(profile: &Profile) -> String {
+    format!("tab.{}.overview", profile.id)
+}
+
+/// Clicks `profile`'s sidebar entry and waits until its overview tab is active.
+async fn open_tab(cx: &mut TestAppContext, handle: WindowHandle<Root>, profile: &Profile) {
+    let id = entry(profile);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(id, cx);
+    })
+    .unwrap();
+    wait_for_element(cx, handle, tab(profile), true).await;
+    wait_for_label(cx, handle, "status.text".into(), name_of(profile)).await;
+}
+
+/// The name of one of the two profiles of `two_profiles`.
+fn name_of(profile: &Profile) -> &'static str {
+    if profile.environment == Environment::Prod {
+        "prod-ch"
+    } else {
+        "staging-eu"
+    }
+}
+
+/// Whether the prod band and frame are drawn; they always go together.
+fn prod_frame(window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) -> bool {
+    window.render_frame(cx);
+    let frame = window.try_find("window.prod_frame").is_some();
+    let band = window.try_find("window.prod_band").is_some();
+    assert_eq!(frame, band, "band and frame go together");
+    frame
+}
+
 #[gpui_kit::test]
-async fn prod_selection_draws_frame(cx: &mut TestAppContext) {
+async fn connecting_opens_overview_tab(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let (staging, prod, secrets) = two_profiles();
+    let (handle, _rt) = open_profiles(cx, vec![staging.clone(), prod], secrets);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("welcome.add_connection").visible());
+    })
+    .unwrap();
+    open_tab(cx, handle, &staging).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(tab(&staging)).visible());
+        assert_eq!(window.find(tab(&staging)).label(), Some("staging-eu"));
+        assert!(window.find("overview.version").visible());
+        assert!(window.try_find("welcome.add_connection").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn reopening_focuses_existing_tab(cx: &mut TestAppContext) {
     fake_connector(cx, |_| Ok(server("30.2", true)));
     let (staging, prod, secrets) = two_profiles();
     let (handle, _rt) = open_profiles(cx, vec![staging.clone(), prod.clone()], secrets);
-    let frame = |cx: &mut TestAppContext, click: Option<&Profile>| {
+    open_tab(cx, handle, &staging).await;
+    open_tab(cx, handle, &prod).await;
+    open_tab(cx, handle, &staging).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find_all(tab(&staging)).len(), 1);
+        assert_eq!(window.find_all(tab(&prod)).len(), 1);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn disconnect_closes_tabs(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let (staging, prod, secrets) = two_profiles();
+    let (handle, _rt) = open_profiles(cx, vec![staging.clone(), prod], secrets);
+    open_tab(cx, handle, &staging).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        focus(window, &entry(&staging), cx);
+        window.press(DISCONNECT, cx);
+    })
+    .unwrap();
+    wait_for_element(cx, handle, tab(&staging), false).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("welcome.add_connection").visible());
+        assert_eq!(window.find("status.text").label(), Some("Not connected"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn prod_frame_follows_active_tab(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let (staging, prod, secrets) = two_profiles();
+    let (handle, _rt) = open_profiles(cx, vec![staging.clone(), prod.clone()], secrets);
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(!prod_frame(window, cx), "no tab");
+    })
+    .unwrap();
+    open_tab(cx, handle, &staging).await;
+    open_tab(cx, handle, &prod).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(prod_frame(window, cx), "prod tab active");
+        assert_eq!(window.find("titlebar.env").label(), Some("PROD"));
+        window.click(tab(&staging), cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "status.text".into(), "staging-eu").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(!prod_frame(window, cx), "staging tab active");
+        assert_eq!(window.find("titlebar.env").label(), Some("STAGING"));
+        window.click(tab(&prod), cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "status.text".into(), "prod-ch").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(prod_frame(window, cx), "prod tab active again");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn cmd_j_toggles_bottom_dock(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    let open = |cx: &mut TestAppContext, press: Option<&str>| {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
-            if let Some(p) = click {
-                window.click(entry(p), cx);
+            if let Some(key) = press {
+                window.press(key, cx);
                 window.render_frame(cx);
             }
-            let frame = window.try_find("window.prod_frame").is_some();
-            let band = window.try_find("window.prod_band").is_some();
-            assert_eq!(frame, band, "band and frame go together");
-            frame
+            window.try_find("dock.bottom").is_some()
         })
         .unwrap()
     };
-    assert!(!frame(cx, None), "nothing selected");
-    assert!(frame(cx, Some(&prod)), "prod selected");
-    cx.update_window(handle.into(), |_, window, _| {
-        assert_eq!(window.find("titlebar.env").label(), Some("PROD"));
+    assert!(!open(cx, None), "closed at start");
+    assert!(open(cx, Some(TOGGLE_LOG)));
+    assert!(!open(cx, Some(TOGGLE_LOG)));
+    // The status bar button does the same.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("status.toggle_log", cx)
     })
     .unwrap();
-    assert!(!frame(cx, Some(&staging)), "staging selected");
+    wait_for_element(cx, handle, "dock.bottom".into(), true).await;
+}
+
+#[gpui_kit::test]
+async fn sidebar_overview_focuses_tab(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let (staging, prod, secrets) = two_profiles();
+    let (handle, _rt) = open_profiles(cx, vec![staging.clone(), prod.clone()], secrets);
+    open_tab(cx, handle, &staging).await;
+    open_tab(cx, handle, &prod).await;
+    let child = |p: &Profile| format!("{}.overview", entry(p));
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(window.find(child(&staging)).label(), Some("Overview"));
+        focus(window, &child(&staging), cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "status.text".into(), "staging-eu").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click(child(&prod), cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "status.text".into(), "prod-ch").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find_all(tab(&staging)).len(), 1);
+        assert_eq!(window.find_all(tab(&prod)).len(), 1);
+    })
+    .unwrap();
 }
 
 /// Shortcut labels come from GPUI Kit's `Kbd`, which formats them per platform.
@@ -180,4 +329,27 @@ fn string_literals(code: &str) -> Vec<String> {
 fn string_literals_are_found() {
     let code = r#"let a = "x ⌘N"; let q = '"'; let b = "Ctrl+\"N\""; // "c""#;
     assert_eq!(string_literals(code), ["x ⌘N", r#"Ctrl+\"N\""#, "c"]);
+}
+
+#[gpui_kit::test]
+async fn closing_a_tab_keeps_the_connection(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let (staging, prod, secrets) = two_profiles();
+    let (handle, state, _rt) = open_app(cx, vec![staging.clone(), prod.clone()], secrets);
+    open_tab(cx, handle, &staging).await;
+    open_tab(cx, handle, &prod).await;
+    // Clicking the tab focuses it, so the close shortcut reaches its tab group.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click(tab(&staging), cx)
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "status.text".into(), "staging-eu").await;
+    cx.update_window(handle.into(), |_, window, cx| window.press(CLOSE_TAB, cx))
+        .unwrap();
+    wait_for_element(cx, handle, tab(&staging), false).await;
+    wait_for_label(cx, handle, "status.text".into(), "prod-ch").await;
+    state.read_with(cx, |s, cx| {
+        let conn = s.connection(staging.id, cx).expect("still open");
+        assert!(conn.read(cx).connected.is_some());
+    });
 }

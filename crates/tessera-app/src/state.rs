@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::{App, AppContext as _, Context, Entity, Subscription, Task};
+use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use rust_i18n::t;
 use secrecy::{ExposeSecret as _, SecretString};
 use tessera_client::{RequestEvent, RequestHook};
@@ -34,6 +34,10 @@ pub enum SaveError {
     /// The key could not be stored in the secret store.
     Keychain(SecretError),
 }
+
+/// Asks the window to show the overview of a connected profile: open its tab, or focus the
+/// existing one.
+pub struct OpenOverview(pub Uuid);
 
 /// Profiles, keys and open connections of the app.
 pub struct AppState {
@@ -335,6 +339,7 @@ impl AppState {
             && conn.read(cx).connected.is_some()
         {
             self.selected = Some(id);
+            cx.emit(OpenOverview(id));
             cx.notify();
             return;
         }
@@ -405,20 +410,25 @@ impl AppState {
                 Err(e) => Err(t!("connect.error.keychain", detail = e.to_string()).to_string()),
             };
             let ok = result.is_ok();
-            weak.update(cx, |c, cx| {
-                c.connecting = false;
-                c.missing_key = missing_key;
-                match result {
-                    Ok(connected) => c.connected = Some(connected),
-                    Err(text) => c.error = Some(text.into()),
-                }
-                cx.notify();
-            })
-            .ok();
-            if ok && saved {
+            // A connection closed meanwhile gets no tab.
+            let alive = weak
+                .update(cx, |c, cx| {
+                    c.connecting = false;
+                    c.missing_key = missing_key;
+                    match result {
+                        Ok(connected) => c.connected = Some(connected),
+                        Err(text) => c.error = Some(text.into()),
+                    }
+                    cx.notify();
+                })
+                .is_ok();
+            if ok && alive {
                 this.update(cx, |s, cx| {
-                    s.last_used = Some(id);
-                    s.save(cx).detach();
+                    cx.emit(OpenOverview(id));
+                    if saved {
+                        s.last_used = Some(id);
+                        s.save(cx).detach();
+                    }
                 })
                 .ok();
             }
@@ -447,6 +457,7 @@ impl AppState {
         cx.observe(&conn, |_, _, cx| cx.notify()).detach();
         self.connections.push(conn);
         self.selected = Some(id);
+        cx.emit(OpenOverview(id));
         cx.notify();
     }
 
@@ -459,6 +470,8 @@ impl AppState {
         cx.notify();
     }
 }
+
+impl EventEmitter<OpenOverview> for AppState {}
 
 /// Runs a blocking secret-store or file call on tokio's blocking pool.
 fn blocking<T: Send + 'static>(cx: &App, f: impl FnOnce() -> T + Send + 'static) -> JoinHandle<T> {
