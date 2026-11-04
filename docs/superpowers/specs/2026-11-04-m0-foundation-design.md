@@ -77,7 +77,8 @@ No GPUI dependency. Built on `reqwest` (rustls) and `tokio`.
 pub struct Client { /* reqwest::Client, base Url, SecretString key, hook */ }
 
 impl Client {
-    pub fn new(base_url: Url, api_key: SecretString) -> Result<Self, Error>;
+    pub fn new(base_url: &str, api_key: SecretString) -> Result<Self, Error>;
+    pub fn with_timeout(self, timeout: Duration) -> Self;
     pub fn with_hook(self, hook: RequestHook) -> Self;
     pub async fn health(&self) -> Result<Health, Error>;   // GET /health
     pub async fn debug(&self) -> Result<Debug, Error>;     // GET /debug
@@ -85,7 +86,7 @@ impl Client {
 
 pub struct Health { pub ok: bool }
 pub struct Debug  { pub version: String, pub state: RaftState }
-pub enum RaftState { Leader, Follower, Other(i64) }
+pub enum RaftState { Leader, Follower, Other(i64), Unknown }
 
 pub type RequestHook = Arc<dyn Fn(&RequestEvent) + Send + Sync>;
 pub struct RequestEvent { pub method: Method, pub path: String, pub status: Option<u16>, pub duration: Duration }
@@ -93,7 +94,9 @@ pub struct RequestEvent { pub method: Method, pub path: String, pub status: Opti
 
 - Fixed request timeout of 5 s in M0; configurable per profile in M1.
 - The key goes out in the `X-TYPESENSE-API-KEY` header. `Client` implements `Debug` by hand and prints the key as `••••`.
-- The Raft state mapping (`1` = leader, `4` = follower) is checked against the vendored OpenAPI spec and a live server before it is coded.
+- The OpenAPI spec documents only `version` for `/debug`. A live 30.2 single node answers `{"state":1,"version":"30.2"}`, which confirms `1` = leader. `4` = follower comes from braft's state enum and is confirmed by the cluster tests in M1. A missing `state` maps to `RaftState::Unknown`. Note that the version has no patch component.
+- `with_timeout(Duration)` overrides the 5 s default; tests use it to keep timeout tests fast.
+- `Client::new` accepts only `http` and `https` URLs and appends a trailing `/` to the path, so that a path prefix such as `https://host/typesense` keeps working when endpoints are joined.
 - The hook is called once per request, after the response or error. In M0 its one consumer is a `tracing` line per request (method, path, status, duration, never the key). M1 attaches the request log and the read-only guard to the same hook.
 
 ```rust
@@ -103,7 +106,7 @@ pub enum Error {
     Timeout,
     Http { status: u16, message: String, body: String },
     Decode(serde_json::Error),
-    InvalidUrl(url::ParseError),
+    InvalidUrl(String),
 }
 ```
 
@@ -126,7 +129,7 @@ The binary `tessera`. Modules:
 
 - `main.rs`: builds the tokio runtime, starts `gpui_kit::application()`, calls `gpui_kit::init`, loads the locale, opens the window.
 - `runtime.rs`: the tokio bridge (§5).
-- `connection.rs`: `ConnectionState` entity (client, `Debug` result, capabilities, latency, status).
+- `connection.rs`: `ConnectionState` entity (client, `Debug` result, capabilities, latency, status) and the `Connector` global: a function from URL and key to a future of the connection result. The app installs the real one (client on tokio); UI tests install a fake that answers immediately, because GPUI's test executor runs on a simulated clock and does not wait for real network I/O (GPUI Kit testing guide: "provide controlled responses for external dependencies").
 - `views/`: `root.rs` (shell), `welcome.rs`, `connect_dialog.rs`, `overview.rs`, `status_bar.rs`.
 - `i18n.rs`: `rust_i18n::i18n!("../../assets/locales", fallback = "en")` and locale selection via `sys-locale`.
 
@@ -156,7 +159,7 @@ self.connect_task = Some(cx.spawn(async move |this, cx| {
 3. Enter or "Connect" builds a `Client` and runs `health()` then `debug()` on tokio. The button is disabled and shows a spinner meanwhile.
 4. On success the dialog closes, `ConnectionState` is filled (version, Raft state, capabilities, latency of the `debug` call), and the main area switches to the overview.
 5. On failure the dialog stays open and shows the error inline: the full Typesense message for `Http`, a plain sentence for `Network` ("Could not reach localhost:8108") and `Timeout`.
-6. `health` answering `{"ok": false}` with status 200 still connects; the overview's health card shows "Unhealthy" in red. A non-2xx `health` response is an `Http` error and the connection fails as in step 5.
+6. `health` answering `{"ok": false}` (Typesense sends this with status 503 while starting or lagging, verified against 30.2) is not an error: `health()` returns `Health { ok: false }` and the flow continues to `debug`. If `debug` then fails, its message ("Not Ready or Lagging") is shown as in step 5. If it succeeds, the overview's health card shows "Unhealthy" in red. Any other non-2xx `health` response is an `Http` error.
 7. A version below 30.0 still connects, but the overview shows a warning banner ("Tessera supports Typesense 30.0 and later. Some features may not work.").
 
 No error text or `Debug` output ever contains the key; a unit test asserts this.
@@ -198,7 +201,7 @@ The canvas shows the M1 target. M0 builds this subset:
 | Core unit | Version parsing table: `30.2.0`, `30.2`, `v30.0.rc1`, `29.0` (unsupported), garbage (unknown, supported) |
 | Client integration | Against real Typesense. Marked `#[ignore = "needs Typesense, see dev/docker-compose.yml"]` so local runs neither fake a pass nor fail; CI runs them with `--ignored` |
 | App bridge | Dropping an `AbortOnDrop` stops the tokio task |
-| App UI (`#[gpui_kit::test]`) | ⌘N opens the dialog with focus in the URL field; typing a wiremock URL and pressing Enter shows the version in the status bar; a 401 shows the Typesense message inline |
+| App UI (`#[gpui_kit::test]`, fake `Connector`) | ⌘N opens the dialog with focus in the URL field; Enter with a successful fake shows the version in the status bar; a fake 401 shows the Typesense message inline |
 | i18n | `en.yml` and `de.yml` have exactly the same keys |
 
 ## 9. CI
