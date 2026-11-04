@@ -15,6 +15,7 @@ tessera-core = { path = "crates/tessera-core" }
 anyhow = "=1.0.104"
 directories = "=6.0.0"
 gpui-kit = "=0.9.0"
+keyring = "=4.2.0"
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json", "http2", "charset"] }
 rust-i18n = "=4.2.4"
 secrecy = "=0.10.3"
