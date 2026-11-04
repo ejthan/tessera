@@ -121,6 +121,10 @@ impl AppState {
 
     /// A hook that sends the events of `profile`'s requests to the log. Never carries the key.
     pub fn log_hook(&self, profile: &Profile) -> RequestHook {
+        debug_assert!(
+            self.log_drain.is_some(),
+            "spawn_log_drain must run before connecting"
+        );
         let tx = self.log_tx.clone();
         let (connection, connection_name): (Uuid, Arc<str>) =
             (profile.id, profile.name.as_str().into());
@@ -562,7 +566,11 @@ mod tests {
         path: Option<std::path::PathBuf>,
         secrets: Arc<MemoryStore>,
     ) -> Entity<AppState> {
-        cx.new(|_| AppState::new(loaded, path, secrets))
+        cx.new(|cx| {
+            let mut s = AppState::new(loaded, path, secrets);
+            s.spawn_log_drain(cx);
+            s
+        })
     }
 
     #[gpui_kit::test]
@@ -633,7 +641,10 @@ mod tests {
             })
             .unwrap()
             .expect("temporary connection opens");
-        let state = cx.new(|_| s);
+        let state = cx.new(|cx| {
+            s.spawn_log_drain(cx);
+            s
+        });
         state.update(cx, |s, cx| s.connect(id, None, cx));
         cx.run_until_parked();
         state.read_with(cx, |s, cx| {
@@ -712,7 +723,10 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        let state = cx.new(|_| s);
+        let state = cx.new(|cx| {
+            s.spawn_log_drain(cx);
+            s
+        });
         state.update(cx, |s, cx| s.connect(id, None, cx));
         cx.run_until_parked();
         state.read_with(cx, |s, cx| {
@@ -801,7 +815,10 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        let state = cx.new(|_| s);
+        let state = cx.new(|cx| {
+            s.spawn_log_drain(cx);
+            s
+        });
         let attempt = state.update(cx, |s, cx| {
             s.connect(temp_id, None, cx);
             s.connect(saved_id, None, cx);
@@ -828,7 +845,11 @@ mod tests {
             profiles: vec![profile],
             ..Default::default()
         };
-        let state = cx.new(|_| AppState::new(Ok(file), None, Arc::new(NoReads)));
+        let state = cx.new(|cx| {
+            let mut s = AppState::new(Ok(file), None, Arc::new(NoReads));
+            s.spawn_log_drain(cx);
+            s
+        });
         state.update(cx, |s, cx| {
             s.connect(id, Some(SecretString::from("k-new")), cx)
         });
@@ -881,7 +902,11 @@ mod tests {
             profiles: vec![profile],
             ..Default::default()
         };
-        let state = cx.new(|_| AppState::new(Ok(file), None, Arc::new(NoReads)));
+        let state = cx.new(|cx| {
+            let mut s = AppState::new(Ok(file), None, Arc::new(NoReads));
+            s.spawn_log_drain(cx);
+            s
+        });
         state.update(cx, |s, cx| s.connect(id, Some(SecretString::from("k")), cx));
         cx.run_until_parked();
         let error = error_of(&state, id, cx).expect("inline error");
