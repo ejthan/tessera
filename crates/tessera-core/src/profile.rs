@@ -99,7 +99,7 @@ pub enum Environment {
 impl Environment {
     /// Whether this is the production environment.
     pub fn is_prod(&self) -> bool {
-        matches!(self, Environment::Prod)
+        matches!(Environment::parse(self.label()), Environment::Prod)
     }
 
     /// The text stored on disk and shown in the UI.
@@ -114,22 +114,30 @@ impl Environment {
     }
 }
 
+impl Environment {
+    /// Parses a stored name: trimmed and case-insensitive for the built-ins, else `Custom`.
+    pub fn parse(raw: &str) -> Environment {
+        let t = raw.trim();
+        match t.to_ascii_lowercase().as_str() {
+            "local" => Environment::Local,
+            "dev" => Environment::Dev,
+            "staging" => Environment::Staging,
+            "prod" => Environment::Prod,
+            _ => Environment::Custom(t.to_owned()),
+        }
+    }
+}
+
 impl Serialize for Environment {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(self.label())
+        // Normalize so `Custom("prod")` is written as the built-in and reads back as `Prod`.
+        s.serialize_str(Environment::parse(self.label()).label())
     }
 }
 
 impl<'de> Deserialize<'de> for Environment {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        Ok(match s.as_str() {
-            "local" => Environment::Local,
-            "dev" => Environment::Dev,
-            "staging" => Environment::Staging,
-            "prod" => Environment::Prod,
-            _ => Environment::Custom(s),
-        })
+        Ok(Environment::parse(&String::deserialize(d)?))
     }
 }
 
@@ -142,6 +150,18 @@ pub enum Protocol {
     /// HTTP over TLS.
     Https,
 }
+
+/// A node that cannot be turned into a URL. The text is English diagnostics, not UI text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidNode(pub String);
+
+impl std::fmt::Display for InvalidNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid node: {}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidNode {}
 
 /// One Typesense node.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -157,27 +177,45 @@ pub struct Node {
 }
 
 impl Node {
+    /// Checks that the node can be turned into a URL.
+    pub fn validate(&self) -> Result<(), InvalidNode> {
+        self.url().map(drop)
+    }
+
     /// Base URL of the node. IPv6 hosts are bracketed and the path always ends with `/`.
-    ///
-    /// An unparseable host falls back to `http://localhost/`; input is validated before saving.
-    pub fn url(&self) -> Url {
+    pub fn url(&self) -> Result<Url, InvalidNode> {
+        let host = self.host.as_str();
+        if host.is_empty()
+            || host.contains(char::is_whitespace)
+            || host.contains(['/', '?', '#', '@'])
+            || host.contains("://")
+        {
+            return Err(InvalidNode(format!(
+                "host {host:?} is not a plain host name"
+            )));
+        }
         let scheme = match self.protocol {
             Protocol::Http => "http",
             Protocol::Https => "https",
         };
-        let host = if self.host.contains(':') {
-            format!("[{}]", self.host)
+        let bad_host = |_| InvalidNode(format!("host {host:?} is not valid"));
+        let mut url = Url::parse(&format!("{scheme}://localhost/")).map_err(bad_host)?;
+        if host.contains(':') && !host.starts_with('[') {
+            url.set_host(Some(&format!("[{host}]")))
         } else {
-            self.host.clone()
-        };
-        let path: Vec<&str> = self.path.split('/').filter(|s| !s.is_empty()).collect();
-        let mut raw = format!("{scheme}://{host}:{}/", self.port);
-        for seg in path {
-            raw.push_str(seg);
-            raw.push('/');
+            url.set_host(Some(host))
         }
-        // shortcut: invalid hosts fall back to localhost, the dialog validates input before saving.
-        Url::parse(&raw).unwrap_or_else(|_| Url::parse("http://localhost/").expect("static URL"))
+        .map_err(bad_host)?;
+        url.set_port(Some(self.port))
+            .map_err(|()| InvalidNode("port is not valid".into()))?;
+        let mut segs = url
+            .path_segments_mut()
+            .map_err(|()| InvalidNode("path is not valid".into()))?;
+        segs.clear();
+        segs.extend(self.path.split('/').filter(|s| !s.is_empty()));
+        segs.push("");
+        drop(segs);
+        Ok(url)
     }
 
     /// Short `host:port` label.
@@ -187,7 +225,10 @@ impl Node {
 
     /// Whether the node runs on this machine.
     pub fn is_local(&self) -> bool {
-        matches!(self.host.as_str(), "localhost" | "127.0.0.1" | "::1")
+        matches!(
+            self.host.to_ascii_lowercase().as_str(),
+            "localhost" | "127.0.0.1" | "::1" | "[::1]"
+        )
     }
 }
 
@@ -215,7 +256,7 @@ mod tests {
             port: 8108,
             path: String::new(),
         };
-        assert_eq!(n.url().as_str(), "http://[::1]:8108/");
+        assert_eq!(n.url().unwrap().as_str(), "http://[::1]:8108/");
     }
     #[test]
     fn node_url_keeps_path_prefix() {
@@ -225,7 +266,10 @@ mod tests {
             port: 443,
             path: "/typesense".into(),
         };
-        assert_eq!(n.url().as_str(), "https://ts.example.com/typesense/");
+        assert_eq!(
+            n.url().unwrap().as_str(),
+            "https://ts.example.com/typesense/"
+        );
         assert_eq!(n.label(), "ts.example.com:443");
     }
     #[test]
@@ -258,6 +302,44 @@ mod tests {
             path: "//a//b/".into(),
         };
         assert!(n.is_local());
-        assert_eq!(n.url().as_str(), "http://localhost:1/a/b/");
+        assert_eq!(n.url().unwrap().as_str(), "http://localhost:1/a/b/");
+    }
+
+    #[test]
+    fn bad_hosts_are_rejected() {
+        for h in ["https://x.com", "a.com/b", "", "a b", "u@h"] {
+            let n = Node {
+                protocol: Protocol::Http,
+                host: h.into(),
+                port: 1,
+                path: String::new(),
+            };
+            assert!(n.validate().is_err(), "{h:?}");
+        }
+    }
+    #[test]
+    fn prebracketed_ipv6_works() {
+        let n = Node {
+            protocol: Protocol::Http,
+            host: "[::1]".into(),
+            port: 8108,
+            path: String::new(),
+        };
+        assert_eq!(n.url().unwrap().as_str(), "http://[::1]:8108/");
+        assert!(n.is_local());
+    }
+    #[test]
+    fn environment_is_case_insensitive_and_round_trips() {
+        assert_eq!(
+            serde_json::from_str::<Environment>(r#""PROD""#).unwrap(),
+            Environment::Prod
+        );
+        assert_eq!(
+            serde_json::from_str::<Environment>(r#"" Staging ""#).unwrap(),
+            Environment::Staging
+        );
+        let c = Environment::Custom("prod".into());
+        assert!(c.is_prod());
+        assert_eq!(serde_json::to_string(&c).unwrap(), r#""prod""#);
     }
 }
