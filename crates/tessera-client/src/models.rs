@@ -133,6 +133,8 @@ pub struct CollectionSummary {
 pub enum KeyAccess {
     /// `200`: the key can list API keys, so it is an admin key.
     Admin,
-    /// `401` or `403`: the key works but cannot list API keys.
+    /// `401` or `403`: the key cannot list API keys. Typesense also answers `401` to a wrong
+    /// key, so this only means "restricted" once an authenticated call (such as `debug`)
+    /// has confirmed the key.
     Restricted,
 }

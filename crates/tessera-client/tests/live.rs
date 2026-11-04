@@ -4,7 +4,7 @@
 //!
 //! Start one with `docker compose -f dev/docker-compose.yml up -d`, then run
 //! `cargo test -p tessera-client -- --ignored`. `TESSERA_IT_URL` and
-//! `TESSERA_IT_KEY` override the defaults `http://localhost:8108` and `xyz`.
+//! `TESSERA_IT_KEY` override the defaults `http://localhost:18108` and `xyz`.
 
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use secrecy::SecretString;
 use tessera_client::{Client, ClientOptions, Error, KeyAccess, RaftState};
 
 fn url() -> String {
-    std::env::var("TESSERA_IT_URL").unwrap_or_else(|_| "http://localhost:8108".into())
+    std::env::var("TESSERA_IT_URL").unwrap_or_else(|_| "http://localhost:18108".into())
 }
 
 fn client_with(key: &str) -> Client {
@@ -28,12 +28,16 @@ fn client() -> Client {
     client_with(&admin_key())
 }
 
+fn admin_request(method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    let url = format!("{}/{path}", url().trim_end_matches('/'));
+    reqwest::Client::new()
+        .request(method, url)
+        .header("X-TYPESENSE-API-KEY", admin_key())
+}
+
 /// A raw admin request for test setup and cleanup, outside the client under test.
 async fn admin(method: reqwest::Method, path: &str, body: Option<&str>) -> serde_json::Value {
-    let url = format!("{}/{path}", url().trim_end_matches('/'));
-    let mut request = reqwest::Client::new()
-        .request(method, url)
-        .header("X-TYPESENSE-API-KEY", admin_key());
+    let mut request = admin_request(method, path);
     if let Some(body) = body {
         request = request.body(body.to_string());
     }
@@ -117,6 +121,10 @@ async fn live_collections_summary() {
     let client = client();
     wait_until_ready(&client).await;
     let name = "tessera_it_summary";
+    // Best effort, status ignored: an aborted earlier run may have left the collection behind.
+    let _ = admin_request(reqwest::Method::DELETE, &format!("collections/{name}"))
+        .send()
+        .await;
     let schema = format!(r#"{{"name":"{name}","fields":[{{"name":"title","type":"string"}}]}}"#);
     admin(reqwest::Method::POST, "collections", Some(&schema)).await;
     let summary = client.collections_summary().await;

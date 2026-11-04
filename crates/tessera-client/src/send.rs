@@ -14,8 +14,8 @@ impl Client {
     /// Sends one request to node `node` and reports it to the hook.
     ///
     /// Returns the status and body for any HTTP answer; only transport failures are errors.
-    /// A read-only client refuses [`WRITE_METHODS`](crate::WRITE_METHODS) here, before
-    /// anything is sent or reported, so no caller can get around it.
+    /// A read-only client refuses every method but [`READ_METHODS`](crate::READ_METHODS)
+    /// here, before anything is sent or reported, so no caller can get around it.
     pub(crate) async fn send(
         &self,
         node: usize,
@@ -24,7 +24,7 @@ impl Client {
         query: Option<&str>,
         body: Option<String>,
     ) -> Result<(u16, String), Error> {
-        if self.read_only && crate::WRITE_METHODS.contains(&method) {
+        if self.read_only && !crate::READ_METHODS.contains(&method) {
             return Err(Error::ReadOnly { method });
         }
         let base = &self.nodes[node];

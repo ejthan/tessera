@@ -20,8 +20,9 @@ pub use reqwest::Method;
 use secrecy::SecretString;
 use url::Url;
 
-/// Methods a read-only client refuses. PUT is an upsert in Typesense, so it writes.
-pub const WRITE_METHODS: [Method; 4] = [Method::POST, Method::PATCH, Method::PUT, Method::DELETE];
+/// The only methods a read-only client sends. Every other one, including PUT (an upsert in
+/// Typesense) and any method the raw console builds, is refused.
+pub const READ_METHODS: [Method; 2] = [Method::GET, Method::HEAD];
 
 /// Methods retried on another node after a network error or timeout (idempotent ones).
 pub const FAILOVER_METHODS: [Method; 4] = [Method::GET, Method::HEAD, Method::PUT, Method::DELETE];
@@ -243,6 +244,9 @@ impl Client {
 
     /// `GET /keys`, to learn whether the key is an admin key. Only the status counts:
     /// `200` is [`KeyAccess::Admin`], `401` or `403` is [`KeyAccess::Restricted`].
+    ///
+    /// Typesense also answers `401` to a wrong key, so confirm the key first with an
+    /// authenticated call such as [`Client::debug`]; otherwise a bad key reads as `Restricted`.
     pub async fn keys_probe(&self) -> Result<KeyAccess, Error> {
         self.keys_probe_on(None).await
     }
@@ -329,9 +333,10 @@ impl Client {
     }
 
     /// Sends to node `pin`, or to the active node with failover (spec §5.2): after a network
-    /// error or timeout, a [`FAILOVER_METHODS`] request tries the following nodes in list
-    /// order, each at most once and at most `retries` of them, waiting 100 ms × 2ⁿ before
-    /// each. The node that answers becomes the active node.
+    /// error or timeout, a [`FAILOVER_METHODS`] request makes up to `retries` more attempts,
+    /// cycling through the nodes in list order from the active one (a single node retries
+    /// itself), waiting [`backoff`] before each. The node that answers becomes the active
+    /// node, unless someone changed the active node meanwhile.
     async fn call(
         &self,
         pin: Option<usize>,
@@ -348,27 +353,37 @@ impl Client {
         } else {
             0
         };
-        let attempts = 1 + retries.min(self.nodes.len() - 1);
+        let attempts = 1 + retries;
         let mut attempt = 0;
         loop {
             let node = (start + attempt) % self.nodes.len();
             match self.send(node, method.clone(), path, query, None).await {
                 Err(Error::Network(_) | Error::Timeout) if attempt + 1 < attempts => {
-                    let backoff = Duration::from_millis(100) * 2u32.saturating_pow(attempt as u32);
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(backoff(attempt)).await;
                     attempt += 1;
                 }
                 result => {
-                    // Only move it when another node answered, so a concurrent
-                    // set_active_node() is not undone by a request that started earlier.
-                    if result.is_ok() && node != start {
-                        self.active.store(node, Ordering::Relaxed);
+                    // Only from `start`, so a concurrent set_active_node() is not undone by a
+                    // request that started earlier.
+                    if result.is_ok() {
+                        let _ = self.active.compare_exchange(
+                            start,
+                            node,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        );
                     }
                     return result;
                 }
             }
         }
     }
+}
+
+/// Wait before failover retry `attempt` (0-based): 100 ms × 2ⁿ, capped at 3.2 s because
+/// `retries` comes unchecked from the profile.
+fn backoff(attempt: usize) -> Duration {
+    Duration::from_millis(100) * (1 << attempt.min(5))
 }
 
 /// One node of a [`Client`]. Same endpoints, never fails over, so a dead node looks dead.
@@ -414,5 +429,17 @@ impl NodeClient {
     #[doc(hidden)]
     pub async fn request(&self, method: Method, path: &str) -> Result<(u16, String), Error> {
         self.client.call(Some(self.index), method, path, None).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_doubles_and_caps_at_3_2_s() {
+        let waits: Vec<u64> = (0..8).map(|n| backoff(n).as_millis() as u64).collect();
+        assert_eq!(waits, [100, 200, 400, 800, 1600, 3200, 3200, 3200]);
+        assert_eq!(backoff(usize::MAX), Duration::from_millis(3200));
     }
 }

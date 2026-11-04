@@ -304,7 +304,8 @@ async fn event_headers_never_contain_key() {
         .health()
         .await;
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
+    // One success, then the dead node's first attempt and its two default retries.
+    assert_eq!(events.len(), 4);
     for event in events.iter() {
         for (name, value) in &event.request_headers {
             assert!(!name.eq_ignore_ascii_case("x-typesense-api-key"), "{name}");
@@ -312,8 +313,8 @@ async fn event_headers_never_contain_key() {
         }
         assert!(!format!("{event:?}").contains(KEY));
     }
-    assert!(events[1].error.is_some());
-    assert_eq!(events[1].status, None);
+    assert!(events[3].error.is_some());
+    assert_eq!(events[3].status, None);
 }
 
 #[tokio::test]
@@ -683,7 +684,15 @@ async fn read_only_blocks_writes_before_sending() {
         ..ClientOptions::default()
     };
     let (client, events) = cluster(&[&server.uri()], read_only);
-    for m in [Method::POST, Method::PATCH, Method::PUT, Method::DELETE] {
+    let extension = Method::from_bytes(b"PURGE").unwrap();
+    for m in [
+        Method::POST,
+        Method::PATCH,
+        Method::PUT,
+        Method::DELETE,
+        Method::OPTIONS,
+        extension,
+    ] {
         match client.request(m.clone(), "collections").await {
             Err(Error::ReadOnly { method }) => assert_eq!(method, m),
             other => panic!("{m}: expected ReadOnly, got {other:?}"),
@@ -829,4 +838,38 @@ async fn keys_probe_maps_status() {
             None => assert!(matches!(probe, Err(Error::Http { status: 500, .. }))),
         }
     }
+}
+
+#[tokio::test]
+async fn single_node_retries_itself() {
+    let options = ClientOptions {
+        retries: 2,
+        ..ClientOptions::default()
+    };
+    let (client, events) = cluster(&DEAD[..1], options);
+    assert!(matches!(client.health().await, Err(Error::Network(_))));
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(
+        events
+            .iter()
+            .all(|e| e.node.as_str() == "http://127.0.0.1:9/")
+    );
+}
+
+#[tokio::test]
+async fn retries_cycle_through_nodes() {
+    let options = ClientOptions {
+        retries: 3,
+        ..ClientOptions::default()
+    };
+    let (client, events) = cluster(&DEAD[..2], options);
+    assert!(matches!(client.health().await, Err(Error::Network(_))));
+    let ports: Vec<u16> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| e.node.port().unwrap())
+        .collect();
+    assert_eq!(ports, [9, 1, 9, 1]);
 }
