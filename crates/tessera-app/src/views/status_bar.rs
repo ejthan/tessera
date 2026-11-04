@@ -46,6 +46,21 @@ pub fn render(
         ),
     };
     let text = SharedString::from(text);
+    // Nodes waiting for a retry: their /health or /debug failed (spec §7.3).
+    let unreachable = selected.filter(|c| c.connected.is_some()).and_then(|c| {
+        let down = c.nodes.iter().filter(|n| n.next_retry.is_some()).count();
+        (down > 0).then(|| {
+            let text = SharedString::from(
+                t!("status.unreachable", n = down, m = c.nodes.len()).to_string(),
+            );
+            div()
+                .id("status.unreachable")
+                .test_support()
+                .aria_label(text.clone())
+                .text_color(theme.danger)
+                .child(text)
+        })
+    });
     let prod_read_only = selected
         .map(|c| &c.profile)
         .filter(|p| p.environment.is_prod() && p.read_only)
@@ -57,13 +72,19 @@ pub fn render(
     StatusBar::new()
         .left(
             h_flex()
-                .id("status.text")
-                .test_support()
-                .aria_label(text.clone())
-                .gap_2()
+                .gap_3()
                 .items_center()
-                .child(div().size(px(7.)).rounded_full().bg(dot))
-                .child(text),
+                .child(
+                    h_flex()
+                        .id("status.text")
+                        .test_support()
+                        .aria_label(text.clone())
+                        .gap_2()
+                        .items_center()
+                        .child(div().size(px(7.)).rounded_full().bg(dot))
+                        .child(text),
+                )
+                .children(unreachable),
         )
         .right(
             h_flex()

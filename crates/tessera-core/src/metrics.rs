@@ -40,6 +40,7 @@ pub struct MetricsHistory {
     /// Cumulative counters and time of the previous push, for rates.
     prev: Option<(Instant, Option<u64>, Option<u64>)>,
     last: Option<Metrics>,
+    revision: u64,
 }
 
 fn percent(used: Option<u64>, total: Option<u64>) -> Option<f64> {
@@ -65,6 +66,7 @@ impl MetricsHistory {
             samples: VecDeque::new(),
             prev: None,
             last: None,
+            revision: 0,
         }
     }
 
@@ -89,6 +91,12 @@ impl MetricsHistory {
             }
         }
         self.last = Some(m.clone());
+        self.revision += 1;
+    }
+
+    /// Changes with every push, so a chart can rebuild only when the history changed.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Points of `series`, oldest first, as (age relative to the newest sample, value).
@@ -184,5 +192,6 @@ mod tests {
         assert_eq!(h.points(Series::Disk).count(), 0); // total 0 and used missing
         assert_eq!(h.latest(Series::Memory), Some(25.0));
         assert_eq!(h.last().and_then(|l| l.memory_total), Some(200));
+        assert_eq!(h.revision(), 2);
     }
 }

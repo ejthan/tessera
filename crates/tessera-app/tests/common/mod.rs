@@ -233,6 +233,7 @@ pub const DELETE: &str = key("cmd-backspace", "ctrl-backspace");
 pub const TOGGLE_LOG: &str = key("cmd-j", "ctrl-j");
 pub const CLOSE_TAB: &str = key("cmd-w", "ctrl-w");
 pub const COPY_CURL: &str = key("cmd-shift-c", "ctrl-shift-c");
+pub const REFRESH: &str = key("cmd-r", "ctrl-r");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 pub fn fake_connector(
@@ -331,7 +332,7 @@ pub async fn connect(
     })
     .unwrap();
     cx.wait_for(handle.into(), Duration::from_millis(1000), |window, _| {
-        window.try_find("connect.name").is_none() && window.try_find("overview.version").is_some()
+        window.try_find("connect.name").is_none() && window.try_find("figure.version").is_some()
     })
     .await;
     (handle, rt)

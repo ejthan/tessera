@@ -52,8 +52,8 @@ async fn connect_success_shows_version_in_status_bar(cx: &mut TestAppContext) {
         for part in ["Connected", "localhost:8108", "v30.2", "Leader", "11 ms"] {
             assert!(status.contains(part), "{part:?} missing in {status:?}");
         }
-        assert!(label(window, "overview.version").contains("30.2"));
-        assert!(label(window, "overview.role").contains("Leader"));
+        assert!(label(window, "figure.version").contains("30.2"));
+        assert!(label(window, "node.0").contains("Leader"));
         assert!(label(window, "titlebar.connection").contains("localhost:8108"));
         assert!(window.try_find("overview.unsupported").is_none());
     })
@@ -71,9 +71,16 @@ async fn old_server_shows_warning(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 async fn unhealthy_server_shows_unhealthy(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    fake_poll(cx, |_| {
+        let mut sample = ok_sample();
+        sample.health = Ok(tessera_client::Health { ok: false });
+        sample
+    });
     let (handle, _rt) = connect(cx, server("30.2", false)).await;
-    cx.update_window(handle.into(), |_, window, _| {
-        assert!(label(window, "overview.health").contains("Unhealthy"));
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(label(window, "node.0.error").contains("not ready"));
     })
     .unwrap();
 }
@@ -128,7 +135,7 @@ async fn connecting_opens_overview_tab(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert!(window.find(tab(&staging)).visible());
         assert_eq!(window.find(tab(&staging)).label(), Some("staging-eu"));
-        assert!(window.find("overview.version").visible());
+        assert!(window.find("figure.version").visible());
         assert!(window.try_find("welcome.add_connection").is_none());
     })
     .unwrap();

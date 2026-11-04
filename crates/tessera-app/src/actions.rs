@@ -21,7 +21,9 @@ gpui_kit::actions!(
         SaveConnection,
         ToggleKeyMask,
         ToggleRequestLog,
-        CopyAsCurl
+        CopyAsCurl,
+        TogglePolling,
+        Refresh
     ]
 );
 
@@ -31,6 +33,8 @@ pub const SIDEBAR_ENTRY: &str = "SidebarEntry";
 pub const SIDEBAR_ENTRY_BUTTON: &str = "SidebarEntryButton";
 /// Key context of the connection dialog.
 pub const CONNECT_DIALOG: &str = "ConnectDialog";
+/// Key context of an overview tab.
+pub const OVERVIEW: &str = "Overview";
 
 #[cfg(target_os = "macos")]
 const NEW_CONNECTION: &str = "cmd-n";
@@ -77,6 +81,10 @@ const ZOOM: &str = "cmd-shift-enter";
 #[cfg(not(target_os = "macos"))]
 const ZOOM: &str = "ctrl-shift-enter";
 #[cfg(target_os = "macos")]
+const REFRESH: &str = "cmd-r";
+#[cfg(not(target_os = "macos"))]
+const REFRESH: &str = "ctrl-r";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
@@ -100,6 +108,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(TEST, TestConnection, Some(CONNECT_DIALOG)),
         KeyBinding::new(SAVE, SaveConnection, Some(CONNECT_DIALOG)),
         KeyBinding::new(TOGGLE_KEY, ToggleKeyMask, Some(CONNECT_DIALOG)),
+        // Space is text in an input, so it pauses only outside one.
+        KeyBinding::new("space", TogglePolling, Some("Overview && !Input")),
+        KeyBinding::new(REFRESH, Refresh, Some(OVERVIEW)),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }

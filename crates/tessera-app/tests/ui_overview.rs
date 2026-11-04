@@ -344,3 +344,226 @@ async fn collections_load_on_open_and_refresh_only(cx: &mut TestAppContext) {
         assert_eq!(collections[0].num_documents, 7);
     });
 }
+
+/// Renders the window and returns the label of element `id`.
+fn text(cx: &mut TestAppContext, handle: WindowHandle<Root>, id: &str) -> String {
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .find(id.to_string())
+            .label()
+            .unwrap_or_default()
+            .to_string()
+    })
+    .unwrap()
+}
+
+/// Tabs to element `id` and presses `key` there.
+fn press_on(cx: &mut TestAppContext, handle: WindowHandle<Root>, id: &str, key: &str) {
+    cx.update_window(handle.into(), |_, window, cx| {
+        focus(window, id, cx);
+        window.press(key, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
+/// `ok_sample` with the role and CPU value of the given host.
+fn sample_for(node: &tessera_client::NodeClient) -> tessera_app::poller::NodeSample {
+    let mut sample = ok_sample();
+    match node.url().host_str() {
+        Some("n2") => return down(),
+        Some("n1") => {
+            sample.debug.as_mut().unwrap().state = tessera_client::RaftState::Follower;
+            sample.metrics.as_mut().unwrap().cpu_percent = Some(50.0);
+        }
+        _ => {}
+    }
+    sample
+}
+
+#[gpui_kit::test]
+async fn node_cards_show_roles_and_unreachable(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    fake_poll(cx, sample_for);
+    let (handle, _conn, _rt) = cluster(cx).await;
+    let card = text(cx, handle, "node.0");
+    assert!(
+        card.contains("Leader") && card.contains("n0:8108"),
+        "{card}"
+    );
+    assert!(card.contains("active node"), "{card}");
+    assert!(text(cx, handle, "node.1").contains("Follower"));
+    let error = text(cx, handle, "node.2.error");
+    assert!(error.starts_with("n2:8108 did not answer"), "{error}");
+    assert!(error.contains("retry in 5 s"), "{error}");
+    advance(cx, Duration::from_secs(2));
+    assert_eq!(text(cx, handle, "node.2.retry"), "retry in 3 s");
+}
+
+#[gpui_kit::test]
+async fn click_node_makes_it_active(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    fake_poll(cx, sample_for);
+    let (handle, conn, _rt) = cluster(cx).await;
+    assert!(text(cx, handle, "chart.cpu").contains("12.5 %"));
+    press_on(cx, handle, "node.1", "enter");
+    let active = conn.read_with(cx, |c, _| {
+        c.connected.as_ref().unwrap().client.active_node()
+    });
+    assert_eq!(active, 1);
+    assert!(text(cx, handle, "node.1").contains("active node"));
+    assert!(!text(cx, handle, "node.0").contains("active node"));
+    let chart = text(cx, handle, "chart.cpu");
+    assert!(chart.contains("50.0 %"), "node 1's history: {chart}");
+}
+
+#[gpui_kit::test]
+async fn figures_show_dash_for_missing_metrics(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    let calls = Arc::new(Mutex::new(0u64));
+    fake_poll(cx, move |_| {
+        let mut calls = calls.lock().unwrap();
+        *calls += 1;
+        let mut sample = ok_sample();
+        let metrics = sample.metrics.as_mut().unwrap();
+        // Counters at 0 and 5000 bytes, then a sample without the network fields.
+        let counter = (*calls < 3).then_some((*calls - 1) * 5000);
+        metrics.net_received = counter;
+        metrics.net_sent = counter;
+        sample
+    });
+    fake_connector(cx, |p| Ok(server_for(p)));
+    let p = profile("single", &["n0"]);
+    let (handle, state, _rt) = open_app(cx, vec![p.clone()], store(&[&p]));
+    open_tab(cx, handle, &state, &p).await;
+    advance(cx, TICK);
+    assert_eq!(
+        text(cx, handle, "figure.network"),
+        "rx 1000 B/s · tx 1000 B/s"
+    );
+    advance(cx, TICK);
+    assert_eq!(text(cx, handle, "figure.network"), "–");
+    assert_eq!(text(cx, handle, "figure.cpu"), "12.5 %");
+    assert_eq!(text(cx, handle, "figure.memory"), "1 B of 4 B");
+}
+
+/// Stats with three endpoints at 1, 3 and 2 requests per second.
+fn stats() -> tessera_client::Stats {
+    let map = |values: [f64; 3]| {
+        ["GET /a", "GET /b", "GET /c"]
+            .into_iter()
+            .map(String::from)
+            .zip(values)
+            .collect()
+    };
+    tessera_client::Stats {
+        latency_ms: map([5.0, 1.0, 9.0]),
+        requests_per_second: map([1.0, 3.0, 2.0]),
+        total_requests_per_second: Some(6.0),
+        raw: Default::default(),
+    }
+}
+
+/// The endpoints of the stats table from top to bottom.
+fn stats_order(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> Vec<&'static str> {
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let mut rows: Vec<_> = ["GET /a", "GET /b", "GET /c"]
+            .into_iter()
+            .map(|e| (window.find(format!("stats.row.{e}")).bounds().origin.y, e))
+            .collect();
+        rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        rows.into_iter().map(|(_, e)| e).collect()
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+async fn stats_sorted_by_rps_desc(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    fake_poll(cx, |_| {
+        let mut sample = ok_sample();
+        sample.stats = Ok(stats());
+        sample
+    });
+    let (handle, _conn, _rt) = cluster(cx).await;
+    assert_eq!(stats_order(cx, handle), ["GET /b", "GET /c", "GET /a"]);
+    cx.update_window(handle.into(), |_, window, cx| {
+        // The table sits below the charts.
+        let down =
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(-2000.)));
+        window.scroll("overview", down, cx);
+        window.click("stats.sort.rps", cx);
+    })
+    .unwrap();
+    assert_eq!(stats_order(cx, handle), ["GET /a", "GET /c", "GET /b"]);
+    press_on(cx, handle, "stats.sort.latency", "enter");
+    assert_eq!(stats_order(cx, handle), ["GET /c", "GET /a", "GET /b"]);
+    assert!(text(cx, handle, "stats.row.GET /c").contains("9.0 ms"));
+}
+
+#[gpui_kit::test]
+async fn stats_empty_explains(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    let (handle, _conn, _rt) = cluster(cx).await;
+    let empty = text(cx, handle, "stats.empty");
+    assert!(empty.contains("receives requests"), "{empty}");
+}
+
+#[gpui_kit::test]
+async fn stats_show_active_node_error(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    fake_poll(cx, |_| {
+        let mut sample = ok_sample();
+        sample.stats = Err(Error::Timeout);
+        sample
+    });
+    let (handle, _conn, _rt) = cluster(cx).await;
+    let error = text(cx, handle, "stats.error");
+    assert!(error.starts_with("n0:8108 did not answer"), "{error}");
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(window.try_find("stats.empty").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn space_pauses_polling(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    let (handle, conn, _rt) = cluster(cx).await;
+    assert_eq!(text(cx, handle, "overview.pause"), "Pause");
+    assert_eq!(text(cx, handle, "overview.live"), "Live · every 5 s");
+    press_on(cx, handle, "node.0", "space");
+    assert_eq!(text(cx, handle, "overview.pause"), "Resume");
+    assert_eq!(text(cx, handle, "overview.live"), "Paused");
+    assert!(conn.read_with(cx, |c, _| c.paused));
+    let active = conn.read_with(cx, |c, _| {
+        c.connected.as_ref().unwrap().client.active_node()
+    });
+    assert_eq!(active, 0, "Space does not also click the focused card");
+    press_on(cx, handle, "node.0", "space");
+    assert_eq!(text(cx, handle, "overview.pause"), "Pause");
+}
+
+#[gpui_kit::test]
+async fn refresh_shortcut_reloads_collections(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    let origins = fake_collections(cx);
+    let (handle, _conn, _rt) = cluster(cx).await;
+    assert_eq!(text(cx, handle, "figure.collections"), "1");
+    assert_eq!(text(cx, handle, "figure.documents"), "7");
+    press_on(cx, handle, "node.0", REFRESH);
+    assert_eq!(*origins.lock().unwrap(), [Origin::Polling, Origin::User]);
+}
+
+#[gpui_kit::test]
+async fn status_bar_counts_unreachable_nodes(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    fake_poll(cx, sample_for);
+    let (handle, _conn, _rt) = cluster(cx).await;
+    assert_eq!(
+        text(cx, handle, "status.unreachable"),
+        "1 of 3 nodes unreachable"
+    );
+}

@@ -204,6 +204,18 @@ impl ConnectionState {
         cx.notify();
     }
 
+    /// Sends further requests to node `index`. Its stats show from its next poll on.
+    pub fn set_active_node(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(connected) = &self.connected else {
+            return;
+        };
+        if index < connected.client.nodes().len() && index != connected.client.active_node() {
+            connected.client.set_active_node(index);
+            self.stats = None;
+            cx.notify();
+        }
+    }
+
     /// Reloads the collections as a user action (⌘R / Ctrl+R).
     pub fn refresh_collections(&mut self, cx: &mut Context<Self>) {
         self.load_collections(false, cx);
