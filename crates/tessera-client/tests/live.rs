@@ -9,14 +9,15 @@
 use std::time::Duration;
 
 use secrecy::SecretString;
-use tessera_client::{Client, Error, RaftState};
+use tessera_client::{Client, ClientOptions, Error, RaftState};
 
 fn url() -> String {
     std::env::var("TESSERA_IT_URL").unwrap_or_else(|_| "http://localhost:8108".into())
 }
 
 fn client_with(key: &str) -> Client {
-    Client::new(&url(), SecretString::from(key)).expect("TESSERA_IT_URL must be an http(s) URL")
+    Client::new(&[&url()], SecretString::from(key), ClientOptions::default())
+        .expect("TESSERA_IT_URL must be an http(s) URL")
 }
 
 fn client() -> Client {

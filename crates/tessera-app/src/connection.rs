@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::{Context, Global};
 use rust_i18n::t;
 use secrecy::SecretString;
-use tessera_client::{Client, Error, RaftState};
+use tessera_client::{Client, ClientOptions, Error, RaftState};
 use tessera_core::ServerCapabilities;
 use tokio::runtime::Handle;
 use url::Url;
@@ -57,7 +57,7 @@ impl Global for ConnectorGlobal {}
 pub fn tokio_connector(handle: Handle) -> Connector {
     Arc::new(move |url, key| {
         let task = AbortOnDrop::from_join_handle(handle.spawn(async move {
-            let client = Client::new(&url, key)?;
+            let client = Client::new(&[&url], key, ClientOptions::default())?;
             let health = client.health().await?;
             let start = Instant::now();
             let debug = client.debug().await?;
@@ -123,6 +123,8 @@ pub fn error_text(err: &Error, host: &str) -> String {
             None => t!("connect.error.not_typesense", host = host, status = status).to_string(),
         },
         Error::Decode(_) => t!("connect.error.decode", host = host).to_string(),
+        Error::Tls(detail) => t!("connect.error.tls", host = host, detail = detail).to_string(),
+        Error::ReadOnly { method } => t!("connect.error.read_only", method = method).to_string(),
     }
 }
 
