@@ -15,6 +15,7 @@ tessera-core = { path = "crates/tessera-core" }
 anyhow = "=1.0.104"
 directories = "=6.0.0"
 gpui-kit = "=0.9.0"
+insta = "=1.49.0"
 keyring = "=4.2.0"
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json", "http2", "charset"] }
 rust-i18n = "=4.2.4"
@@ -23,7 +24,7 @@ rustls = { version = "=0.23.46", default-features = false, features = ["std"] }
 secrecy = "=0.10.3"
 semver = "=1.0.28"
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.154"
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sys-locale = "=0.3.2"
 tempfile = "=3.27.0"
 thiserror = "=2.0.21"

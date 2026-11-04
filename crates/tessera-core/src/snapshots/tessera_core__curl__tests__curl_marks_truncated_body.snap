@@ -1,0 +1,10 @@
+---
+source: crates/tessera-core/src/curl.rs
+expression: command(&e)
+---
+# body truncated at 1 MiB
+curl -X PUT 'http://localhost:8108/health' \
+  -H "X-TYPESENSE-API-KEY: $TYPESENSE_API_KEY" \
+  --data-binary @- <<'EOF'
+{"a":"b","c":
+EOF
