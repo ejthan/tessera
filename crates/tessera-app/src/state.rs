@@ -73,11 +73,6 @@ pub struct AppState {
     log_drain: Option<Task<()>>,
 }
 
-/// Entries kept for user-initiated requests.
-const LOG_USER_CAP: usize = 1000;
-/// Entries kept for background polling.
-const LOG_POLLING_CAP: usize = 200;
-
 impl AppState {
     /// State from the result of [`store::load`]. A failed load keeps the profiles in memory only.
     pub fn new(
@@ -94,7 +89,7 @@ impl AppState {
         };
         let (log_tx, log_rx) = unbounded_channel();
         Self {
-            log: RequestLog::new(LOG_USER_CAP, LOG_POLLING_CAP),
+            log: RequestLog::default(),
             log_tx,
             log_rx: Some(log_rx),
             log_drain: None,

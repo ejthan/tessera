@@ -42,7 +42,11 @@ impl Detail {
                 ms = e.duration.as_millis()
             )
             .to_string(),
-            (None, Some(error)) => t!("log.detail.failed", error = error).to_string(),
+            (None, Some(error)) => t!(
+                "log.detail.failed",
+                error = redact::text_query_params(error)
+            )
+            .to_string(),
             (None, None) => t!("log.status.failed").to_string(),
         };
         sections.push((t!("log.detail.response"), outcome));

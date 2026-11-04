@@ -35,7 +35,7 @@ pub fn command(entry: &LogEntry) -> String {
     let mut heredoc = None;
     if let Some(body) = &e.request_body {
         if body.original_len > body.text.len() {
-            head.push_str("# body truncated at 1 MiB\n");
+            head.push_str(": 'body truncated at 1 MiB'\n");
         }
         // shortcut: bodies round-trip through serde_json::Value, so integers beyond i64/u64 and float
         // formatting can change; enable arbitrary_precision if replay fidelity matters.

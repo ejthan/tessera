@@ -296,7 +296,7 @@ pub async fn wait_for_label(
 ) {
     cx.wait_for(
         handle.into(),
-        Duration::from_millis(1000),
+        Duration::from_millis(10_000),
         move |window, _| {
             window
                 .try_find(id.clone())

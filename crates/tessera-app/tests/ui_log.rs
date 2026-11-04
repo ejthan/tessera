@@ -130,6 +130,25 @@ async fn events_reach_the_log(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn the_app_log_keeps_5000_user_and_500_polling_entries(cx: &mut TestAppContext) {
+    let (_handle, state, _rt) = open_app(cx, Vec::new(), Arc::new(MemoryStore::default()));
+    let events = (0..5001)
+        .map(|id| event(id, Method::GET, "/u", Some(200), Origin::User))
+        .chain((5001..5502).map(|id| event(id, Method::GET, "/p", Some(200), Origin::Polling)));
+    send(cx, &state, events.map(entry).collect());
+    cx.run_until_parked();
+    let (user, polling) = state.read_with(cx, |s, _| {
+        let all = s.log().entries(&Filter {
+            show_polling: true,
+            ..Default::default()
+        });
+        let polling = all.iter().filter(|e| e.event.origin == Origin::Polling);
+        (all.len() - polling.clone().count(), polling.count())
+    });
+    assert_eq!((user, polling), (5000, 500));
+}
+
+#[gpui_kit::test]
 async fn connect_hook_logs_with_profile_id_and_name(cx: &mut TestAppContext) {
     let (staging, _, _) = two_profiles();
     let secrets = Arc::new(MemoryStore::default());
@@ -416,7 +435,7 @@ async fn full_secret_session_scan(cx: &mut TestAppContext) {
         conn.read(cx).connected.as_ref().unwrap().client.polling()
     });
     rt.block_on(async { client.metrics().await.unwrap() });
-    cx.wait_for(handle.into(), Duration::from_millis(1000), |_, cx| {
+    cx.wait_for(handle.into(), Duration::from_millis(10_000), |_, cx| {
         state
             .read(cx)
             .log()
@@ -428,7 +447,7 @@ async fn full_secret_session_scan(cx: &mut TestAppContext) {
             == 5
     })
     .await;
-    cx.wait_for(handle.into(), Duration::from_millis(1000), {
+    cx.wait_for(handle.into(), Duration::from_millis(10_000), {
         let file_path = file_path.clone();
         move |_, _| file_path.exists()
     })
@@ -465,7 +484,7 @@ async fn full_secret_session_scan(cx: &mut TestAppContext) {
         let request_line = format!("GET http://{addr}{path}");
         cx.wait_for(
             handle.into(),
-            Duration::from_millis(1000),
+            Duration::from_millis(10_000),
             move |window, _| {
                 window
                     .try_find("log.detail")

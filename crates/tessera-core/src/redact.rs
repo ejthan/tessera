@@ -32,11 +32,42 @@ pub fn query(query: &str) -> String {
     query
         .split('&')
         .map(|pair| match pair.split_once('=') {
-            Some((name, _)) if name.eq_ignore_ascii_case(KEY_PARAM) => format!("{name}={MASK}"),
+            Some((name, _)) if is_key_param(name) => format!("{name}={MASK}"),
             _ => pair.to_string(),
         })
         .collect::<Vec<_>>()
         .join("&")
+}
+
+/// Compares the percent-decoded name, so `x%2Dtypesense-api-key` counts too.
+fn is_key_param(name: &str) -> bool {
+    url::form_urlencoded::parse(name.as_bytes())
+        .next()
+        .is_some_and(|(k, _)| k.eq_ignore_ascii_case(KEY_PARAM))
+}
+
+/// Free text (for example an error message) with the query of every URL in it passed through
+/// [`query`]. A URL ends at whitespace, a quote, a parenthesis or an angle bracket.
+pub fn text_query_params(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        match run.split_once('?') {
+            Some((head, q)) => out.push_str(&format!("{head}?{}", query(q))),
+            None => out.push_str(run),
+        }
+        run.clear();
+    };
+    for c in text.chars() {
+        if c.is_whitespace() || "()\"'<>".contains(c) {
+            flush(&mut run, &mut out);
+            out.push(c);
+        } else {
+            run.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
 }
 
 const KEY_PARAM: &str = "x-typesense-api-key";
@@ -130,6 +161,26 @@ mod tests {
             "q=dune&X-TYPESENSE-API-KEY=••••&x-typesense-api-key=••••&k=v"
         );
         assert_eq!(query("q=a=b&flag"), "q=a=b&flag");
+    }
+
+    #[test]
+    fn query_masks_a_percent_encoded_parameter_name() {
+        assert_eq!(
+            query("x%2Dtypesense-api-key=sk&a=b"),
+            "x%2Dtypesense-api-key=••••&a=b"
+        );
+    }
+
+    #[test]
+    fn text_masks_the_key_in_urls_inside_an_error() {
+        let out = text_query_params(
+            "error sending request for url (http://h:1/x?a=b&x-typesense-api-key=sk-live): refused",
+        );
+        assert_eq!(
+            out,
+            "error sending request for url (http://h:1/x?a=b&x-typesense-api-key=••••): refused"
+        );
+        assert_eq!(text_query_params("no url here?"), "no url here?");
     }
 
     #[test]
