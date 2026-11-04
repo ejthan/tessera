@@ -5,14 +5,14 @@
 // Helpers outside #[test] functions unwrap too; a panic is the test failure we want.
 #![allow(clippy::unwrap_used)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{
-    AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowHandle,
-    WindowOptions, base::Root, px, size,
+    AppContext as _, Bounds, Entity, Point, ScrollDelta, TestAppContext, WindowBounds,
+    WindowHandle, WindowOptions, base::Root, point, px, size,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
@@ -348,6 +348,59 @@ async fn choosing_prod_turns_read_only_on(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn typing_prod_as_other_turns_read_only_on(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("connect.env.other", cx);
+        window.render_frame(cx);
+        fill(window, "connect.env.name", "Prod", cx);
+    })
+    .unwrap();
+    // Input events reach the dialog once the update above has finished.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("connect.read_only").checked(), Some(true));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn advanced_tls_and_nearest_node_are_saved(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let (handle, state, _rt) = open_app(cx, Vec::new(), Arc::new(MemoryStore::default()));
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(label(window, "connect.advanced").contains("system certificates"));
+        window.click("connect.advanced", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("connect.insecure_warning").is_none());
+        // The open section runs below the fold of the 800 px test window.
+        let down = ScrollDelta::Pixels(point(px(0.), px(-600.)));
+        window.scroll("connect.advanced", down, cx);
+        window.render_frame(cx);
+        assert!(window.find("connect.ca_file").visible());
+        window.click("connect.insecure", cx);
+        window.render_frame(cx);
+        assert!(window.find("connect.insecure_warning").visible());
+        assert!(label(window, "connect.advanced").contains("insecure"));
+        fill(window, "connect.nearest.host", "near.example.com", cx);
+        window.click("connect.nearest.protocol", cx);
+        fill(window, "connect.key", "k", cx);
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_close(cx, handle).await;
+    let profile = state.read_with(cx, |s, _| s.profiles[0].clone());
+    assert!(profile.tls.allow_insecure);
+    let nearest = profile.nearest_node.expect("nearest node saved");
+    assert_eq!(
+        (nearest.host.as_str(), nearest.protocol),
+        ("near.example.com", Protocol::Https)
+    );
+}
+
+#[gpui_kit::test]
 async fn restricted_key_result(cx: &mut TestAppContext) {
     let mut info = server("30.2", true);
     info.access = KeyAccess::Restricted;
@@ -448,7 +501,151 @@ async fn save_creates_profile_and_stores_key(cx: &mut TestAppContext) {
     assert_eq!(profile.nodes[0].host, "127.0.0.1");
     let stored = secrets.get(profile.id).unwrap().expect("key stored");
     assert_eq!(stored.expose_secret(), "k-new");
-    assert!(seen.lock().unwrap().iter().all(|k| k == "k-new"));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        ["k-new"],
+        "one probe round, reused by Save"
+    );
+}
+
+#[gpui_kit::test]
+async fn save_after_test_reuses_the_result(cx: &mut TestAppContext) {
+    let seen = recording_connector(cx, server("30.2", true));
+    let (handle, state, _rt) = open_app(cx, Vec::new(), Arc::new(MemoryStore::default()));
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.key", "k", cx);
+        window.press(TEST, cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "connect.result".into(), "Admin key").await;
+    cx.update_window(handle.into(), |_, window, cx| window.press(SAVE, cx))
+        .unwrap();
+    wait_for_close(cx, handle).await;
+    wait_for_label(cx, handle, "status.text".into(), "Connected").await;
+    assert_eq!(seen.lock().unwrap().len(), 1, "Save did not probe again");
+    state.read_with(cx, |s, cx| {
+        let id = s.profiles[0].id;
+        assert!(s.connection(id, cx).unwrap().read(cx).connected.is_some());
+        assert_eq!(s.last_used, Some(id));
+    });
+}
+
+#[gpui_kit::test]
+async fn changed_values_mark_the_result_stale(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.key", "k", cx);
+        window.press(TEST, cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "connect.result".into(), "Admin key").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(!label(window, "connect.result").contains("Values changed"));
+        fill(window, "connect.name", "renamed", cx);
+        window.render_frame(cx);
+        assert!(label(window, "connect.result").contains("Values changed since this test."));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn failed_test_offers_save_anyway(cx: &mut TestAppContext) {
+    let calls = Arc::new(Mutex::new(0));
+    let count = calls.clone();
+    fake_connector(cx, move |_| {
+        *count.lock().unwrap() += 1;
+        Err(Error::Timeout)
+    });
+    let secrets = Arc::new(MemoryStore::default());
+    let (handle, state, _rt) = open_app(cx, Vec::new(), secrets.clone());
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.name", "down-now", cx);
+        fill(window, "connect.key", "k-later", cx);
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "connect.result".into(), "did not answer").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(window.find("connect.save").label(), Some("Save anyway"));
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_close(cx, handle).await;
+    cx.run_until_parked();
+    assert_eq!(*calls.lock().unwrap(), 1, "Save anyway does not connect");
+    let id = state.read_with(cx, |s, _| {
+        assert_eq!(s.profiles.len(), 1);
+        assert!(s.connections.is_empty());
+        s.profiles[0].id
+    });
+    assert_eq!(secrets.get(id).unwrap().unwrap().expose_secret(), "k-later");
+}
+
+/// A store whose writes wait until the test opens the gate.
+struct GateStore {
+    sets: AtomicUsize,
+    gate: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl SecretStore for GateStore {
+    fn get(&self, _: Uuid) -> Result<Option<SecretString>, SecretError> {
+        Ok(None)
+    }
+    fn set(&self, _: Uuid, _: &SecretString) -> Result<(), SecretError> {
+        self.sets.fetch_add(1, Ordering::SeqCst);
+        self.gate.lock().unwrap().recv().ok();
+        Ok(())
+    }
+    fn delete(&self, _: Uuid) -> Result<(), SecretError> {
+        Ok(())
+    }
+}
+
+#[gpui_kit::test]
+async fn shortcuts_wait_for_a_running_save(cx: &mut TestAppContext) {
+    let seen = recording_connector(cx, server("30.2", true));
+    let (open_gate, gate) = std::sync::mpsc::channel();
+    let store = Arc::new(GateStore {
+        sets: AtomicUsize::new(0),
+        gate: Mutex::new(gate),
+    });
+    let (handle, state, _rt) = open_app(cx, Vec::new(), store.clone());
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.key", "k", cx);
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    let saving = store.clone();
+    cx.wait_for(handle.into(), Duration::from_millis(1000), move |_, _| {
+        saving.sets.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press(TEST, cx);
+        window.press(SAVE, cx);
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert!(
+            window.find("connect.name").visible(),
+            "Esc waits for the save"
+        );
+        assert_eq!(window.find("connect.save").disabled(), Some(true));
+    })
+    .unwrap();
+    // Extra openings keep a wrongly started second write from blocking the runtime.
+    for _ in 0..3 {
+        open_gate.send(()).unwrap();
+    }
+    wait_for_close(cx, handle).await;
+    cx.run_until_parked();
+    assert_eq!(store.sets.load(Ordering::SeqCst), 1);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    state.read_with(cx, |s, _| assert_eq!(s.profiles.len(), 1));
 }
 
 /// A store whose writes fail like a missing Secret Service.
@@ -484,6 +681,10 @@ async fn keychain_failure_offers_session_only(cx: &mut TestAppContext) {
         "no Secret Service is running",
     )
     .await;
+    cx.run_until_parked();
+    state.read_with(cx, |s, _| {
+        assert!(s.profiles.is_empty(), "nothing written yet")
+    });
     cx.update_window(handle.into(), |_, window, cx| {
         window.click("connect.session_only", cx)
     })
@@ -494,8 +695,72 @@ async fn keychain_failure_offers_session_only(cx: &mut TestAppContext) {
         assert_eq!(s.profiles.len(), 1);
         let id = s.profiles[0].id;
         assert!(s.connection(id, cx).unwrap().read(cx).connected.is_some());
+        assert_eq!(s.session_keys[&id].expose_secret(), "k-session");
     });
-    assert!(seen.lock().unwrap().iter().all(|k| k == "k-session"));
+    assert_eq!(*seen.lock().unwrap(), ["k-session"]);
+}
+
+#[gpui_kit::test]
+async fn cancel_at_keychain_error_leaves_no_profile(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let (handle, state, _rt) = open_app(cx, Vec::new(), Arc::new(FailingStore));
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.key", "k", cx);
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_label(
+        cx,
+        handle,
+        "connect.keychain_error".into(),
+        "Secret Service",
+    )
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+    wait_for_close(cx, handle).await;
+    cx.run_until_parked();
+    state.read_with(cx, |s, _| {
+        assert!(s.profiles.is_empty());
+        assert!(s.connections.is_empty());
+    });
+}
+
+/// A store that refuses every read, to prove a session key is used first.
+struct NoReads;
+
+impl SecretStore for NoReads {
+    fn get(&self, _: Uuid) -> Result<Option<SecretString>, SecretError> {
+        Err(SecretError::new("read attempted"))
+    }
+    fn set(&self, _: Uuid, _: &SecretString) -> Result<(), SecretError> {
+        Ok(())
+    }
+    fn delete(&self, _: Uuid) -> Result<(), SecretError> {
+        Ok(())
+    }
+}
+
+#[gpui_kit::test]
+async fn edit_test_uses_the_session_key(cx: &mut TestAppContext) {
+    let seen = recording_connector(cx, server("30.2", true));
+    let profile = Profile::new("session", vec![node()]);
+    let (handle, state, _rt) = open_app(cx, vec![profile.clone()], Arc::new(NoReads));
+    state.update(cx, |s, _| {
+        s.session_keys
+            .insert(profile.id, "k-mem".to_string().into());
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        focus(window, &entry(&profile), cx);
+        window.press(EDIT, cx);
+    })
+    .unwrap();
+    wait_for_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| window.press(TEST, cx))
+        .unwrap();
+    wait_for_label(cx, handle, "connect.result".into(), "Admin key").await;
+    assert_eq!(*seen.lock().unwrap(), ["k-mem"]);
 }
 
 #[gpui_kit::test]

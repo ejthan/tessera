@@ -4,7 +4,6 @@
 
 pub mod connect_dialog;
 pub mod env_badge;
-pub mod node_rows;
 pub mod overview;
 pub mod root;
 pub mod sidebar;
