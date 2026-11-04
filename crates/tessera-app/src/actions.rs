@@ -4,7 +4,10 @@
 
 use gpui_kit::{App, KeyBinding};
 
-gpui_kit::actions!(tessera, [NewConnection, Quit]);
+gpui_kit::actions!(tessera, [NewConnection, Quit, ConnectSelected]);
+
+/// Key context of a sidebar entry.
+pub const SIDEBAR_ENTRY: &str = "SidebarEntry";
 
 #[cfg(target_os = "macos")]
 const NEW_CONNECTION: &str = "cmd-n";
@@ -15,18 +18,12 @@ const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
 
-/// Shortcut label shown next to the "Add connection" control.
-pub const NEW_CONNECTION_HINT: &str = if cfg!(target_os = "macos") {
-    "⌘N"
-} else {
-    "Ctrl+N"
-};
-
 /// Registers global key bindings and app-level action handlers.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(NEW_CONNECTION, NewConnection, None),
         KeyBinding::new(QUIT, Quit, None),
+        KeyBinding::new("enter", ConnectSelected, Some(SIDEBAR_ENTRY)),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }

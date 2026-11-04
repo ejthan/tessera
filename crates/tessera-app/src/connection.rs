@@ -175,12 +175,19 @@ pub fn host_label(url: &str) -> String {
         .unwrap_or_else(|| url.to_string())
 }
 
-/// User-facing text for a failed connect attempt.
-pub fn error_text(err: &Error, host: &str) -> String {
+/// User-facing text for a failed connect attempt to `profile`.
+pub fn error_text(err: &Error, profile: &Profile) -> String {
+    let host = profile.nodes.first().map(|n| n.label()).unwrap_or_default();
+    let host = host.as_str();
     match err {
         Error::InvalidUrl(_) => t!("connect.error.invalid_url").to_string(),
         Error::Network(_) => t!("connect.error.network", host = host).to_string(),
-        Error::Timeout => t!("connect.error.timeout", host = host).to_string(),
+        Error::Timeout => t!(
+            "connect.error.timeout",
+            host = host,
+            seconds = profile.timeout_secs.clamp(1, MAX_TIMEOUT_SECS)
+        )
+        .to_string(),
         Error::Http { status, .. } => match err.typesense_message() {
             Some(message) => {
                 t!("connect.error.http", status = status, message = message).to_string()
@@ -278,8 +285,9 @@ mod tests {
             message: html.clone(),
             body: html,
         };
+        let profile = Profile::new("t", vec![node("example.com", 443)]);
         assert_eq!(
-            error_text(&err, "example.com:443"),
+            error_text(&err, &profile),
             "example.com:443 answered HTTP 404, which does not look like Typesense. Check the URL and path prefix."
         );
     }
@@ -299,8 +307,9 @@ mod tests {
             message: "Forbidden - a valid `x-typesense-api-key` header must be sent.".into(),
             body: String::new(),
         };
+        let profile = Profile::new("t", vec![node("localhost", 8108)]);
         assert_eq!(
-            error_text(&err, "localhost:8108"),
+            error_text(&err, &profile),
             "Typesense answered 401: Forbidden - a valid `x-typesense-api-key` header must be sent."
         );
     }

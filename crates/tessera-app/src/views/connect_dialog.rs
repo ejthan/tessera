@@ -101,7 +101,7 @@ impl ConnectDialog {
                             .update(cx, |s, cx| s.add_connected(profile, connected, cx));
                         window.close_dialog(cx);
                     }
-                    Err(e) => view.error = Some(error_text(&e, &host).into()),
+                    Err(e) => view.error = Some(error_text(&e, &profile).into()),
                 }
                 cx.notify();
             })

@@ -692,6 +692,7 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D12 | Polling traffic in the request log | Logged in its own 500-entry buffer next to the 5,000-entry buffer for user requests; hidden by default |
 | D13 | Connection from env vars or CLI flags | Temporary, never saved, key in memory only; "Save as profile" opens the prefilled dialog |
 | D14 | Request routing in cluster profiles | Active node with failover for idempotent methods; no round robin |
+| D15 | Keyboard shortcut for "Disconnect" in the sidebar (UX rule 5)? GPUI Kit's context menu opens only by mouse, and no shortcut is specified | Open. Until decided, Disconnect is reachable only from the context menu |
 
 ---
 

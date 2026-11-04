@@ -4,6 +4,7 @@
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
     App, ClickEvent, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
@@ -11,7 +12,7 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 
-use crate::actions::NEW_CONNECTION_HINT;
+use crate::actions::NewConnection;
 
 /// The Docker command shown on the welcome screen. Tessera never runs it.
 pub const DOCKER_COMMAND: &str = "docker run -p 8108:8108 -v \"$(pwd)/typesense-data:/data\" typesense/typesense:30.2 --data-dir /data --api-key=xyz";
@@ -23,6 +24,7 @@ pub fn render(
     load_error: Option<String>,
     on_add: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_copy: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    window: &Window,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -87,14 +89,10 @@ pub fn render(
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
                                     .child(t!("welcome.add_connection_hint").to_string())
-                                    .child(
-                                        div()
-                                            .px_1()
-                                            .border_1()
-                                            .border_color(theme.border)
-                                            .rounded_sm()
-                                            .child(NEW_CONNECTION_HINT),
-                                    ),
+                                    .children(Kbd::global_binding_for_action(
+                                        &NewConnection,
+                                        window,
+                                    )),
                             ),
                     )
                     .child(

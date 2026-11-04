@@ -5,14 +5,15 @@
 use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
-use gpui_kit::component::{ActiveTheme as _, Theme, TitleBar, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Theme, TitleBar, h_flex, v_flex};
 use gpui_kit::{
-    ClipboardItem, Context, Entity, FocusHandle, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Task, Window, div, prelude::*, px,
+    AppContext as _, ClipboardItem, Context, Entity, FocusHandle, IntoElement, ParentElement as _,
+    Render, SharedString, Styled as _, Subscription, Task, Window, div, prelude::*, px, rgb,
 };
 use rust_i18n::t;
 
-use super::{connect_dialog::ConnectDialog, overview, status_bar, welcome};
+use super::sidebar::Sidebar;
+use super::{connect_dialog::ConnectDialog, env_badge, overview, status_bar, welcome};
 use crate::actions::NewConnection;
 use crate::state::AppState;
 
@@ -25,6 +26,7 @@ const COPIED_FOR: Duration = Duration::from_secs(2);
 pub struct RootView {
     focus_handle: FocusHandle,
     state: Entity<AppState>,
+    sidebar: Entity<Sidebar>,
     copied: bool,
     copy_reset: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -42,8 +44,10 @@ impl RootView {
         ];
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+        let sidebar = cx.new(|cx| Sidebar::new(state.clone(), cx));
         Self {
             focus_handle,
+            sidebar,
             state,
             copied: false,
             copy_reset: None,
@@ -73,19 +77,57 @@ impl RootView {
 }
 
 impl Render for RootView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let state = self.state.read(cx);
         let load_error = state.load_error.clone();
-        let info = state
+        let selected = state
             .selected
             .and_then(|id| state.connection(id, cx))
-            .and_then(|c| c.read(cx).connected.as_ref().map(|c| c.info.clone()));
+            .map(|c| c.read(cx));
+        let profile = selected.map(|c| &c.profile);
+        let info = selected.and_then(|c| c.connected.as_ref().map(|c| c.info.clone()));
+        let prod = profile.is_some_and(|p| p.environment.is_prod());
         let title = SharedString::from(
-            info.as_ref()
-                .map(|i| i.host_label())
+            profile
+                .map(|p| p.name.clone())
                 .unwrap_or_else(|| t!("titlebar.no_connection").to_string()),
         );
+        let switcher = h_flex()
+            .gap_2()
+            .items_center()
+            .text_sm()
+            .when_some(profile, |el, p| el.child(env_badge::dot(p.color, cx)))
+            .child(
+                div()
+                    .id("titlebar.connection")
+                    .test_support()
+                    .aria_label(title.clone())
+                    .text_color(theme.muted_foreground)
+                    .child(title),
+            )
+            .when_some(profile, |el, p| {
+                el.child(
+                    div()
+                        .id("titlebar.env")
+                        .test_support()
+                        .aria_label(SharedString::from(env_badge::label(&p.environment)))
+                        .child(env_badge::render(&p.environment, cx)),
+                )
+                .when(p.read_only, |el| {
+                    el.child(
+                        div()
+                            .id("titlebar.readonly")
+                            .test_support()
+                            .aria_label(SharedString::from(t!("sidebar.read_only").to_string()))
+                            .child(
+                                Icon::new(gpui_kit::assets::IconName::Lock)
+                                    .small()
+                                    .text_color(theme.muted_foreground),
+                            ),
+                    )
+                })
+            });
         let main = match &info {
             Some(info) => overview::render(info, cx).into_any_element(),
             None => {
@@ -100,38 +142,15 @@ impl Render for RootView {
                     move |_, _, cx| {
                         copy_target.update(cx, |view, cx| view.copy_docker_command(cx));
                     },
+                    window,
                     cx,
                 )
                 .into_any_element()
             }
         };
-        let sidebar = info.as_ref().map(|info| {
-            let overview = SharedString::from(t!("sidebar.overview").to_string());
-            v_flex()
-                .gap_1()
-                .p_2()
-                .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_sm()
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .child(info.host_label()),
-                )
-                .child(
-                    div()
-                        .id("sidebar.overview")
-                        .test_support()
-                        .aria_label(overview.clone())
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .bg(theme.secondary)
-                        .text_sm()
-                        .child(overview),
-                )
-        });
+        let red = rgb(env_badge::PROD_RED);
         v_flex()
+            .relative()
             .size_full()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
@@ -139,23 +158,14 @@ impl Render for RootView {
             }))
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(
-                TitleBar::new().child(
-                    div()
-                        .id("titlebar.connection")
-                        .test_support()
-                        .aria_label(title.clone())
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(title),
-                ),
-            )
+            .when(prod, |el| el.child(div().flex_none().h(px(4.)).bg(red)))
+            .child(TitleBar::new().child(switcher))
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
                     .child(
-                        v_flex()
+                        div()
                             .id("sidebar")
                             .test_support()
                             .w(px(SIDEBAR_WIDTH))
@@ -163,10 +173,22 @@ impl Render for RootView {
                             .bg(theme.sidebar)
                             .border_r_1()
                             .border_color(theme.sidebar_border)
-                            .children(sidebar),
+                            .child(self.sidebar.clone()),
                     )
                     .child(div().flex_1().h_full().min_w_0().child(main)),
             )
-            .child(status_bar::render(info.as_ref(), cx))
+            .child(status_bar::render(selected, cx))
+            // Last, so it draws over the content; it has no listeners, so clicks pass through.
+            .when(prod, |el| {
+                el.child(
+                    div()
+                        .id("window.prod_frame")
+                        .test_support()
+                        .absolute()
+                        .inset_0()
+                        .border_2()
+                        .border_color(red),
+                )
+            })
     }
 }

@@ -254,7 +254,6 @@ impl AppState {
             blocking(cx, move || secrets.get(id))
         });
         let connect = cx.global::<ConnectorGlobal>().0.clone();
-        let host = profile.nodes.first().map(|n| n.label()).unwrap_or_default();
         let weak = conn.downgrade();
         let task = cx.spawn(async move |this, cx| {
             let key = match stored_key {
@@ -264,9 +263,9 @@ impl AppState {
                     .unwrap_or_else(|e| Err(SecretError::new(e.to_string()))),
             };
             let result = match key {
-                Ok(Some(key)) if !key.expose_secret().is_empty() => connect(profile, key)
+                Ok(Some(key)) if !key.expose_secret().is_empty() => connect(profile.clone(), key)
                     .await
-                    .map_err(|e| error_text(&e, &host)),
+                    .map_err(|e| error_text(&e, &profile)),
                 Ok(_) => Err(t!("connect.error.no_key").to_string()),
                 Err(e) => Err(t!("connect.error.keychain", detail = e.to_string()).to_string()),
             };
