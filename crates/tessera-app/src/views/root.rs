@@ -14,9 +14,10 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use super::connect_dialog::ConnectDialog;
-use super::dock::{OverviewPanel, RequestLogPanel, SidebarPanel, WelcomePanel};
+use super::dock::{OverviewPanel, SidebarPanel, WelcomePanel};
+use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
-use crate::actions::{NewConnection, ToggleRequestLog};
+use crate::actions::{CopyAsCurl, NewConnection, ToggleRequestLog};
 use crate::connection::ConnectionState;
 use crate::state::{AppState, OpenOverview};
 
@@ -31,6 +32,7 @@ pub struct RootView {
     state: Entity<AppState>,
     dock: Entity<DockArea>,
     welcome: Entity<WelcomePanel>,
+    log: Entity<RequestLogPanel>,
     /// The overview tab selected last, in the center or an open dock. Band, frame, title bar
     /// and status bar follow it.
     active: Option<PanelId>,
@@ -46,13 +48,13 @@ impl RootView {
         let (dock, skin) = DockSkin::dock_area("tessera", None, window, cx);
         skin.set_close_button_visible(true, cx);
         let sidebar = cx.new(|cx| SidebarPanel::new(state.clone(), cx));
-        let log = cx.new(RequestLogPanel::new);
+        let log = cx.new(|cx| RequestLogPanel::new(state.clone(), window, cx));
         let welcome = cx.new(|cx| WelcomePanel::new(state.clone(), cx));
         dock.update(cx, |area, cx| {
             let tabs = |panel| DockLayout::tabs().panel_view(panel, cx);
             let (left, bottom, center) = (
                 tabs(panel_handle(sidebar)),
-                tabs(panel_handle(log)),
+                tabs(panel_handle(log.clone())),
                 tabs(panel_handle(welcome.clone())),
             );
             area.set_dock(DockPlacement::Left, left, window, cx);
@@ -92,6 +94,7 @@ impl RootView {
             state,
             dock,
             welcome,
+            log,
             active: None,
             displayed: Vec::new(),
             _subscriptions: subscriptions,
@@ -322,6 +325,9 @@ impl Render for RootView {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
                 ConnectDialog::open_new(this.state.clone(), None, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyAsCurl, _, cx| {
+                this.log.update(cx, |log, cx| log.copy_as_curl(cx));
             }))
             .on_action(cx.listener(|this, _: &ToggleRequestLog, window, cx| {
                 this.dock.update(cx, |area, cx| {

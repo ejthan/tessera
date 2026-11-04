@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The panels of the window's dock: sidebar (left), overview tabs and the welcome screen
-//! (center), request log (bottom).
+//! (center). The request log (bottom) lives in [`super::request_log`].
 
 use std::time::Duration;
 
@@ -157,53 +157,6 @@ impl Render for OverviewPanel {
                     .as_ref()
                     .map(|c| overview::render(&c.info, cx)),
             )
-    }
-}
-
-/// The bottom dock. A placeholder until the request log view lands.
-pub struct RequestLogPanel {
-    focus_handle: FocusHandle,
-}
-
-impl RequestLogPanel {
-    /// An empty log panel.
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        Self {
-            focus_handle: cx.focus_handle(),
-        }
-    }
-}
-
-panel_basics!(RequestLogPanel);
-
-impl BasePanel for RequestLogPanel {
-    fn panel_name(&self) -> &'static str {
-        "RequestLog"
-    }
-
-    // ⌘J hides it; closing would leave nothing to toggle.
-    fn closable(&self, _: &App) -> bool {
-        false
-    }
-}
-
-impl Panel for RequestLogPanel {
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        t!("log.title").to_string()
-    }
-}
-
-impl Render for RequestLogPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("dock.bottom")
-            .test_support()
-            .track_focus(&self.focus_handle)
-            .size_full()
-            .p_3()
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .child(t!("log.placeholder").to_string())
     }
 }
 
