@@ -89,10 +89,10 @@ impl RequestLog {
             Origin::User => (&mut self.user, self.user_cap),
             Origin::Polling => (&mut self.polling, self.polling_cap),
         };
-        if buf.len() >= cap {
+        buf.push_back(entry);
+        while buf.len() > cap {
             buf.pop_front();
         }
-        buf.push_back(entry);
     }
 
     /// Matching entries from both buffers, oldest first (ordered by event id).
@@ -192,6 +192,14 @@ pub(crate) mod tests {
             ..Filter::default()
         };
         assert_eq!(ids(&log, &errors), [2]);
+    }
+
+    #[test]
+    fn zero_cap_keeps_nothing() {
+        let mut log = RequestLog::new(0, 0);
+        log.push(entry(1, Method::GET, Origin::User, Some(200)));
+        log.push(entry(2, Method::GET, Origin::Polling, Some(200)));
+        assert!(log.get(1).is_none() && log.get(2).is_none());
     }
 
     #[test]

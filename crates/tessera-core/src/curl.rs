@@ -19,7 +19,10 @@ pub fn command(entry: &LogEntry) -> String {
     let mut head = String::new();
     let mut lines = Vec::new();
     let mut first = String::from("curl");
-    if e.method != Method::GET {
+    // curl waits for a body after `-X HEAD`; `-I` is the right flag.
+    if e.method == Method::HEAD {
+        first.push_str(" -I");
+    } else if e.method != Method::GET {
         first.push_str(&format!(" -X {}", e.method));
     }
     first.push_str(&format!(" {}", quote(url.as_str())));
@@ -34,6 +37,8 @@ pub fn command(entry: &LogEntry) -> String {
         if body.original_len > body.text.len() {
             head.push_str("# body truncated at 1 MiB\n");
         }
+        // shortcut: bodies round-trip through serde_json::Value, so integers beyond i64/u64 and float
+        // formatting can change; enable arbitrary_precision if replay fidelity matters.
         let text = redact::json(&body.text);
         let mut tag = String::from("EOF");
         while text.lines().any(|l| l == tag) {
@@ -93,6 +98,19 @@ mod tests {
         let mut e = entry(1, Method::GET, Origin::User, Some(200));
         e.event.query = Some("q=it's".into());
         e.event.request_headers = vec![("X-Note".into(), "it's".into())];
+        insta::assert_snapshot!(command(&e));
+    }
+
+    #[test]
+    fn curl_head_uses_dash_i() {
+        let e = entry(1, Method::HEAD, Origin::User, Some(200));
+        insta::assert_snapshot!(command(&e));
+    }
+
+    #[test]
+    fn curl_escapes_quote_in_path() {
+        let mut e = entry(1, Method::GET, Origin::User, Some(200));
+        e.event.path = "/a'b".into();
         insta::assert_snapshot!(command(&e));
     }
 
