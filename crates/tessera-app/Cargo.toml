@@ -1,0 +1,30 @@
+[package]
+name = "tessera-app"
+description = "Tessera desktop app."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "tessera"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+rust-i18n.workspace = true
+secrecy.workspace = true
+sys-locale.workspace = true
+tessera-client.workspace = true
+tessera-core.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[lints.clippy]
+unwrap_used = "deny"
