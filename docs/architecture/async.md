@@ -25,9 +25,32 @@ self.task = Some(cx.spawn(async move |this, cx| {
 - Keep the GPUI `Task` in the view's state. Replacing it (a second click on Connect) or dropping the view drops the awaited `AbortOnDrop`, which cancels the request. A stale request can therefore never overwrite a newer result.
 - `this.update` fails once the view is gone. The error is ignored on purpose: there is nothing left to update.
 
+## The Connector global
+
+`connection::ConnectorGlobal` holds the function that turns a profile and an API key into a live connection:
+
+```rust
+pub type Connector = Arc<dyn Fn(Profile, SecretString) -> ConnectFuture + Send + Sync>;
+pub type ConnectFuture = Pin<Box<dyn Future<Output = Result<Connected, Error>> + Send>>;
+// Connected { client: Client, info: ServerInfo, access: KeyAccess }
+```
+
+- The app installs `tokio_connector`. It builds the `Client` from the profile (node URLs, timeout, retries capped at 10, nearest node, TLS options, read-only), then runs `GET /health`, `GET /debug`, `GET /collections` and the `GET /keys` probe on tokio. The probe comes after `/debug`, because Typesense answers `401` to a wrong key too. The latency shown is the duration of `/debug`.
+- It is the seam for UI tests. GPUI's test executor runs on a simulated clock and does not wait for real network I/O, so tests install a fake that answers immediately and can record which profile and key it was called with.
+- `AppState::connect` and the connect dialog are its only callers. Views never build a `Client` themselves.
+
+## Keychain and file I/O
+
+`SecretStore` calls (Keychain, Credential Manager, Secret Service) and writes of `connections.json` block. `AppState` runs them on tokio's `spawn_blocking` through the `Tokio` global and awaits the `JoinHandle` from a GPUI task. A blocking task cannot be aborted, so dropping the GPUI task only stops waiting for the result; the write itself always finishes.
+
+- Saves are chained: each save's task awaits the previous one before it writes, so the last edit is the one on disk.
+- After a failed load, `AppState::save` does nothing for the rest of the session, so a file that does not parse is never overwritten.
+- `connections.json` is read once, in `run`, before the window opens.
+- Tests that touch the secret store or the file install a real tokio runtime as the `Tokio` global and call `cx.executor().allow_parking()`, so the test scheduler waits for the wake-up from tokio's threads.
+
 ## Rules
 
-- No blocking I/O on the main thread. Everything that touches the network or disk goes through `runtime::spawn`.
+- No blocking I/O on the main thread. Network calls go through `runtime::spawn`, blocking keychain and file calls through tokio's `spawn_blocking`.
 - CPU-heavy work (large JSON, schema inference) runs on GPUI's background executor or tokio's `spawn_blocking`, never in `render`.
 - UI tests do not perform real network I/O: GPUI's test executor runs on a simulated clock. Views reach the network through the `Connector` global, and tests install a fake that answers immediately.
 - Progress reporting for long jobs (import, export) arrives in M5 with `tokio::sync::watch` and UI updates throttled to 30 per second.

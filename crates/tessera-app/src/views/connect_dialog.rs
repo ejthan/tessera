@@ -15,8 +15,11 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use secrecy::SecretString;
+use tessera_core::profile::{Node, Profile, Protocol};
+use url::{Host, Url};
 
-use crate::connection::{Connection, ConnectorGlobal, error_text, host_label};
+use crate::connection::{ConnectorGlobal, error_text};
+use crate::state::AppState;
 
 const DEFAULT_URL: &str = "http://localhost:8108";
 
@@ -26,15 +29,15 @@ pub struct ConnectDialog {
     key: Entity<InputState>,
     error: Option<SharedString>,
     connecting: bool,
-    connection: Entity<Connection>,
+    state: Entity<AppState>,
     /// Replacing this task cancels the previous connect attempt.
     task: Option<Task<()>>,
 }
 
 impl ConnectDialog {
     /// Opens the dialog with focus in the URL field.
-    pub fn open(connection: Entity<Connection>, window: &mut Window, cx: &mut App) {
-        let view = cx.new(|cx| Self::new(connection, window, cx));
+    pub fn open(state: Entity<AppState>, window: &mut Window, cx: &mut App) {
+        let view = cx.new(|cx| Self::new(state, window, cx));
         let url = view.read(cx).url.clone();
         let first_build = Cell::new(true);
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -55,7 +58,7 @@ impl ConnectDialog {
         });
     }
 
-    fn new(connection: Entity<Connection>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let url = cx.new(|cx| InputState::new(window, cx).default_value(DEFAULT_URL));
         let initial_key = std::env::var("TYPESENSE_API_KEY").unwrap_or_default();
         let key = cx.new(|cx| {
@@ -68,16 +71,23 @@ impl ConnectDialog {
             key,
             error: None,
             connecting: false,
-            connection,
+            state,
             task: None,
         }
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let url = self.url.read(cx).value().trim().to_string();
+        let Some(node) = node_from_url(self.url.read(cx).value().trim()) else {
+            self.error = Some(t!("connect.error.invalid_url").into());
+            self.task = None;
+            cx.notify();
+            return;
+        };
+        let host = node.label();
+        let profile = Profile::new(host.clone(), vec![node]);
         let key = SecretString::from(self.key.read(cx).value().to_string());
         let connect = cx.global::<ConnectorGlobal>().0.clone();
-        let attempt = connect(url.clone(), key);
+        let attempt = connect(profile.clone(), key);
         self.error = None;
         self.connecting = true;
         cx.notify();
@@ -86,17 +96,40 @@ impl ConnectDialog {
             this.update_in(cx, |view, window, cx| {
                 view.connecting = false;
                 match result {
-                    Ok(info) => {
-                        view.connection.update(cx, |c, cx| c.set(info, cx));
+                    Ok(connected) => {
+                        view.state
+                            .update(cx, |s, cx| s.add_connected(profile, connected, cx));
                         window.close_dialog(cx);
                     }
-                    Err(e) => view.error = Some(error_text(&e, &host_label(&url)).into()),
+                    Err(e) => view.error = Some(error_text(&e, &host).into()),
                 }
                 cx.notify();
             })
             .ok();
         }));
     }
+}
+
+/// The node of an `http` or `https` URL such as `http://localhost:8108/typesense`.
+fn node_from_url(input: &str) -> Option<Node> {
+    let url = Url::parse(input).ok()?;
+    let protocol = match url.scheme() {
+        "http" => Protocol::Http,
+        "https" => Protocol::Https,
+        _ => return None,
+    };
+    let host = match url.host()? {
+        Host::Ipv6(addr) => addr.to_string(),
+        host => host.to_string(),
+    };
+    let node = Node {
+        protocol,
+        host,
+        port: url.port_or_known_default()?,
+        path: url.path().to_string(),
+    };
+    node.validate().ok()?;
+    Some(node)
 }
 
 impl Render for ConnectDialog {
@@ -149,5 +182,22 @@ impl Render for ConnectDialog {
                             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_from_url_keeps_parts() {
+        let n = node_from_url("https://[::1]/ts/").expect("parses");
+        assert_eq!(
+            (n.protocol, n.host.as_str(), n.port),
+            (Protocol::Https, "::1", 443)
+        );
+        assert_eq!(n.path, "/ts/");
+        assert!(node_from_url("localhost:8108").is_none());
+        assert!(node_from_url("ftp://localhost").is_none());
     }
 }

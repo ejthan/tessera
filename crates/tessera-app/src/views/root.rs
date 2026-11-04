@@ -7,14 +7,14 @@ use std::time::Duration;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::{ActiveTheme as _, Theme, TitleBar, h_flex, v_flex};
 use gpui_kit::{
-    AppContext as _, ClipboardItem, Context, Entity, FocusHandle, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, Task, Window, div, prelude::*, px,
+    ClipboardItem, Context, Entity, FocusHandle, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Subscription, Task, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
 
 use super::{connect_dialog::ConnectDialog, overview, status_bar, welcome};
 use crate::actions::NewConnection;
-use crate::connection::Connection;
+use crate::state::AppState;
 
 /// Width of the left sidebar.
 const SIDEBAR_WIDTH: f32 = 240.;
@@ -24,7 +24,7 @@ const COPIED_FOR: Duration = Duration::from_secs(2);
 /// The main window content.
 pub struct RootView {
     focus_handle: FocusHandle,
-    connection: Entity<Connection>,
+    state: Entity<AppState>,
     copied: bool,
     copy_reset: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -32,20 +32,19 @@ pub struct RootView {
 
 impl RootView {
     /// Builds the view and keeps the theme in sync with the system appearance.
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Theme::sync_system_appearance(Some(window), cx);
-        let connection = cx.new(|_| Connection::default());
         let subscriptions = vec![
             cx.observe_window_appearance(window, |_, window, cx| {
                 Theme::sync_system_appearance(Some(window), cx);
             }),
-            cx.observe(&connection, |_, _, cx| cx.notify()),
+            cx.observe(&state, |_, _, cx| cx.notify()),
         ];
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         Self {
             focus_handle,
-            connection,
+            state,
             copied: false,
             copy_reset: None,
             _subscriptions: subscriptions,
@@ -53,7 +52,7 @@ impl RootView {
     }
 
     fn open_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        ConnectDialog::open(self.connection.clone(), window, cx);
+        ConnectDialog::open(self.state.clone(), window, cx);
     }
 
     fn copy_docker_command(&mut self, cx: &mut Context<Self>) {
@@ -76,7 +75,12 @@ impl RootView {
 impl Render for RootView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let info = self.connection.read(cx).info.clone();
+        let state = self.state.read(cx);
+        let load_error = state.load_error.clone();
+        let info = state
+            .selected
+            .and_then(|id| state.connection(id, cx))
+            .and_then(|c| c.read(cx).connected.as_ref().map(|c| c.info.clone()));
         let title = SharedString::from(
             info.as_ref()
                 .map(|i| i.host_label())
@@ -89,6 +93,7 @@ impl Render for RootView {
                 let copy_target = this.clone();
                 welcome::render(
                     self.copied,
+                    load_error,
                     move |_, window, cx| {
                         this.update(cx, |view, cx| view.open_connect(window, cx));
                     },

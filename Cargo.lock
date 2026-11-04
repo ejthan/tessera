@@ -7317,12 +7317,14 @@ dependencies = [
  "rust-i18n",
  "secrecy",
  "sys-locale",
+ "tempfile",
  "tessera-client",
  "tessera-core",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "wiremock",
 ]
 

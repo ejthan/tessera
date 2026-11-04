@@ -2,9 +2,13 @@
 
 //! First-run screen shown while no server is connected.
 
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
-use gpui_kit::{App, ClickEvent, IntoElement, ParentElement as _, Styled as _, Window, div, px};
+use gpui_kit::{
+    App, ClickEvent, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
+    prelude::*, px,
+};
 use rust_i18n::t;
 
 use crate::actions::NEW_CONNECTION_HINT;
@@ -12,9 +16,11 @@ use crate::actions::NEW_CONNECTION_HINT;
 /// The Docker command shown on the welcome screen. Tessera never runs it.
 pub const DOCKER_COMMAND: &str = "docker run -p 8108:8108 -v \"$(pwd)/typesense-data:/data\" typesense/typesense:30.2 --data-dir /data --api-key=xyz";
 
-/// Renders the welcome screen. `copied` swaps the Copy button's label.
+/// Renders the welcome screen. `copied` swaps the Copy button's label; `load_error` explains
+/// why saved connections are missing.
 pub fn render(
     copied: bool,
+    load_error: Option<String>,
     on_add: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_copy: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
@@ -48,6 +54,21 @@ pub fn render(
                             .child(t!("welcome.body").to_string()),
                     ),
             )
+            .when_some(load_error, |el, error| {
+                let text = SharedString::from(t!("welcome.load_error", error = error).to_string());
+                el.child(
+                    div()
+                        .id("welcome.load_error")
+                        .test_support()
+                        .aria_label(text.clone())
+                        .p_3()
+                        .border_1()
+                        .border_color(theme.danger)
+                        .rounded_md()
+                        .text_sm()
+                        .child(text),
+                )
+            })
             .child(
                 h_flex()
                     .items_start()

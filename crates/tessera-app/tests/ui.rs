@@ -13,11 +13,22 @@ use gpui_kit::{
     AppContext as _, Bounds, Point, TestAppContext, WindowBounds, WindowHandle, WindowOptions,
     base::Root, px, size,
 };
-use tessera_app::connection::{ConnectorGlobal, ServerInfo};
+use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
+use tessera_app::state::AppState;
 use tessera_app::views::root::RootView;
-use tessera_client::Error;
+use tessera_client::{Client, ClientOptions, Error, KeyAccess};
+use tessera_core::profile::Profile;
+use tessera_core::secrets::MemoryStore;
+use tessera_core::store::{ConnectionsFile, StoreError};
 
 fn open(cx: &mut TestAppContext) -> WindowHandle<Root> {
+    open_with(cx, Ok(ConnectionsFile::default()))
+}
+
+fn open_with(
+    cx: &mut TestAppContext,
+    loaded: Result<ConnectionsFile, StoreError>,
+) -> WindowHandle<Root> {
     cx.update(|cx| {
         gpui_kit::init(cx);
         gpui_kit::component::set_locale("en");
@@ -32,7 +43,11 @@ fn open(cx: &mut TestAppContext) -> WindowHandle<Root> {
                 ..Default::default()
             },
             cx,
-            |window, cx| cx.new(|cx| RootView::new(window, cx)),
+            |window, cx| {
+                let state =
+                    cx.new(|_| AppState::new(loaded, None, Arc::new(MemoryStore::default())));
+                cx.new(|cx| RootView::new(state, window, cx))
+            },
         )
         .expect("open test window");
         window.downcast::<Root>().expect("Base Root")
@@ -50,15 +65,15 @@ const NEW_CONNECTION: &str = if cfg!(target_os = "macos") {
     "ctrl-n"
 };
 
-/// Installs a connector that answers immediately with `result` (or derives it from the URL).
+/// Installs a connector that answers immediately with `result` (or derives it from the profile).
 fn fake_connector(
     cx: &mut TestAppContext,
-    answer: impl Fn(&str) -> Result<ServerInfo, Error> + Send + Sync + 'static,
+    answer: impl Fn(&Profile) -> Result<Connected, Error> + Send + Sync + 'static,
 ) {
     let answer = Arc::new(answer);
     cx.update(|cx| {
-        cx.set_global(ConnectorGlobal(Arc::new(move |url: String, _key| {
-            let result = answer(&url);
+        cx.set_global(ConnectorGlobal(Arc::new(move |profile: Profile, _key| {
+            let result = answer(&profile);
             Box::pin(async move { result })
         })));
     });
@@ -132,11 +147,8 @@ async fn connect_error_shows_typesense_message(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 async fn invalid_url_shows_inline_error(cx: &mut TestAppContext) {
-    fake_connector(cx, |url| {
-        if url.contains("://") {
-            unreachable!("test types a URL without a scheme")
-        }
-        Err(Error::InvalidUrl(url.to_string()))
+    fake_connector(cx, |_| {
+        unreachable!("a URL without a scheme never reaches the connector")
     });
     let handle = open(cx);
     open_dialog(cx, handle).await;
@@ -196,18 +208,39 @@ fn shell_shows_not_connected(cx: &mut TestAppContext) {
     .unwrap();
 }
 
-fn server(version: &str, healthy: bool) -> ServerInfo {
-    ServerInfo {
-        url: "http://localhost:8108/".parse().unwrap(),
-        version: version.into(),
-        state: tessera_client::RaftState::Leader,
-        healthy,
-        capabilities: tessera_core::ServerCapabilities::from_version(version),
-        latency: Duration::from_millis(11),
+#[gpui_kit::test]
+fn load_error_shows_on_welcome(cx: &mut TestAppContext) {
+    let handle = open_with(cx, Err(StoreError::NewerSchema(9)));
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let text = label(window, "welcome.load_error");
+        assert!(text.contains("schema version 9"), "{text:?}");
+    })
+    .unwrap();
+}
+
+fn server(version: &str, healthy: bool) -> Connected {
+    let client = Client::new(
+        &["http://localhost:8108"],
+        "k".to_string().into(),
+        ClientOptions::default(),
+    )
+    .unwrap();
+    Connected {
+        info: ServerInfo {
+            url: client.base_url().clone(),
+            version: version.into(),
+            state: tessera_client::RaftState::Leader,
+            healthy,
+            capabilities: tessera_core::ServerCapabilities::from_version(version),
+            latency: Duration::from_millis(11),
+        },
+        access: KeyAccess::Admin,
+        client,
     }
 }
 
-async fn connect(cx: &mut TestAppContext, info: ServerInfo) -> WindowHandle<Root> {
+async fn connect(cx: &mut TestAppContext, info: Connected) -> WindowHandle<Root> {
     fake_connector(cx, move |_| Ok(info.clone()));
     let handle = open(cx);
     open_dialog(cx, handle).await;
