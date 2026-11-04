@@ -10,6 +10,16 @@ use tessera_core::profile::{Environment, ProfileColor};
 /// Red of the prod badge, band and frame.
 pub const PROD_RED: u32 = 0xDC2626;
 
+/// The profile colors with the key suffix of their names (`connect.color.{name}`).
+pub const COLORS: [(ProfileColor, &str); 6] = [
+    (ProfileColor::Gray, "gray"),
+    (ProfileColor::Blue, "blue"),
+    (ProfileColor::Teal, "teal"),
+    (ProfileColor::Violet, "violet"),
+    (ProfileColor::Amber, "amber"),
+    (ProfileColor::Red, "red"),
+];
+
 /// The accent color of a profile, from the design canvas.
 pub fn color(color: ProfileColor, _theme: &Theme) -> Hsla {
     rgb(match color {

@@ -23,6 +23,7 @@ pub fn render(
     copied: bool,
     load_error: Option<String>,
     on_add: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_import: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_copy: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     window: &Window,
     cx: &App,
@@ -93,6 +94,14 @@ pub fn render(
                                         &NewConnection,
                                         window,
                                     )),
+                            )
+                            .child(
+                                h_flex().child(
+                                    Button::new("welcome.import")
+                                        .outline()
+                                        .label(t!("welcome.import").to_string())
+                                        .on_click(on_import),
+                                ),
                             ),
                     )
                     .child(

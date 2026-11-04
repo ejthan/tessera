@@ -105,23 +105,16 @@ pub struct ConnectDialog {
 
 impl ConnectDialog {
     /// Opens the dialog for a new profile, optionally prefilled (a temporary connection
-    /// saved as a profile). The prefilled profile gets a fresh id.
+    /// saved as a profile). The prefilled profile keeps its id, so saving turns the
+    /// temporary connection into the saved profile.
     pub fn open_new(
         state: Entity<AppState>,
         prefill: Option<(Profile, Option<SecretString>)>,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (profile, key) = match prefill {
-            Some((profile, key)) => (
-                Profile {
-                    id: Uuid::new_v4(),
-                    ..profile
-                },
-                key,
-            ),
-            None => (Profile::new("", vec![default_node()]), None),
-        };
+        let (profile, key) =
+            prefill.unwrap_or_else(|| (Profile::new("", vec![default_node()]), None));
         Self::open(state, profile, key, false, window, cx);
     }
 

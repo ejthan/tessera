@@ -13,6 +13,7 @@ use gpui_kit::{App, AppContext as _, Context, Entity, Global, Subscription, Task
 use rust_i18n::t;
 use secrecy::{ExposeSecret as _, SecretString};
 use tessera_core::cli::Launch;
+use tessera_core::import;
 use tessera_core::profile::Profile;
 use tessera_core::secrets::{SecretError, SecretStore};
 use tessera_core::store::{self, ConnectionsFile, SCHEMA_VERSION, StoreError};
@@ -99,7 +100,10 @@ impl AppState {
     /// An unknown `--profile` name is an error for `main` to print.
     pub fn resolve(&mut self, launch: Launch) -> Result<Option<Uuid>, String> {
         match launch {
-            Launch::Normal | Launch::Help => Ok(None),
+            Launch::Normal => Ok(self
+                .last_used
+                .filter(|id| self.reopen_last && self.profiles.iter().any(|p| p.id == *id))),
+            Launch::Help => Ok(None),
             Launch::Profile(name) => match self.profiles.iter().find(|p| p.name == name) {
                 Some(p) => Ok(Some(p.id)),
                 None => Err(match &self.load_error {
@@ -188,6 +192,7 @@ impl AppState {
 
     /// Adds or replaces a profile and saves. With `key`, stores it in the secret store. The
     /// task reports both writes, the keychain first (dropping it does not stop them).
+    /// Saving the temporary connection's id turns it into this saved profile.
     pub fn upsert_profile(
         &mut self,
         profile: Profile,
@@ -195,6 +200,9 @@ impl AppState {
         cx: &mut Context<Self>,
     ) -> Task<Result<(), SaveError>> {
         let id = profile.id;
+        if self.temporary.as_ref().is_some_and(|(p, _)| p.id == id) {
+            self.temporary = None;
+        }
         match self.profiles.iter_mut().find(|p| p.id == id) {
             Some(existing) => *existing = profile,
             None => self.profiles.push(profile),
@@ -229,6 +237,18 @@ impl AppState {
         self.save(cx).detach();
         let secrets = self.secrets.clone();
         secret_task(blocking(cx, move || secrets.delete(id)), cx)
+    }
+
+    /// Writes the saved profiles, without keys, to `path` on tokio's `spawn_blocking`.
+    pub fn export_to(&self, path: PathBuf, cx: &App) -> Task<Result<(), String>> {
+        let text = import::export_profiles(&self.profiles);
+        let job = blocking(cx, move || std::fs::write(&path, text));
+        cx.background_spawn(async move {
+            match job.await {
+                Ok(result) => result.map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            }
+        })
     }
 
     /// Connects profile `id` (saved or temporary) and selects it. `key` is used instead of

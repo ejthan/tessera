@@ -18,8 +18,10 @@ use secrecy::{ExposeSecret as _, SecretString};
 use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
 use tessera_app::runtime::Tokio;
 use tessera_app::state::AppState;
+use tessera_app::views::import_dialog::ImportDialog;
 use tessera_app::views::root::RootView;
 use tessera_client::{Client, ClientOptions, Error, KeyAccess};
+use tessera_core::cli::Launch;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::secrets::{MemoryStore, SecretError, SecretStore};
 use tessera_core::store::{ConnectionsFile, StoreError};
@@ -111,6 +113,7 @@ const EDIT: &str = key("cmd-e", "ctrl-e");
 const TEST: &str = key("cmd-t", "ctrl-t");
 const SAVE: &str = key("cmd-enter", "ctrl-enter");
 const TOGGLE_KEY: &str = key("alt-cmd-k", "ctrl-alt-k");
+const DELETE: &str = key("cmd-backspace", "ctrl-backspace");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 fn fake_connector(
@@ -1179,6 +1182,294 @@ async fn context_menu_edit_opens_dialog(cx: &mut TestAppContext) {
         assert_eq!(window.find("connect.read_only").checked(), Some(true));
     })
     .unwrap();
+}
+
+/// Waits until element `id` is (`true`) or is not (`false`) in the window.
+async fn wait_for_element(
+    cx: &mut TestAppContext,
+    handle: WindowHandle<Root>,
+    id: String,
+    present: bool,
+) {
+    cx.wait_for(
+        handle.into(),
+        Duration::from_millis(1000),
+        move |window, _| window.try_find(id.clone()).is_some() == present,
+    )
+    .await;
+}
+
+#[gpui_kit::test]
+async fn delete_asks_with_cancel_focused(cx: &mut TestAppContext) {
+    let (staging, prod, secrets) = two_profiles();
+    let (handle, state, _rt) = open_app(cx, vec![staging.clone(), prod.clone()], secrets.clone());
+    let ask = |cx: &mut TestAppContext| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            focus(window, &entry(&staging), cx);
+            window.press(DELETE, cx);
+        })
+        .unwrap();
+    };
+    ask(cx);
+    wait_for_element(cx, handle, "confirm.cancel".into(), true).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("confirm.cancel").focused(), Some(true));
+        let body = label(window, "confirm.body");
+        assert!(body.contains("staging-eu"), "{body:?}");
+        window.press("enter", cx);
+    })
+    .unwrap();
+    wait_for_element(cx, handle, "confirm.cancel".into(), false).await;
+    // Focus goes back to the entry once the dialog has left.
+    let back = entry(&staging);
+    cx.wait_for(
+        handle.into(),
+        Duration::from_millis(1000),
+        move |window, _| window.find(back.clone()).focused() == Some(true),
+    )
+    .await;
+    state.read_with(cx, |s, _| assert_eq!(s.profiles.len(), 2, "Enter cancels"));
+    assert!(secrets.get(staging.id).unwrap().is_some());
+
+    ask(cx);
+    wait_for_element(cx, handle, "confirm.ok".into(), true).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("confirm.ok", cx)
+    })
+    .unwrap();
+    let gone = secrets.clone();
+    let id = staging.id;
+    cx.wait_for(handle.into(), Duration::from_millis(1000), move |_, _| {
+        gone.get(id).unwrap().is_none()
+    })
+    .await;
+    state.read_with(cx, |s, _| {
+        assert_eq!(s.profiles.len(), 1);
+        assert_eq!(s.profiles[0].id, prod.id);
+    });
+    assert!(secrets.get(prod.id).unwrap().is_some());
+}
+
+#[gpui_kit::test]
+async fn delete_disconnects_a_connected_profile(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let (staging, _, secrets) = two_profiles();
+    let (handle, state, _rt) = open_app(cx, vec![staging.clone()], secrets);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(entry(&staging), cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "status.text".into(), "staging-eu").await;
+    menu_item(cx, handle, entry(&staging), 2, "Delete…").await;
+    wait_for_element(cx, handle, "confirm.ok".into(), true).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("confirm.ok", cx)
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "status.text".into(), "Not connected").await;
+    state.read_with(cx, |s, cx| {
+        assert!(s.profiles.is_empty());
+        assert!(s.connection(staging.id, cx).is_none());
+    });
+}
+
+const DASHBOARD_CONFIG: &str = r#"{
+  "apiKey": "k-top",
+  "node": {"host": "localhost", "port": "8108", "protocol": "http", "path": ""},
+  "history": [
+    {"apiKey": "k-a", "node": {"host": "a.example", "port": "443", "protocol": "https", "path": ""}},
+    {"apiKey": "k-b", "node": {"host": "b.example", "port": "443", "protocol": "https", "path": ""}}
+  ]
+}"#;
+
+#[gpui_kit::test]
+async fn import_preview_creates_selected_profiles(cx: &mut TestAppContext) {
+    let existing = Profile::new(
+        "mine",
+        vec![Node {
+            protocol: Protocol::Https,
+            host: "a.example".into(),
+            port: 443,
+            path: String::new(),
+        }],
+    );
+    let secrets = Arc::new(MemoryStore::default());
+    let (handle, state, _rt) = open_app(cx, vec![existing.clone()], secrets.clone());
+    let dialog_state = state.clone();
+    cx.update_window(handle.into(), |_, window, cx| {
+        ImportDialog::import_from_text(dialog_state, DASHBOARD_CONFIG, window, cx);
+    })
+    .unwrap();
+    wait_for_element(cx, handle, "import.row.0".into(), true).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("import.row.2").is_some());
+        assert!(window.try_find("import.row.3").is_none());
+        let checked = |window: &mut gpui_kit::Window, i: usize| {
+            window.find(format!("import.row.{i}.selected")).checked()
+        };
+        assert_eq!(checked(window, 0), Some(true));
+        assert_eq!(checked(window, 1), Some(false), "the duplicate");
+        assert_eq!(checked(window, 2), Some(true));
+        assert!(label(window, "import.submit").contains('2'));
+        window.click("import.submit", cx);
+    })
+    .unwrap();
+    wait_for_element(cx, handle, "import.submit".into(), false).await;
+    state.read_with(cx, |s, _| {
+        let names: Vec<&str> = s.profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["mine", "localhost", "b.example"]);
+        for (p, key) in s.profiles[1..].iter().zip(["k-top", "k-b"]) {
+            let stored = secrets.get(p.id).unwrap().expect("key stored");
+            assert_eq!(stored.expose_secret(), key);
+        }
+    });
+}
+
+/// A store that refuses every write.
+struct NoWrites;
+
+impl SecretStore for NoWrites {
+    fn get(&self, _: Uuid) -> Result<Option<SecretString>, SecretError> {
+        Ok(None)
+    }
+    fn set(&self, _: Uuid, _: &SecretString) -> Result<(), SecretError> {
+        Err(SecretError::new("Keychain access was denied"))
+    }
+    fn delete(&self, _: Uuid) -> Result<(), SecretError> {
+        Ok(())
+    }
+}
+
+#[gpui_kit::test]
+async fn import_keychain_failure_is_listed_per_row(cx: &mut TestAppContext) {
+    let (handle, state, _rt) = open_app(cx, Vec::new(), Arc::new(NoWrites));
+    let dialog_state = state.clone();
+    cx.update_window(handle.into(), |_, window, cx| {
+        ImportDialog::import_from_text(dialog_state, DASHBOARD_CONFIG, window, cx);
+    })
+    .unwrap();
+    wait_for_element(cx, handle, "import.row.0".into(), true).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("import.submit", cx)
+    })
+    .unwrap();
+    wait_for_label(
+        cx,
+        handle,
+        "import.row.0.error".into(),
+        "Keychain access was denied",
+    )
+    .await;
+    state.read_with(cx, |s, _| {
+        assert_eq!(s.profiles.len(), 3, "imported without keys")
+    });
+}
+
+#[gpui_kit::test]
+async fn import_of_invalid_json_shows_the_error(cx: &mut TestAppContext) {
+    let (handle, state, _rt) = open_app(cx, Vec::new(), Arc::new(MemoryStore::default()));
+    cx.update_window(handle.into(), |_, window, cx| {
+        ImportDialog::import_from_text(state, "{ nope", window, cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "import.error".into(), "config.json").await;
+}
+
+#[gpui_kit::test]
+async fn export_writes_profiles_without_keys(cx: &mut TestAppContext) {
+    let (staging, _, _) = two_profiles();
+    let secrets = Arc::new(MemoryStore::default());
+    secrets
+        .set(staging.id, &SecretString::from("secret-key-42"))
+        .unwrap();
+    let (_handle, state, _rt) = open_app(cx, vec![staging], secrets);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("profiles.json");
+    let written = state.update(cx, |s, cx| s.export_to(path.clone(), cx));
+    written.await.unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("staging-eu"), "{text}");
+    assert!(text.contains("schema_version"), "{text}");
+    assert!(!text.contains("secret-key-42"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn reopen_last_connects_at_startup(cx: &mut TestAppContext) {
+    let seen = recording_connector(cx, server("30.2", true));
+    let (staging, prod, secrets) = two_profiles();
+    let file = |reopen_last| ConnectionsFile {
+        profiles: vec![staging.clone(), prod.clone()],
+        last_used: Some(staging.id),
+        reopen_last,
+        ..Default::default()
+    };
+    let mut off = AppState::new(Ok(file(false)), None, secrets.clone());
+    assert_eq!(off.resolve(Launch::Normal).unwrap(), None);
+    let _rt = tokio(cx);
+    let (handle, state) = open_state(cx, Ok(file(true)), secrets);
+    // What `run` does before the window opens.
+    state.update(cx, |s, cx| {
+        let open = s.resolve(Launch::Normal).unwrap();
+        assert_eq!(open, Some(staging.id));
+        s.connect(staging.id, None, cx);
+    });
+    wait_for_label(cx, handle, "status.text".into(), "staging-eu").await;
+    assert_eq!(*seen.lock().unwrap(), ["k"]);
+}
+
+#[gpui_kit::test]
+async fn temporary_connection_can_be_saved(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let secrets = Arc::new(MemoryStore::default());
+    let (handle, state, _rt) = open_app(cx, Vec::new(), secrets.clone());
+    let mut node = node();
+    node.host = "ts.internal".into();
+    let temp = Profile::new("ts.internal", vec![node]);
+    state.update(cx, |s, cx| {
+        s.resolve(Launch::Temporary {
+            profile: temp.clone(),
+            key_from_stdin: false,
+            key_from_env: Some(SecretString::from("k-tmp")),
+        })
+        .unwrap();
+        cx.notify();
+    });
+    let not_saved = format!("{}.not_saved", entry(&temp));
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find(not_saved.clone()).label(), Some("not saved"));
+        window.click("sidebar.save_temporary", cx);
+    })
+    .unwrap();
+    wait_for_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(window.find("connect.name").value(), Some("ts.internal"));
+        assert_eq!(
+            window.find("connect.node.0.host").value(),
+            Some("ts.internal")
+        );
+        window.click("connect.key", cx);
+        window.press(TOGGLE_KEY, cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("connect.key").value(), Some("k-tmp"));
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_close(cx, handle).await;
+    wait_for_element(cx, handle, not_saved, false).await;
+    state.read_with(cx, |s, _| {
+        assert!(s.temporary.is_none());
+        assert_eq!(s.profiles.len(), 1);
+        assert_eq!(
+            s.profiles[0].id, temp.id,
+            "the entry became the saved profile"
+        );
+    });
+    let stored = secrets.get(temp.id).unwrap().expect("key stored");
+    assert_eq!(stored.expose_secret(), "k-tmp");
 }
 
 /// Shortcut labels come from GPUI Kit's `Kbd`, which formats them per platform.

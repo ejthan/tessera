@@ -12,6 +12,7 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 
+use super::import_dialog::ImportDialog;
 use super::sidebar::Sidebar;
 use super::{connect_dialog::ConnectDialog, env_badge, overview, status_bar, welcome};
 use crate::actions::NewConnection;
@@ -133,12 +134,14 @@ impl Render for RootView {
             None => {
                 let this = cx.entity();
                 let copy_target = this.clone();
+                let import_state = self.state.clone();
                 welcome::render(
                     self.copied,
                     load_error,
                     move |_, window, cx| {
                         this.update(cx, |view, cx| view.open_connect(window, cx));
                     },
+                    move |_, window, cx| ImportDialog::open(import_state.clone(), window, cx),
                     move |_, _, cx| {
                         copy_target.update(cx, |view, cx| view.copy_docker_command(cx));
                     },

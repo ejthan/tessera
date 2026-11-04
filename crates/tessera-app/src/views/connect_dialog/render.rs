@@ -18,20 +18,11 @@ use gpui_kit::{
     prelude::*, px,
 };
 use rust_i18n::t;
-use tessera_core::profile::{Environment, ProfileColor};
+use tessera_core::profile::Environment;
 
 use super::{ConnectDialog, Phase, node_rows, result};
 use crate::actions::{CONNECT_DIALOG, SaveConnection, TestConnection, ToggleKeyMask};
 use crate::views::env_badge;
-
-const COLORS: [(ProfileColor, &str); 6] = [
-    (ProfileColor::Gray, "gray"),
-    (ProfileColor::Blue, "blue"),
-    (ProfileColor::Teal, "teal"),
-    (ProfileColor::Violet, "violet"),
-    (ProfileColor::Amber, "amber"),
-    (ProfileColor::Red, "red"),
-];
 
 impl Render for ConnectDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -43,23 +34,25 @@ impl Render for ConnectDialog {
         let kbd = |action: &dyn gpui_kit::Action| {
             Kbd::binding_for_action(action, Some(CONNECT_DIALOG), window)
         };
-        let colors = h_flex().gap_1().children(COLORS.map(|(color, name)| {
-            Button::new(SharedString::from(format!("connect.color.{name}")))
-                .ghost()
-                .small()
-                .selected(self.color == color)
-                .accessibility_label(t!(format!("connect.color.{name}")).to_string())
-                .child(
-                    div()
-                        .size_4()
-                        .rounded_full()
-                        .bg(env_badge::color(color, &theme)),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.color = color;
-                    cx.notify();
-                }))
-        }));
+        let colors = h_flex()
+            .gap_1()
+            .children(env_badge::COLORS.map(|(color, name)| {
+                Button::new(SharedString::from(format!("connect.color.{name}")))
+                    .ghost()
+                    .small()
+                    .selected(self.color == color)
+                    .accessibility_label(t!(format!("connect.color.{name}")).to_string())
+                    .child(
+                        div()
+                            .size_4()
+                            .rounded_full()
+                            .bg(env_badge::color(color, &theme)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.color = color;
+                        cx.notify();
+                    }))
+            }));
         let envs = [
             (Environment::Local, "local"),
             (Environment::Dev, "dev"),

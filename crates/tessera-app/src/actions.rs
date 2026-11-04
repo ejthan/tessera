@@ -12,6 +12,10 @@ gpui_kit::actions!(
         ConnectSelected,
         DisconnectSelected,
         EditConnection,
+        DeleteConnection,
+        ImportProfiles,
+        ExportProfiles,
+        ToggleReopenLast,
         TestConnection,
         SaveConnection,
         ToggleKeyMask
@@ -20,8 +24,8 @@ gpui_kit::actions!(
 
 /// Key context of a sidebar entry.
 pub const SIDEBAR_ENTRY: &str = "SidebarEntry";
-/// Key context of the "Add API key" button under a sidebar entry.
-pub const SIDEBAR_ADD_KEY: &str = "SidebarAddKey";
+/// Key context of the button under a sidebar entry ("Add API key", "Save as profile").
+pub const SIDEBAR_ENTRY_BUTTON: &str = "SidebarEntryButton";
 /// Key context of the connection dialog.
 pub const CONNECT_DIALOG: &str = "ConnectDialog";
 
@@ -37,6 +41,10 @@ const DISCONNECT: &str = "ctrl-shift-d";
 const EDIT: &str = "cmd-e";
 #[cfg(not(target_os = "macos"))]
 const EDIT: &str = "ctrl-e";
+#[cfg(target_os = "macos")]
+const DELETE: &str = "cmd-backspace";
+#[cfg(not(target_os = "macos"))]
+const DELETE: &str = "ctrl-backspace";
 #[cfg(target_os = "macos")]
 const TEST: &str = "cmd-t";
 #[cfg(not(target_os = "macos"))]
@@ -62,7 +70,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", ConnectSelected, Some(SIDEBAR_ENTRY)),
         KeyBinding::new(DISCONNECT, DisconnectSelected, Some(SIDEBAR_ENTRY)),
         KeyBinding::new(EDIT, EditConnection, Some(SIDEBAR_ENTRY)),
-        KeyBinding::new(EDIT, EditConnection, Some(SIDEBAR_ADD_KEY)),
+        KeyBinding::new(DELETE, DeleteConnection, Some(SIDEBAR_ENTRY)),
+        KeyBinding::new(EDIT, EditConnection, Some(SIDEBAR_ENTRY_BUTTON)),
         KeyBinding::new(TEST, TestConnection, Some(CONNECT_DIALOG)),
         KeyBinding::new(SAVE, SaveConnection, Some(CONNECT_DIALOG)),
         KeyBinding::new(TOGGLE_KEY, ToggleKeyMask, Some(CONNECT_DIALOG)),
