@@ -3,6 +3,7 @@
 //! Tessera desktop app.
 
 pub mod actions;
+pub mod connection;
 pub mod i18n;
 pub mod runtime;
 pub mod views;
@@ -36,6 +37,9 @@ pub fn run() {
     let handle = runtime.handle().clone();
 
     gpui_kit::application().run(move |cx| {
+        cx.set_global(connection::ConnectorGlobal(connection::tokio_connector(
+            handle.clone(),
+        )));
         cx.set_global(runtime::Tokio(handle));
         gpui_kit::init(cx);
         i18n::init();

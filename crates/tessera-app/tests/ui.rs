@@ -2,11 +2,20 @@
 
 //! UI tests in headless GPUI windows.
 
+// Helpers outside #[test] functions unwrap too; a panic is the test failure we want.
+#![allow(clippy::unwrap_used)]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{
     AppContext as _, Bounds, Point, TestAppContext, WindowBounds, WindowHandle, WindowOptions,
     base::Root, px, size,
 };
+use tessera_app::connection::{ConnectorGlobal, ServerInfo};
 use tessera_app::views::root::RootView;
+use tessera_client::Error;
 
 fn open(cx: &mut TestAppContext) -> WindowHandle<Root> {
     cx.update(|cx| {
@@ -30,9 +39,150 @@ fn open(cx: &mut TestAppContext) -> WindowHandle<Root> {
     })
 }
 
+const SELECT_ALL: &str = if cfg!(target_os = "macos") {
+    "cmd-a"
+} else {
+    "ctrl-a"
+};
+const NEW_CONNECTION: &str = if cfg!(target_os = "macos") {
+    "cmd-n"
+} else {
+    "ctrl-n"
+};
+
+/// Installs a connector that answers immediately with `result` (or derives it from the URL).
+fn fake_connector(
+    cx: &mut TestAppContext,
+    answer: impl Fn(&str) -> Result<ServerInfo, Error> + Send + Sync + 'static,
+) {
+    let answer = Arc::new(answer);
+    cx.update(|cx| {
+        cx.set_global(ConnectorGlobal(Arc::new(move |url: String, _key| {
+            let result = answer(&url);
+            Box::pin(async move { result })
+        })));
+    });
+}
+
+async fn open_dialog(cx: &mut TestAppContext, handle: WindowHandle<Root>) {
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press(NEW_CONNECTION, cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_millis(500), |window, _| {
+        window
+            .try_find("connect.url")
+            .is_some_and(|url| url.visible())
+    })
+    .await;
+}
+
+#[gpui_kit::test]
+async fn new_connection_opens_dialog_with_url_focused(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, _| {
+        let url = window.find("connect.url");
+        assert_eq!(url.focused(), Some(true));
+        assert_eq!(url.value(), Some("http://localhost:8108"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn welcome_button_opens_dialog(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("welcome.add_connection", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_millis(500), |window, _| {
+        window.try_find("connect.url").is_some()
+    })
+    .await;
+}
+
+#[gpui_kit::test]
+async fn connect_error_shows_typesense_message(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| {
+        Err(Error::Http {
+            status: 503,
+            message: "Not Ready or Lagging".into(),
+            body: String::new(),
+        })
+    });
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| window.press("enter", cx))
+        .unwrap();
+    cx.wait_for(handle.into(), Duration::from_millis(500), |window, _| {
+        window
+            .try_find("connect.error")
+            .and_then(|e| e.label().map(|l| l.contains("Not Ready or Lagging")))
+            .unwrap_or(false)
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, _| {
+        assert!(window.find("connect.url").visible(), "dialog stays open");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn invalid_url_shows_inline_error(cx: &mut TestAppContext) {
+    fake_connector(cx, |url| {
+        if url.contains("://") {
+            unreachable!("test types a URL without a scheme")
+        }
+        Err(Error::InvalidUrl(url.to_string()))
+    });
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press(SELECT_ALL, cx);
+        window.input("localhost:8108", cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_millis(500), |window, _| {
+        window
+            .try_find("connect.error")
+            .and_then(|e| e.label().map(|l| l.contains("http:// or https://")))
+            .unwrap_or(false)
+    })
+    .await;
+}
+
+#[gpui_kit::test]
+async fn escape_closes_dialog(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+    cx.wait_for(handle.into(), Duration::from_millis(1000), |window, _| {
+        window.try_find("connect.url").is_none()
+    })
+    .await;
+}
+
+#[gpui_kit::test]
+async fn key_is_masked_by_default(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("connect.key", cx);
+        window.input("secret-key-42", cx);
+        let key = window.find("connect.key");
+        assert_eq!(key.focused(), Some(true));
+        assert_ne!(key.value(), Some("secret-key-42"));
+    })
+    .unwrap();
+}
+
 #[gpui_kit::test]
 fn shell_shows_not_connected(cx: &mut TestAppContext) {
-    use gpui_kit::test::TestWindowExt;
     let handle = open(cx);
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);

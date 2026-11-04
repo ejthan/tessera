@@ -16,8 +16,6 @@ welcome.trademark: "Tessera steht in keiner Verbindung zu Typesense, Inc. und wi
 connect.title: "Mit Typesense verbinden"
 connect.url: "Server-URL"
 connect.api_key: "API-Key"
-connect.show_key: "Key anzeigen"
-connect.hide_key: "Key verbergen"
 connect.submit: "Verbinden"
 connect.cancel: "Abbrechen"
 connect.error.invalid_url: "Gib eine URL ein, die mit http:// oder https:// beginnt."

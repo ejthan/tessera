@@ -25,6 +25,7 @@ url.workspace = true
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+wiremock.workspace = true
 
 [lints.clippy]
 unwrap_used = "deny"

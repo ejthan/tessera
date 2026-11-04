@@ -16,8 +16,6 @@ welcome.trademark: "Tessera is not affiliated with or endorsed by Typesense, Inc
 connect.title: "Connect to Typesense"
 connect.url: "Server URL"
 connect.api_key: "API key"
-connect.show_key: "Show key"
-connect.hide_key: "Hide key"
 connect.submit: "Connect"
 connect.cancel: "Cancel"
 connect.error.invalid_url: "Enter a URL that starts with http:// or https://."
