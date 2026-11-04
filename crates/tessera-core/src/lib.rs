@@ -2,6 +2,7 @@
 
 //! Domain logic for Tessera that does not depend on the UI.
 
+pub mod import;
 pub mod profile;
 pub mod secrets;
 pub mod store;
