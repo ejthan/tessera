@@ -8,6 +8,8 @@
 //! because two tests stop and start the shared containers. `TESSERA_CLUSTER_URLS` (comma
 //! separated, one URL per node in the order ts1, ts2, ts3) overrides the default
 //! `http://localhost:18111,http://localhost:18112,http://localhost:18113`; the key is `xyz`.
+//! With the override set, the two stop/start tests skip: they stop the local compose ts3,
+//! which is not the node under test then.
 
 use std::path::Path;
 use std::process::Command;
@@ -83,6 +85,16 @@ async fn wait_until_ready(client: &Client) {
     .await;
 }
 
+/// Whether the stop/start tests can run: they stop the local compose ts3, so they skip when
+/// `TESSERA_CLUSTER_URLS` points the tests at another cluster.
+fn can_stop_nodes(test: &str) -> bool {
+    let local = std::env::var_os("TESSERA_CLUSTER_URLS").is_none();
+    if !local {
+        eprintln!("{test} skipped: TESSERA_CLUSTER_URLS is set, and it stops the local ts3");
+    }
+    local
+}
+
 /// Stops a container for the test and starts it again on drop, even after a failed assert.
 struct Stopped(&'static str);
 
@@ -121,6 +133,9 @@ async fn cluster_has_one_leader_two_followers() {
 #[tokio::test]
 #[ignore = "needs the 3-node cluster, see dev/docker-compose.yml"]
 async fn stopped_node_fails_others_answer() {
+    if !can_stop_nodes("stopped_node_fails_others_answer") {
+        return;
+    }
     let client = client();
     wait_until_ready(&client).await;
     {
@@ -135,6 +150,9 @@ async fn stopped_node_fails_others_answer() {
 #[tokio::test]
 #[ignore = "needs the 3-node cluster, see dev/docker-compose.yml"]
 async fn client_fails_over_from_stopped_node() {
+    if !can_stop_nodes("client_fails_over_from_stopped_node") {
+        return;
+    }
     let client = client();
     wait_until_ready(&client).await;
     client.set_active_node(2);

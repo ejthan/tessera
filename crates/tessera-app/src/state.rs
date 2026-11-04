@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use crate::connection::{Connected, ConnectionState, ConnectorGlobal, client_options, error_text};
 use crate::runtime::Tokio;
+use crate::views::status_bar;
 
 /// Why saving a profile failed. Neither variant holds the key.
 #[derive(Debug)]
@@ -357,7 +358,7 @@ impl AppState {
             }
             None => {
                 let conn = cx.new(|_| ConnectionState::new(profile.clone()));
-                cx.observe(&conn, |_, _, cx| cx.notify()).detach();
+                observe_connection(&conn, cx);
                 self.connections.push(conn.clone());
                 conn
             }
@@ -449,7 +450,7 @@ impl AppState {
         let mut state = ConnectionState::new(profile);
         state.connected = Some(connected);
         let conn = cx.new(|_| state);
-        cx.observe(&conn, |_, _, cx| cx.notify()).detach();
+        observe_connection(&conn, cx);
         self.connections.push(conn);
         self.selected = Some(id);
         cx.emit(OpenOverview(id));
@@ -464,6 +465,26 @@ impl AppState {
         }
         cx.notify();
     }
+}
+
+/// Redraws the window when `conn` changes what it shows: sidebar entry, title bar or status
+/// bar. Polling notifies once per node result, which mostly changes only the overview tab.
+fn observe_connection(conn: &Entity<ConnectionState>, cx: &mut Context<AppState>) {
+    let mut shown = None;
+    cx.observe(conn, move |_, conn, cx| {
+        let c = conn.read(cx);
+        let now = Some((
+            c.connecting,
+            c.missing_key,
+            c.error.clone(),
+            status_bar::summary(c),
+        ));
+        if now != shown {
+            shown = now;
+            cx.notify();
+        }
+    })
+    .detach();
 }
 
 impl EventEmitter<OpenOverview> for AppState {}

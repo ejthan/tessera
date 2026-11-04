@@ -49,7 +49,8 @@ async fn connect_success_shows_version_in_status_bar(cx: &mut TestAppContext) {
     let (handle, _rt) = connect(cx, server("30.2", true)).await;
     cx.update_window(handle.into(), |_, window, _| {
         let status = label(window, "status.text");
-        for part in ["Connected", "localhost:8108", "v30.2", "Leader", "11 ms"] {
+        // The latency of the first poll (3 ms in the fake), not the connect's 11 ms.
+        for part in ["Connected", "localhost:8108", "v30.2", "Leader", "3 ms"] {
             assert!(status.contains(part), "{part:?} missing in {status:?}");
         }
         assert!(label(window, "figure.version").contains("30.2"));

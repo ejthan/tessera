@@ -151,6 +151,23 @@ impl Overview {
     }
 }
 
+/// `n` with the locale's digit grouping: "1,234,567" in English, "1.234.567" in German.
+fn grouped(n: u64) -> String {
+    group_digits(n, &t!("number.group_separator"))
+}
+
+fn group_digits(n: u64, separator: &str) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push_str(separator);
+        }
+        out.push(digit);
+    }
+    out
+}
+
 /// "–" for a figure the server did not send.
 fn missing() -> String {
     t!("figure.missing").to_string()
@@ -211,13 +228,13 @@ impl Render for Overview {
             (
                 "figure.collections",
                 t!("figure.collections"),
-                collections.map_or_else(missing, |c| c.len().to_string()),
+                collections.map_or_else(missing, |c| grouped(c.len() as u64)),
             ),
             (
                 "figure.documents",
                 t!("figure.documents"),
                 collections.map_or_else(missing, |c| {
-                    c.iter().map(|c| c.num_documents).sum::<u64>().to_string()
+                    grouped(c.iter().map(|c| c.num_documents).sum::<u64>())
                 }),
             ),
             (
@@ -359,5 +376,22 @@ impl Render for Overview {
                     )),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_use_the_locale_grouping() {
+        let en = t!("number.group_separator", locale = "en");
+        let de = t!("number.group_separator", locale = "de");
+        assert_eq!(group_digits(1_234_567, &en), "1,234,567");
+        assert_eq!(group_digits(1_234_567, &de), "1.234.567");
+        assert_eq!(group_digits(123_456, &en), "123,456");
+        assert_eq!(group_digits(999, &en), "999");
+        assert_eq!(group_digits(1000, &de), "1.000");
+        assert_eq!(group_digits(0, &en), "0");
     }
 }

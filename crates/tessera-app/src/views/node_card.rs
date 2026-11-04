@@ -280,10 +280,11 @@ impl Render for NodeCards {
                 )
             });
         // The figures and charts below keep the down node's last sample; say how old it is.
+        // Not while paused: the age would stand still, and the card already says "Paused".
         let stale = conn
             .nodes
             .get(active)
-            .filter(|n| n.next_retry.is_some())
+            .filter(|n| n.next_retry.is_some() && !conn.paused)
             .and_then(|_| conn.history.get(active)?.newest_at())
             .map(|at| {
                 let text = SharedString::from(

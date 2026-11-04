@@ -46,7 +46,7 @@ Each open overview tab owns a `poller::Poller`, which runs one GPUI task per nod
 
 - A loop fetches through `PollFetcherGlobal`. The app installs `tokio_fetcher`, which runs `/health`, `/debug`, `/metrics.json` and `/stats.json` of one `NodeClient` concurrently on tokio, with `Origin::Polling`. Tests install fakes, as for the `Connector`.
 - A node whose `/health` or `/debug` fails, or whose `/health` says `ok: false`, waits 5, 10, 20, 30, 30 s before its next attempt (`next_retry` is set when the failure arrives); success resets it. A failed `/metrics.json` or `/stats.json` alone shows its error but keeps the node on the interval.
-- Each result lands on `ConnectionState` in one update with one `notify`, so a reopened tab still has the history.
+- Each result lands on `ConnectionState` in one update with one `notify`, so a reopened tab still has the history. `AppState` passes that notify on to the rest of the window (sidebar, title bar, status bar) only when what those show changed, so a healthy node's result redraws only the overview tab.
 - The loops stop while the window is hidden, while paused, and when the tab closes; dropping them drops the fetches, and `AbortOnDrop` cancels them. Showing the window, resuming or changing the interval restarts them, which polls at once.
 - Collections load once when the tab opens, through `CollectionsFetcherGlobal` with the polling client, and on `ConnectionState::refresh_collections` with the user's client.
 

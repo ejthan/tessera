@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui_kit::base::Root;
-use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, WindowVisibility};
 use tessera_app::connection::ConnectionState;
 use tessera_app::state::AppState;
@@ -407,7 +407,14 @@ async fn click_node_makes_it_active(cx: &mut TestAppContext) {
     fake_poll(cx, sample_for);
     let (handle, conn, _rt) = cluster(cx).await;
     assert!(text(cx, handle, "chart.cpu").contains("12.5 %"));
+    let status = text(cx, handle, "status.text");
+    assert!(status.contains("Leader · n0:8108"), "{status}");
     press_on(cx, handle, "node.1", "enter");
+    let status = text(cx, handle, "status.text");
+    assert!(
+        status.starts_with("Connected") && status.contains("Follower · n1:8108 · 3 ms"),
+        "the status bar follows the active node: {status}"
+    );
     let active = conn.read_with(cx, |c, _| {
         c.connected.as_ref().unwrap().client.active_node()
     });
@@ -568,6 +575,70 @@ async fn status_bar_counts_unreachable_nodes(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui_kit::test]
+async fn single_node_outage_is_not_connected(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    let up = Arc::new(Mutex::new(true));
+    let answer = up.clone();
+    fake_poll(cx, move |_| {
+        if *answer.lock().unwrap() {
+            ok_sample()
+        } else {
+            down()
+        }
+    });
+    fake_connector(cx, |p| Ok(server_for(p)));
+    let p = profile("solo", &["s0"]);
+    let (handle, state, _rt) = open_app(cx, vec![p.clone()], store(&[&p]));
+    open_tab(cx, handle, &state, &p).await;
+    let status = text(cx, handle, "status.text");
+    assert!(status.starts_with("Connected · solo"), "{status}");
+    *up.lock().unwrap() = false;
+    advance(cx, TICK);
+    let status = text(cx, handle, "status.text");
+    assert!(!status.contains("Connected"), "{status}");
+    assert_eq!(status, "No answer · solo · s0:8108");
+    assert_eq!(text(cx, handle, "status.unreachable"), "Node unreachable");
+}
+
+#[gpui_kit::test]
+async fn interval_menu_restarts_polling(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    let seen = fake_poll(cx, |_| ok_sample());
+    let (handle, conn, _rt) = cluster(cx).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("overview.interval", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_millis(500), |window, _| {
+        window.try_find("popup-menu").is_some()
+    })
+    .await;
+    let before = count(&seen);
+    cx.update_window(handle.into(), |_, window, cx| {
+        let mut menu = window.within("popup-menu");
+        assert_eq!(menu.find(0).label(), Some("2 s"));
+        menu.click(0, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        conn.read_with(cx, |c, _| c.interval),
+        Duration::from_secs(2)
+    );
+    assert_eq!(text(cx, handle, "overview.live"), "Live · every 2 s");
+    assert_eq!(count(&seen), before + 3, "a new interval polls at once");
+    advance(cx, Duration::from_secs(5));
+    assert_eq!(count(&seen), before + 9, "then every 2 s");
+    conn.update(cx, |c, cx| c.set_interval(Duration::from_millis(100), cx));
+    assert_eq!(
+        conn.read_with(cx, |c, _| c.interval),
+        Duration::from_secs(1),
+        "clamped to at least 1 s"
+    );
+}
+
 /// Draws a frame the way the platform does, reusing cached views, and returns the label of
 /// node 2's retry line.
 fn draw(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> String {
@@ -635,7 +706,7 @@ async fn down_active_node_shows_sample_age(cx: &mut TestAppContext) {
         *calls += 1;
         if *calls == 1 { ok_sample() } else { down() }
     });
-    let (handle, _conn, _rt) = cluster(cx).await;
+    let (handle, conn, _rt) = cluster(cx).await;
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         assert!(window.try_find("overview.last_sample").is_none());
@@ -647,4 +718,12 @@ async fn down_active_node_shows_sample_age(cx: &mut TestAppContext) {
     assert_eq!(text(cx, handle, "figure.cpu"), "12.5 %", "kept, dimmed");
     advance(cx, Duration::from_secs(2));
     assert!(text(cx, handle, "overview.last_sample").contains("7 s ago"));
+    // Paused, the age would stand still; the card says "Paused" instead.
+    conn.update(cx, |c, cx| c.set_paused(true, cx));
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("overview.last_sample").is_none());
+    })
+    .unwrap();
 }

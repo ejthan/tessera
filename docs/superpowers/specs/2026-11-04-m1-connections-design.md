@@ -354,8 +354,8 @@ A file dialog, then a dialog listing the candidates:
 
 ## 8. Dev environment
 
-- `dev/docker-compose.yml` gains a profile `cluster` with three nodes on host ports 18108, 18109, 18110 and a shared `--nodes` file. This confirms `state = 4` for followers, which M0 left open.
-- The default single node keeps `TYPESENSE_PORT` (default 8108).
+- `dev/docker-compose.yml` gains a profile `cluster` with three nodes on host ports 18111, 18112, 18113 and a shared `--nodes` file. This confirms `state = 4` for followers, which M0 left open.
+- The default single node keeps `TYPESENSE_PORT` (default 8108; 18108 in the maintainer's setup, because 8108 belongs to another project there). The cluster ports stay clear of both.
 - `docs/building.md` documents both.
 
 ## 9. Testing
