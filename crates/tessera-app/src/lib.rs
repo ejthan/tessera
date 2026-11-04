@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod i18n;
+pub mod runtime;
 pub mod views;
 
 use gpui_kit::component::TitleBar;
@@ -32,8 +33,10 @@ pub fn run() {
         .build()
         .expect("failed to start the tokio runtime");
     let smoke = std::env::var("TESSERA_SMOKE").is_ok_and(|v| v == "1");
+    let handle = runtime.handle().clone();
 
     gpui_kit::application().run(move |cx| {
+        cx.set_global(runtime::Tokio(handle));
         gpui_kit::init(cx);
         i18n::init();
         actions::bind_keys(cx);
