@@ -56,7 +56,7 @@ impl RootView {
     }
 
     fn open_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        ConnectDialog::open(self.state.clone(), window, cx);
+        ConnectDialog::open_new(self.state.clone(), None, window, cx);
     }
 
     fn copy_docker_command(&mut self, cx: &mut Context<Self>) {

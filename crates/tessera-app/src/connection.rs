@@ -144,6 +144,8 @@ pub struct ConnectionState {
     pub connecting: bool,
     /// Full text of the last failed attempt.
     pub error: Option<SharedString>,
+    /// The last attempt failed because no key is stored.
+    pub missing_key: bool,
     /// The running attempt. Dropping the state drops it, which cancels the requests.
     pub(crate) task: Option<Task<()>>,
 }
@@ -156,6 +158,7 @@ impl ConnectionState {
             connected: None,
             connecting: false,
             error: None,
+            missing_key: false,
             task: None,
         }
     }

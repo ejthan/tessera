@@ -5,6 +5,7 @@
 //! Keychain and file I/O never run on the GPUI thread: they go to tokio's `spawn_blocking`
 //! through the [`Tokio`] global (`docs/architecture/async.md`).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,6 +27,15 @@ pub struct SecretStoreGlobal(pub Arc<dyn SecretStore>);
 
 impl Global for SecretStoreGlobal {}
 
+/// Why saving a profile failed. Neither variant holds the key.
+#[derive(Debug)]
+pub enum SaveError {
+    /// `connections.json` could not be written; the text is the reason.
+    File(String),
+    /// The key could not be stored in the secret store.
+    Keychain(SecretError),
+}
+
 /// Profiles, keys and open connections of the app.
 pub struct AppState {
     /// Saved profiles, in sidebar order.
@@ -45,6 +55,8 @@ pub struct AppState {
     /// The connection from CLI flags or `TYPESENSE_*`. Never saved; its key lives in memory.
     /// An empty key means none was given.
     pub temporary: Option<(Profile, SecretString)>,
+    /// Keys of saved profiles that live in memory only, because the keychain failed.
+    pub session_keys: HashMap<Uuid, SecretString>,
     /// Why `connections.json` could not be loaded. While set, the file is never written.
     pub load_error: Option<String>,
     /// The last save. Each save awaits the previous one, so writes land in order.
@@ -76,6 +88,7 @@ impl AppState {
             connections: Vec::new(),
             selected: None,
             temporary: None,
+            session_keys: HashMap::new(),
             load_error,
             save_task: None,
             on_quit: None,
@@ -117,12 +130,13 @@ impl AppState {
 
     /// Writes the profiles to `store_path` on tokio's `spawn_blocking`, after the previous save.
     /// Does nothing without a path or after a failed load (the file is not overwritten).
-    pub fn save(&mut self, cx: &mut Context<Self>) {
+    /// The task reports the result; dropping it does not stop the write.
+    pub fn save(&mut self, cx: &mut Context<Self>) -> Task<Result<(), String>> {
         let Some(path) = self.store_path.clone() else {
-            return;
+            return Task::ready(Ok(()));
         };
         if self.load_error.is_some() {
-            return;
+            return Task::ready(Ok(()));
         }
         let file = ConnectionsFile {
             schema_version: SCHEMA_VERSION,
@@ -132,22 +146,27 @@ impl AppState {
         };
         let tokio = cx.global::<Tokio>().0.clone();
         let previous = self.save_task.take();
+        let (done, result) = tokio::sync::oneshot::channel();
         // On the background executor: the quit handler blocks the main thread, which then
         // runs no foreground tasks, so a foreground save chain could not finish.
         self.save_task = Some(cx.background_spawn(async move {
             if let Some(previous) = previous {
                 previous.await;
             }
-            match tokio
+            let outcome = match tokio
                 .spawn_blocking(move || store::save(&path, &file))
                 .await
             {
-                Ok(Ok(())) => {}
-                // shortcut: save errors are only logged; show them once M1 has a place for
-                // background errors (toast).
-                Ok(Err(e)) => tracing::error!("saving connections failed: {e}"),
-                Err(e) => tracing::error!("saving connections stopped: {e}"),
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            if let Err(e) = &outcome {
+                // shortcut: only the dialog shows save errors; other saves are logged until
+                // M1 has a place for background errors (toast).
+                tracing::error!("saving connections failed: {e}");
             }
+            done.send(outcome).ok();
         }));
         if self.on_quit.is_none() {
             // GPUI waits up to SHUTDOWN_TIMEOUT (200 ms) for this before the process exits.
@@ -160,28 +179,39 @@ impl AppState {
                 }
             }));
         }
+        cx.background_spawn(async move {
+            result
+                .await
+                .unwrap_or_else(|_| Err("the save was dropped".into()))
+        })
     }
 
-    /// Adds or replaces a profile and saves. With `key`, stores it in the secret store; the
-    /// task reports that result (dropping it does not stop the write).
+    /// Adds or replaces a profile and saves. With `key`, stores it in the secret store. The
+    /// task reports both writes, the keychain first (dropping it does not stop them).
     pub fn upsert_profile(
         &mut self,
         profile: Profile,
         key: Option<SecretString>,
         cx: &mut Context<Self>,
-    ) -> Task<Result<(), SecretError>> {
+    ) -> Task<Result<(), SaveError>> {
         let id = profile.id;
         match self.profiles.iter_mut().find(|p| p.id == id) {
             Some(existing) => *existing = profile,
             None => self.profiles.push(profile),
         }
-        self.save(cx);
+        let saved = self.save(cx);
         cx.notify();
-        let Some(key) = key else {
-            return Task::ready(Ok(()));
-        };
-        let secrets = self.secrets.clone();
-        secret_task(blocking(cx, move || secrets.set(id, &key)), cx)
+        let stored = key.map(|key| {
+            self.session_keys.remove(&id);
+            let secrets = self.secrets.clone();
+            secret_task(blocking(cx, move || secrets.set(id, &key)), cx)
+        });
+        cx.spawn(async move |_, _| {
+            if let Some(stored) = stored {
+                stored.await.map_err(SaveError::Keychain)?;
+            }
+            saved.await.map_err(SaveError::File)
+        })
     }
 
     /// Removes a profile, its connection and its stored key, and saves.
@@ -194,8 +224,9 @@ impl AppState {
         if self.last_used == Some(id) {
             self.last_used = None;
         }
+        self.session_keys.remove(&id);
         self.disconnect(id, cx);
-        self.save(cx);
+        self.save(cx).detach();
         let secrets = self.secrets.clone();
         secret_task(blocking(cx, move || secrets.delete(id)), cx)
     }
@@ -217,7 +248,10 @@ impl AppState {
         let (profile, key) = match temporary {
             Some((p, temp_key)) => (p.clone(), key.or_else(|| Some(temp_key.clone()))),
             None => match self.profiles.iter().find(|p| p.id == id) {
-                Some(p) => (p.clone(), key),
+                Some(p) => (
+                    p.clone(),
+                    key.or_else(|| self.session_keys.get(&id).cloned()),
+                ),
                 None => return,
             },
         };
@@ -239,6 +273,7 @@ impl AppState {
             conn.update(cx, |c, cx| {
                 c.task = None;
                 c.connecting = false;
+                c.missing_key = false;
                 c.error = Some(
                     t!("connect.error.invalid_node", reason = e.0)
                         .to_string()
@@ -262,6 +297,8 @@ impl AppState {
                     .await
                     .unwrap_or_else(|e| Err(SecretError::new(e.to_string()))),
             };
+            let missing_key =
+                matches!(&key, Ok(k) if k.as_ref().is_none_or(|k| k.expose_secret().is_empty()));
             let result = match key {
                 Ok(Some(key)) if !key.expose_secret().is_empty() => connect(profile.clone(), key)
                     .await
@@ -272,6 +309,7 @@ impl AppState {
             let ok = result.is_ok();
             weak.update(cx, |c, cx| {
                 c.connecting = false;
+                c.missing_key = missing_key;
                 match result {
                     Ok(connected) => c.connected = Some(connected),
                     Err(text) => c.error = Some(text.into()),
@@ -282,7 +320,7 @@ impl AppState {
             if ok && saved {
                 this.update(cx, |s, cx| {
                     s.last_used = Some(id);
-                    s.save(cx);
+                    s.save(cx).detach();
                 })
                 .ok();
             }
@@ -290,6 +328,7 @@ impl AppState {
         conn.update(cx, |c, cx| {
             c.connecting = true;
             c.error = None;
+            c.missing_key = false;
             c.task = Some(task);
             cx.notify();
         });

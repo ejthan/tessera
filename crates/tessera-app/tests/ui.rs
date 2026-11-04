@@ -5,22 +5,25 @@
 // Helpers outside #[test] functions unwrap too; a panic is the test failure we want.
 #![allow(clippy::unwrap_used)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{
-    AppContext as _, Bounds, Point, TestAppContext, WindowBounds, WindowHandle, WindowOptions,
-    base::Root, px, size,
+    AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowHandle,
+    WindowOptions, base::Root, px, size,
 };
+use secrecy::{ExposeSecret as _, SecretString};
 use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
 use tessera_app::runtime::Tokio;
 use tessera_app::state::AppState;
 use tessera_app::views::root::RootView;
 use tessera_client::{Client, ClientOptions, Error, KeyAccess};
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
-use tessera_core::secrets::{MemoryStore, SecretStore as _};
+use tessera_core::secrets::{MemoryStore, SecretError, SecretStore};
 use tessera_core::store::{ConnectionsFile, StoreError};
+use uuid::Uuid;
 
 fn open(cx: &mut TestAppContext) -> WindowHandle<Root> {
     open_with(cx, Ok(ConnectionsFile::default()))
@@ -30,14 +33,14 @@ fn open_with(
     cx: &mut TestAppContext,
     loaded: Result<ConnectionsFile, StoreError>,
 ) -> WindowHandle<Root> {
-    open_state(cx, loaded, Arc::default())
+    open_state(cx, loaded, Arc::new(MemoryStore::default())).0
 }
 
 fn open_state(
     cx: &mut TestAppContext,
     loaded: Result<ConnectionsFile, StoreError>,
-    secrets: Arc<MemoryStore>,
-) -> WindowHandle<Root> {
+    secrets: Arc<dyn SecretStore>,
+) -> (WindowHandle<Root>, Entity<AppState>) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         gpui_kit::component::set_locale("en");
@@ -46,37 +49,68 @@ fn open_state(
             origin: Point::default(),
             size: size(px(1200.), px(800.)),
         };
+        let state = cx.new(|_| AppState::new(loaded, None, secrets));
+        let root_state = state.clone();
         let (window, _) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
             cx,
-            |window, cx| {
-                let state = cx.new(|_| AppState::new(loaded, None, secrets));
-                cx.new(|cx| RootView::new(state, window, cx))
-            },
+            |window, cx| cx.new(|cx| RootView::new(root_state, window, cx)),
         )
         .expect("open test window");
-        window.downcast::<Root>().expect("Base Root")
+        (window.downcast::<Root>().expect("Base Root"), state)
     })
 }
 
-const SELECT_ALL: &str = if cfg!(target_os = "macos") {
-    "cmd-a"
-} else {
-    "ctrl-a"
-};
-const DISCONNECT: &str = if cfg!(target_os = "macos") {
-    "cmd-shift-d"
-} else {
-    "ctrl-shift-d"
-};
-const NEW_CONNECTION: &str = if cfg!(target_os = "macos") {
-    "cmd-n"
-} else {
-    "ctrl-n"
-};
+/// Installs a real tokio runtime: keychain and file I/O run on its blocking pool, so the
+/// test scheduler must be allowed to park until it answers.
+fn tokio(cx: &mut TestAppContext) -> tokio::runtime::Runtime {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let handle = rt.handle().clone();
+    cx.update(|cx| cx.set_global(Tokio(handle)));
+    cx.executor().allow_parking();
+    rt
+}
+
+/// A window with a tokio runtime, the given profiles and secret store.
+fn open_app(
+    cx: &mut TestAppContext,
+    profiles: Vec<Profile>,
+    secrets: Arc<dyn SecretStore>,
+) -> (
+    WindowHandle<Root>,
+    Entity<AppState>,
+    tokio::runtime::Runtime,
+) {
+    let rt = tokio(cx);
+    let file = ConnectionsFile {
+        profiles,
+        ..Default::default()
+    };
+    let (handle, state) = open_state(cx, Ok(file), secrets);
+    (handle, state, rt)
+}
+
+const fn key(mac: &'static str, other: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") {
+        mac
+    } else {
+        other
+    }
+}
+const SELECT_ALL: &str = key("cmd-a", "ctrl-a");
+const DISCONNECT: &str = key("cmd-shift-d", "ctrl-shift-d");
+const NEW_CONNECTION: &str = key("cmd-n", "ctrl-n");
+const EDIT: &str = key("cmd-e", "ctrl-e");
+const TEST: &str = key("cmd-t", "ctrl-t");
+const SAVE: &str = key("cmd-enter", "ctrl-enter");
+const TOGGLE_KEY: &str = key("alt-cmd-k", "ctrl-alt-k");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 fn fake_connector(
@@ -92,28 +126,68 @@ fn fake_connector(
     });
 }
 
+/// A connector that records the keys it was called with and answers with `info`.
+fn recording_connector(cx: &mut TestAppContext, info: Connected) -> Arc<Mutex<Vec<String>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    cx.update(|cx| {
+        cx.set_global(ConnectorGlobal(Arc::new(move |_: Profile, key| {
+            record.lock().unwrap().push(key.expose_secret().to_string());
+            let info = info.clone();
+            Box::pin(async move { Ok(info) })
+        })));
+    });
+    seen
+}
+
 async fn open_dialog(cx: &mut TestAppContext, handle: WindowHandle<Root>) {
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         window.press(NEW_CONNECTION, cx);
     })
     .unwrap();
+    wait_for_dialog(cx, handle).await;
+}
+
+async fn wait_for_dialog(cx: &mut TestAppContext, handle: WindowHandle<Root>) {
     cx.wait_for(handle.into(), Duration::from_millis(500), |window, _| {
         window
-            .try_find("connect.url")
-            .is_some_and(|url| url.visible())
+            .try_find("connect.name")
+            .is_some_and(|name| name.visible())
     })
     .await;
 }
 
+async fn wait_for_close(cx: &mut TestAppContext, handle: WindowHandle<Root>) {
+    cx.wait_for(handle.into(), Duration::from_millis(1000), |window, _| {
+        window.try_find("connect.name").is_none()
+    })
+    .await;
+}
+
+/// Replaces the text of input `id`.
+fn fill(window: &mut gpui_kit::Window, id: &str, text: &str, cx: &mut gpui_kit::App) {
+    window.click(id.to_string(), cx);
+    window.press(SELECT_ALL, cx);
+    window.press("backspace", cx);
+    window.input(text, cx);
+}
+
 #[gpui_kit::test]
-async fn new_connection_opens_dialog_with_url_focused(cx: &mut TestAppContext) {
+async fn new_connection_opens_dialog_with_name_focused(cx: &mut TestAppContext) {
     let handle = open(cx);
     open_dialog(cx, handle).await;
     cx.update_window(handle.into(), |_, window, _| {
-        let url = window.find("connect.url");
-        assert_eq!(url.focused(), Some(true));
-        assert_eq!(url.value(), Some("http://localhost:8108"));
+        assert_eq!(window.find("connect.name").focused(), Some(true));
+        assert_eq!(
+            window.find("connect.node.0.host").value(),
+            Some("localhost")
+        );
+        assert_eq!(window.find("connect.node.0.port").value(), Some("8108"));
+        assert!(
+            window.try_find("connect.node.0.remove").is_none(),
+            "one node stays"
+        );
     })
     .unwrap();
 }
@@ -126,10 +200,7 @@ async fn welcome_button_opens_dialog(cx: &mut TestAppContext) {
         window.click("welcome.add_connection", cx);
     })
     .unwrap();
-    cx.wait_for(handle.into(), Duration::from_millis(500), |window, _| {
-        window.try_find("connect.url").is_some()
-    })
-    .await;
+    wait_for_dialog(cx, handle).await;
 }
 
 #[gpui_kit::test]
@@ -143,41 +214,62 @@ async fn connect_error_shows_typesense_message(cx: &mut TestAppContext) {
     });
     let handle = open(cx);
     open_dialog(cx, handle).await;
-    cx.update_window(handle.into(), |_, window, cx| window.press("enter", cx))
-        .unwrap();
-    cx.wait_for(handle.into(), Duration::from_millis(500), |window, _| {
-        window
-            .try_find("connect.error")
-            .and_then(|e| e.label().map(|l| l.contains("Not Ready or Lagging")))
-            .unwrap_or(false)
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.key", "k", cx);
+        window.press(TEST, cx);
     })
-    .await;
+    .unwrap();
+    wait_for_label(cx, handle, "connect.result".into(), "Not Ready or Lagging").await;
     cx.update_window(handle.into(), |_, window, _| {
-        assert!(window.find("connect.url").visible(), "dialog stays open");
+        assert!(window.find("connect.name").visible(), "dialog stays open");
     })
     .unwrap();
 }
 
 #[gpui_kit::test]
-async fn invalid_url_shows_inline_error(cx: &mut TestAppContext) {
+async fn host_with_scheme_is_rejected(cx: &mut TestAppContext) {
     fake_connector(cx, |_| {
-        unreachable!("a URL without a scheme never reaches the connector")
+        unreachable!("an invalid host never reaches the connector")
+    });
+    let (handle, state, _rt) = open_app(cx, Vec::new(), Arc::new(MemoryStore::default()));
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.node.0.host", "https://ts.example.com/", cx);
+        fill(window, "connect.key", "k", cx);
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_label(
+        cx,
+        handle,
+        "connect.node.0.error".into(),
+        "without protocol or path",
+    )
+    .await;
+    cx.run_until_parked();
+    state.read_with(cx, |s, _| assert!(s.profiles.is_empty()));
+}
+
+#[gpui_kit::test]
+async fn out_of_range_values_are_rejected(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| {
+        unreachable!("invalid values never reach the connector")
     });
     let handle = open(cx);
     open_dialog(cx, handle).await;
     cx.update_window(handle.into(), |_, window, cx| {
-        window.press(SELECT_ALL, cx);
-        window.input("localhost:8108", cx);
-        window.press("enter", cx);
+        fill(window, "connect.node.0.port", "70000", cx);
+        window.click("connect.advanced", cx);
+        window.render_frame(cx);
+        fill(window, "connect.timeout", "0", cx);
+        fill(window, "connect.retries", "11", cx);
+        window.press(TEST, cx);
+        window.render_frame(cx);
+        assert!(label(window, "connect.node.0.error").contains("1 and 65535"));
+        assert!(label(window, "connect.timeout.error").contains("1 and 300"));
+        assert!(label(window, "connect.retries.error").contains("0 and 10"));
     })
     .unwrap();
-    cx.wait_for(handle.into(), Duration::from_millis(500), |window, _| {
-        window
-            .try_find("connect.error")
-            .and_then(|e| e.label().map(|l| l.contains("http:// or https://")))
-            .unwrap_or(false)
-    })
-    .await;
 }
 
 #[gpui_kit::test]
@@ -186,10 +278,7 @@ async fn escape_closes_dialog(cx: &mut TestAppContext) {
     open_dialog(cx, handle).await;
     cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
         .unwrap();
-    cx.wait_for(handle.into(), Duration::from_millis(1000), |window, _| {
-        window.try_find("connect.url").is_none()
-    })
-    .await;
+    wait_for_close(cx, handle).await;
 }
 
 #[gpui_kit::test]
@@ -202,6 +291,272 @@ async fn key_is_masked_by_default(cx: &mut TestAppContext) {
         let key = window.find("connect.key");
         assert_eq!(key.focused(), Some(true));
         assert_ne!(key.value(), Some("secret-key-42"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn key_toggle_reachable_by_keyboard(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("connect.key", cx);
+        window.input("secret-key-42", cx);
+        window.press("tab", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("connect.key.toggle").focused(), Some(true));
+        window.press(TOGGLE_KEY, cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("connect.key").value(), Some("secret-key-42"));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn remote_http_shows_warning(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(window.try_find("connect.http_warning").is_none());
+        fill(window, "connect.node.0.host", "ts.example.com", cx);
+        window.render_frame(cx);
+        assert!(window.find("connect.http_warning").visible());
+        window.click("connect.node.0.protocol", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("connect.http_warning").is_none(), "https");
+        window.click("connect.node.0.protocol", cx);
+        fill(window, "connect.node.0.host", "localhost", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("connect.http_warning").is_none(), "local");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn choosing_prod_turns_read_only_on(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(window.find("connect.read_only").checked(), Some(false));
+        assert_eq!(window.find("connect.env.other").label(), Some("other"));
+        assert_eq!(window.find("connect.color.teal").label(), Some("Teal"));
+        window.click("connect.env.prod", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("connect.read_only").checked(), Some(true));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn restricted_key_result(cx: &mut TestAppContext) {
+    let mut info = server("30.2", true);
+    info.access = KeyAccess::Restricted;
+    fake_connector(cx, move |_| Ok(info.clone()));
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.key", "k", cx);
+        window.press(TEST, cx);
+    })
+    .unwrap();
+    let result = "connect.result".to_string();
+    wait_for_label(
+        cx,
+        handle,
+        result.clone(),
+        "Restricted key: can read collections, cannot list API keys",
+    )
+    .await;
+    cx.update_window(handle.into(), |_, window, _| {
+        let text = label(window, "connect.result");
+        assert!(
+            text.contains("Server healthy · Typesense 30.2 · Leader"),
+            "{text}"
+        );
+        assert!(text.contains("Tested"), "{text}");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn cancel_during_test_does_not_connect(cx: &mut TestAppContext) {
+    struct Dropped(Arc<AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let dropped = Arc::new(AtomicBool::new(false));
+    let called = Arc::new(AtomicBool::new(false));
+    let (flag, call) = (dropped.clone(), called.clone());
+    cx.update(|cx| {
+        cx.set_global(ConnectorGlobal(Arc::new(move |_: Profile, _| {
+            call.store(true, Ordering::SeqCst);
+            let guard = Dropped(flag.clone());
+            Box::pin(async move {
+                let _guard = guard;
+                std::future::pending().await
+            })
+        })));
+    });
+    let (handle, state, _rt) = open_app(cx, Vec::new(), Arc::new(MemoryStore::default()));
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.key", "k", cx);
+        window.press(TEST, cx);
+    })
+    .unwrap();
+    let running = called.clone();
+    cx.wait_for(handle.into(), Duration::from_millis(500), move |_, _| {
+        running.load(Ordering::SeqCst)
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+    wait_for_close(cx, handle).await;
+    cx.run_until_parked();
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the test request was dropped"
+    );
+    state.read_with(cx, |s, _| {
+        assert!(s.connections.is_empty());
+        assert!(s.profiles.is_empty());
+    });
+}
+
+#[gpui_kit::test]
+async fn save_creates_profile_and_stores_key(cx: &mut TestAppContext) {
+    let seen = recording_connector(cx, server("30.2", true));
+    let secrets = Arc::new(MemoryStore::default());
+    let (handle, state, _rt) = open_app(cx, Vec::new(), secrets.clone());
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.name", "local-dev", cx);
+        fill(window, "connect.node.0.host", "127.0.0.1", cx);
+        fill(window, "connect.key", "k-new", cx);
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_close(cx, handle).await;
+    wait_for_label(cx, handle, "status.text".into(), "local-dev").await;
+    let profile = state.read_with(cx, |s, _| {
+        assert_eq!(s.profiles.len(), 1);
+        s.profiles[0].clone()
+    });
+    assert_eq!(profile.name, "local-dev");
+    assert_eq!(profile.nodes[0].host, "127.0.0.1");
+    let stored = secrets.get(profile.id).unwrap().expect("key stored");
+    assert_eq!(stored.expose_secret(), "k-new");
+    assert!(seen.lock().unwrap().iter().all(|k| k == "k-new"));
+}
+
+/// A store whose writes fail like a missing Secret Service.
+struct FailingStore;
+
+impl SecretStore for FailingStore {
+    fn get(&self, _: Uuid) -> Result<Option<SecretString>, SecretError> {
+        Ok(None)
+    }
+    fn set(&self, _: Uuid, _: &SecretString) -> Result<(), SecretError> {
+        Err(SecretError::new("no Secret Service is running"))
+    }
+    fn delete(&self, _: Uuid) -> Result<(), SecretError> {
+        Ok(())
+    }
+}
+
+#[gpui_kit::test]
+async fn keychain_failure_offers_session_only(cx: &mut TestAppContext) {
+    let seen = recording_connector(cx, server("30.2", true));
+    let (handle, state, _rt) = open_app(cx, Vec::new(), Arc::new(FailingStore));
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.name", "no-keychain", cx);
+        fill(window, "connect.key", "k-session", cx);
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_label(
+        cx,
+        handle,
+        "connect.keychain_error".into(),
+        "no Secret Service is running",
+    )
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("connect.session_only", cx)
+    })
+    .unwrap();
+    wait_for_close(cx, handle).await;
+    wait_for_label(cx, handle, "status.text".into(), "no-keychain").await;
+    state.read_with(cx, |s, cx| {
+        assert_eq!(s.profiles.len(), 1);
+        let id = s.profiles[0].id;
+        assert!(s.connection(id, cx).unwrap().read(cx).connected.is_some());
+    });
+    assert!(seen.lock().unwrap().iter().all(|k| k == "k-session"));
+}
+
+#[gpui_kit::test]
+async fn edit_with_empty_key_keeps_stored_key(cx: &mut TestAppContext) {
+    let seen = recording_connector(cx, server("30.2", true));
+    let (staging, _, secrets) = two_profiles();
+    let (handle, state, _rt) = open_app(cx, vec![staging.clone()], secrets.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        focus(window, &entry(&staging), cx);
+        window.press(EDIT, cx);
+    })
+    .unwrap();
+    wait_for_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(window.find("connect.name").value(), Some("staging-eu"));
+        // A masked field reports no value; an empty one reports no text either.
+        assert_eq!(window.find("connect.key").value().unwrap_or(""), "");
+        fill(window, "connect.name", "staging-eu-2", cx);
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_close(cx, handle).await;
+    wait_for_label(cx, handle, "status.text".into(), "staging-eu-2").await;
+    state.read_with(cx, |s, _| {
+        assert_eq!(s.profiles.len(), 1);
+        assert_eq!(s.profiles[0].name, "staging-eu-2");
+        assert_eq!(s.profiles[0].environment, Environment::Staging);
+    });
+    let stored = secrets.get(staging.id).unwrap().expect("key kept");
+    assert_eq!(stored.expose_secret(), "k");
+    assert!(!seen.lock().unwrap().is_empty());
+    assert!(seen.lock().unwrap().iter().all(|k| k == "k"));
+}
+
+#[gpui_kit::test]
+async fn missing_key_offers_edit(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| unreachable!("no key, no request"));
+    let profile = Profile::new("keyless", vec![node()]);
+    let (handle, _state, _rt) =
+        open_app(cx, vec![profile.clone()], Arc::new(MemoryStore::default()));
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(entry(&profile), cx);
+    })
+    .unwrap();
+    let add_key = format!("{}.add_key", entry(&profile));
+    let target = add_key.clone();
+    cx.wait_for(
+        handle.into(),
+        Duration::from_millis(1000),
+        move |window, _| window.try_find(target.clone()).is_some(),
+    )
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        focus(window, &add_key, cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    wait_for_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, _| {
+        assert_eq!(window.find("connect.name").value(), Some("keyless"));
     })
     .unwrap();
 }
@@ -253,17 +608,23 @@ fn server(version: &str, healthy: bool) -> Connected {
     }
 }
 
-async fn connect(cx: &mut TestAppContext, info: Connected) -> WindowHandle<Root> {
+async fn connect(
+    cx: &mut TestAppContext,
+    info: Connected,
+) -> (WindowHandle<Root>, tokio::runtime::Runtime) {
     fake_connector(cx, move |_| Ok(info.clone()));
-    let handle = open(cx);
+    let (handle, _, rt) = open_app(cx, Vec::new(), Arc::new(MemoryStore::default()));
     open_dialog(cx, handle).await;
-    cx.update_window(handle.into(), |_, window, cx| window.press("enter", cx))
-        .unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.key", "k", cx);
+        window.press(SAVE, cx);
+    })
+    .unwrap();
     cx.wait_for(handle.into(), Duration::from_millis(1000), |window, _| {
-        window.try_find("connect.url").is_none() && window.try_find("overview.version").is_some()
+        window.try_find("connect.name").is_none() && window.try_find("overview.version").is_some()
     })
     .await;
-    handle
+    (handle, rt)
 }
 
 fn label(window: &mut gpui_kit::Window, id: &'static str) -> String {
@@ -272,7 +633,7 @@ fn label(window: &mut gpui_kit::Window, id: &'static str) -> String {
 
 #[gpui_kit::test]
 async fn connect_success_shows_version_in_status_bar(cx: &mut TestAppContext) {
-    let handle = connect(cx, server("30.2", true)).await;
+    let (handle, _rt) = connect(cx, server("30.2", true)).await;
     cx.update_window(handle.into(), |_, window, _| {
         let status = label(window, "status.text");
         for part in ["Connected", "localhost:8108", "v30.2", "Leader", "11 ms"] {
@@ -289,7 +650,7 @@ async fn connect_success_shows_version_in_status_bar(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 async fn old_server_shows_warning(cx: &mut TestAppContext) {
-    let handle = connect(cx, server("29.0", true)).await;
+    let (handle, _rt) = connect(cx, server("29.0", true)).await;
     cx.update_window(handle.into(), |_, window, _| {
         assert!(label(window, "overview.unsupported").contains("29.0"));
     })
@@ -298,7 +659,7 @@ async fn old_server_shows_warning(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 async fn unhealthy_server_shows_unhealthy(cx: &mut TestAppContext) {
-    let handle = connect(cx, server("30.2", false)).await;
+    let (handle, _rt) = connect(cx, server("30.2", false)).await;
     cx.update_window(handle.into(), |_, window, _| {
         assert!(label(window, "overview.health").contains("Unhealthy"));
     })
@@ -330,26 +691,14 @@ fn two_profiles() -> (Profile, Profile, Arc<MemoryStore>) {
     (staging, prod, secrets)
 }
 
-/// Opens a window with saved `profiles`. Stored keys are read on tokio's blocking pool, so
-/// this installs a runtime and lets the test scheduler park until it answers.
+/// Opens a window with saved `profiles`.
 fn open_profiles(
     cx: &mut TestAppContext,
     profiles: Vec<Profile>,
     secrets: Arc<MemoryStore>,
 ) -> (WindowHandle<Root>, tokio::runtime::Runtime) {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .unwrap();
-    let handle = rt.handle().clone();
-    cx.update(|cx| cx.set_global(Tokio(handle)));
-    cx.executor().allow_parking();
-    let file = ConnectionsFile {
-        profiles,
-        ..Default::default()
-    };
-    (open_state(cx, Ok(file), secrets), rt)
+    let (handle, _, rt) = open_app(cx, profiles, secrets);
+    (handle, rt)
 }
 
 fn entry(profile: &Profile) -> String {
@@ -514,6 +863,17 @@ async fn menu_first_item(
     entry: String,
     label: &'static str,
 ) {
+    menu_item(cx, handle, entry, 0, label).await;
+}
+
+/// Opens the entry's context menu and clicks item `index`, which must read `label`.
+async fn menu_item(
+    cx: &mut TestAppContext,
+    handle: WindowHandle<Root>,
+    entry: String,
+    index: usize,
+    label: &'static str,
+) {
     cx.update_window(handle.into(), |_, window, cx| window.right_click(entry, cx))
         .unwrap();
     cx.wait_for(handle.into(), Duration::from_millis(500), |window, _| {
@@ -522,8 +882,8 @@ async fn menu_first_item(
     .await;
     cx.update_window(handle.into(), |_, window, cx| {
         let mut menu = window.within("popup-menu");
-        assert_eq!(menu.find(0usize).label(), Some(label));
-        menu.click(0usize, cx);
+        assert_eq!(menu.find(index).label(), Some(label));
+        menu.click(index, cx);
     })
     .unwrap();
 }
@@ -539,6 +899,21 @@ async fn context_menu_connects_and_disconnects(cx: &mut TestAppContext) {
     wait_for_label(cx, handle, "status.text".into(), "staging-eu").await;
     menu_first_item(cx, handle, entry(&staging), "Disconnect").await;
     wait_for_label(cx, handle, "status.text".into(), "Not connected").await;
+}
+
+#[gpui_kit::test]
+async fn context_menu_edit_opens_dialog(cx: &mut TestAppContext) {
+    let (staging, prod, secrets) = two_profiles();
+    let (handle, _rt) = open_profiles(cx, vec![staging, prod.clone()], secrets);
+    cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    menu_item(cx, handle, entry(&prod), 1, "Edit…").await;
+    wait_for_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, _| {
+        assert_eq!(window.find("connect.name").value(), Some("prod-ch"));
+        assert_eq!(window.find("connect.read_only").checked(), Some(true));
+    })
+    .unwrap();
 }
 
 /// Shortcut labels come from GPUI Kit's `Kbd`, which formats them per platform.

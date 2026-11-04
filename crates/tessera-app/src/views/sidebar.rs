@@ -18,8 +18,12 @@ use rust_i18n::t;
 use tessera_core::profile::Profile;
 use uuid::Uuid;
 
+use super::connect_dialog::ConnectDialog;
 use super::env_badge;
-use crate::actions::{ConnectSelected, DisconnectSelected, NewConnection, SIDEBAR_ENTRY};
+use crate::actions::{
+    ConnectSelected, DisconnectSelected, EditConnection, NewConnection, SIDEBAR_ADD_KEY,
+    SIDEBAR_ENTRY,
+};
 use crate::state::AppState;
 
 /// The sidebar view. Keeps one focus handle per entry so Tab and Enter work.
@@ -37,6 +41,7 @@ struct Entry {
     connecting: bool,
     connected: bool,
     error: Option<SharedString>,
+    missing_key: bool,
 }
 
 impl Sidebar {
@@ -75,6 +80,7 @@ impl Sidebar {
                     connecting: conn.is_some_and(|c| c.connecting),
                     connected: conn.is_some_and(|c| c.connected.is_some()),
                     error: conn.and_then(|c| c.error.clone()),
+                    missing_key: conn.is_some_and(|c| c.missing_key),
                     profile,
                     saved,
                 }
@@ -82,7 +88,12 @@ impl Sidebar {
             .collect()
     }
 
-    fn render_entry(&mut self, entry: Entry, cx: &mut Context<Self>) -> AnyElement {
+    fn render_entry(
+        &mut self,
+        entry: Entry,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let id = entry.profile.id;
         let handle = self
             .focus
@@ -102,6 +113,13 @@ impl Sidebar {
             let state = self.state.clone();
             move |cx: &mut gpui_kit::App| state.update(cx, |s, cx| s.disconnect(id, cx))
         };
+        let edit = {
+            let state = self.state.clone();
+            move |window: &mut Window, cx: &mut gpui_kit::App| {
+                ConnectDialog::open_edit(state.clone(), id, window, cx)
+            }
+        };
+        let saved = entry.saved;
         let row = h_flex()
             .id(SharedString::from(element_id.clone()))
             .test_support()
@@ -154,20 +172,55 @@ impl Sidebar {
                     .child(env_badge::render(&entry.profile.environment, cx)),
             )
             .context_menu(move |menu, _, _| {
-                if live {
+                let menu = if live {
                     menu.menu(
                         t!("sidebar.disconnect").to_string(),
                         Box::new(DisconnectSelected),
                     )
                 } else {
                     menu.menu(t!("sidebar.connect").to_string(), Box::new(ConnectSelected))
+                };
+                if saved {
+                    menu.menu(t!("sidebar.edit").to_string(), Box::new(EditConnection))
+                } else {
+                    menu
                 }
             });
-        v_flex()
+        let add_key = (entry.missing_key && saved).then(|| {
+            // Its own key context: in SIDEBAR_ENTRY, Enter would connect instead of clicking.
+            div()
+                .key_context(SIDEBAR_ADD_KEY)
+                .on_action({
+                    let edit = edit.clone();
+                    move |_: &EditConnection, window, cx| edit(window, cx)
+                })
+                .px_2()
+                .pb_1()
+                .child(
+                    Button::new(SharedString::from(format!("{element_id}.add_key")))
+                        .outline()
+                        .small()
+                        .label(t!("sidebar.add_key").to_string())
+                        .children(Kbd::binding_for_action(
+                            &EditConnection,
+                            Some(SIDEBAR_ADD_KEY),
+                            window,
+                        ))
+                        .on_click({
+                            let edit = edit.clone();
+                            move |_, window, cx| edit(window, cx)
+                        }),
+                )
+        });
+        let entry_el = v_flex()
             // On the wrapper, so the context menu (a child of the row) resolves Enter too.
             .key_context(SIDEBAR_ENTRY)
             .on_action(move |_: &ConnectSelected, _, cx| connect(cx))
             .on_action(move |_: &DisconnectSelected, _, cx| disconnect(cx))
+            .when(saved, |el| {
+                let edit = edit.clone();
+                el.on_action(move |_: &EditConnection, window, cx| edit(window, cx))
+            })
             .child(row)
             .when_some(entry.error, |el, error| {
                 el.child(
@@ -197,7 +250,10 @@ impl Sidebar {
                         .text_sm()
                         .child(overview),
                 )
-            })
+            });
+        v_flex()
+            .child(entry_el)
+            .children(add_key)
             .into_any_element()
     }
 }
@@ -209,7 +265,7 @@ impl Render for Sidebar {
             .retain(|id, _| entries.iter().any(|e| e.profile.id == *id));
         let rows: Vec<_> = entries
             .into_iter()
-            .map(|entry| self.render_entry(entry, cx))
+            .map(|entry| self.render_entry(entry, window, cx))
             .collect();
         let theme = cx.theme();
         v_flex()
