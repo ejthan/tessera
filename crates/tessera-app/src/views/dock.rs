@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
-use gpui_kit::component::dock::{BasePanel, Panel, PanelControl, PanelEvent};
+use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
     App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
@@ -76,10 +76,6 @@ impl Panel for SidebarPanel {
     fn title_bar(&self, _: &App) -> bool {
         false
     }
-
-    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        None
-    }
 }
 
 impl Render for SidebarPanel {
@@ -144,10 +140,6 @@ impl Panel for OverviewPanel {
             .child(name)
             .child(env_badge::render(&profile.environment, cx))
     }
-
-    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        None
-    }
 }
 
 impl Render for OverviewPanel {
@@ -198,10 +190,6 @@ impl BasePanel for RequestLogPanel {
 impl Panel for RequestLogPanel {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         t!("log.title").to_string()
-    }
-
-    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        None
     }
 }
 
@@ -272,10 +260,6 @@ impl BasePanel for WelcomePanel {
 impl Panel for WelcomePanel {
     fn title_bar(&self, _: &App) -> bool {
         false
-    }
-
-    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
-        None
     }
 }
 

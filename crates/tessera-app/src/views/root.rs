@@ -31,10 +31,10 @@ pub struct RootView {
     state: Entity<AppState>,
     dock: Entity<DockArea>,
     welcome: Entity<WelcomePanel>,
-    /// The overview tab shown last in the center. Band, frame, title bar and status bar
-    /// follow it.
+    /// The overview tab selected last, in the center or an open dock. Band, frame, title bar
+    /// and status bar follow it.
     active: Option<PanelId>,
-    /// The center overview tabs on screen at the last layout change.
+    /// The overview tabs on screen at the last layout change.
     displayed: Vec<PanelId>,
     _subscriptions: Vec<Subscription>,
 }
@@ -98,29 +98,73 @@ impl RootView {
         }
     }
 
-    /// The connection of the active center tab.
+    /// The connection of the active overview tab.
     pub fn active_connection(&self, cx: &App) -> Option<Entity<ConnectionState>> {
         let panel = overview_panel(self.dock.read(cx), self.active?)?;
         Some(panel.read(cx).connection().clone())
     }
 
-    /// Every overview tab in the dock, wherever the user moved it.
-    fn overview_tabs(&self, cx: &App) -> Vec<Entity<OverviewPanel>> {
-        let area = self.dock.read(cx);
-        [
-            DockPlacement::Center,
-            DockPlacement::Left,
-            DockPlacement::Right,
-            DockPlacement::Bottom,
-        ]
-        .into_iter()
-        .filter_map(|placement| area.layout(placement))
-        .flat_map(|tree| tree.panels())
-        .filter_map(|id| overview_panel(area, id))
-        .collect()
+    /// The dock area, for tests that rearrange panels as a user would by dragging.
+    pub fn dock(&self) -> &Entity<DockArea> {
+        &self.dock
     }
 
-    /// Opens the overview tab of profile `id`, or focuses the one already open.
+    /// Every overview tab in the dock with the region it sits in.
+    fn overview_tabs(&self, cx: &App) -> Vec<(DockPlacement, Entity<OverviewPanel>)> {
+        let area = self.dock.read(cx);
+        REGIONS
+            .into_iter()
+            .filter_map(|placement| Some((placement, area.layout(placement)?)))
+            .flat_map(|(placement, tree)| tree.panels().map(move |id| (placement, id)))
+            .filter_map(|(placement, id)| Some((placement, overview_panel(area, id)?)))
+            .collect()
+    }
+
+    /// The overview tabs on screen: the displayed tab of each group in the center and in
+    /// the open docks.
+    fn displayed_tabs(&self, cx: &App) -> Vec<PanelId> {
+        let area = self.dock.read(cx);
+        let mut displayed = Vec::new();
+        for placement in REGIONS {
+            if placement != DockPlacement::Center && !area.is_dock_open(placement) {
+                continue;
+            }
+            let Some(tree) = area.layout(placement) else {
+                continue;
+            };
+            tree.root().walk(&mut |node| {
+                if let PaneRef::Tabs { panels, active_ix } = node.kind() {
+                    displayed.extend(
+                        panels
+                            .get(active_ix)
+                            .filter(|id| overview_panel(area, **id).is_some()),
+                    );
+                }
+            });
+        }
+        displayed
+    }
+
+    /// Makes `active` the active tab; the sidebar selection follows when it changes.
+    fn set_active(&mut self, active: Option<PanelId>, cx: &mut Context<Self>) {
+        cx.notify();
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        let Some(id) = self.active_connection(cx).map(|c| c.read(cx).profile.id) else {
+            return;
+        };
+        self.state.update(cx, |s, cx| {
+            if s.selected != Some(id) {
+                s.selected = Some(id);
+                cx.notify();
+            }
+        });
+    }
+
+    /// Opens the overview tab of profile `id`, or shows and activates the one already open,
+    /// opening the dock it was moved into.
     fn open_overview(&mut self, id: uuid::Uuid, window: &mut Window, cx: &mut Context<Self>) {
         let Some(conn) = self.state.read(cx).connection(id, cx) else {
             return;
@@ -131,23 +175,37 @@ impl RootView {
         let existing = self
             .overview_tabs(cx)
             .into_iter()
-            .find(|tab| tab.read(cx).connection() == &conn);
+            .find(|(_, tab)| tab.read(cx).connection() == &conn);
         let welcome = self.welcome.clone();
-        self.dock.update(cx, |area, cx| {
-            let panel = existing.unwrap_or_else(|| {
-                let panel = cx.new(|cx| OverviewPanel::new(conn, cx));
-                area.add_panel_view(
-                    panel_handle(panel.clone()),
-                    DockPlacement::Center,
-                    None,
-                    window,
-                    cx,
-                );
-                area.remove_panel(welcome, window, cx);
-                panel
-            });
-            area.select_panel(PanelId::from(panel.entity_id()), window, cx);
+        let panel = self.dock.update(cx, |area, cx| {
+            let panel = match existing {
+                Some((placement, panel)) => {
+                    if placement != DockPlacement::Center && !area.is_dock_open(placement) {
+                        area.toggle_dock(placement, window, cx);
+                    }
+                    panel
+                }
+                None => {
+                    let panel = cx.new(|cx| OverviewPanel::new(conn, cx));
+                    area.add_panel_view(
+                        panel_handle(panel.clone()),
+                        DockPlacement::Center,
+                        None,
+                        window,
+                        cx,
+                    );
+                    area.remove_panel(welcome, window, cx);
+                    panel
+                }
+            };
+            let id = PanelId::from(panel.entity_id());
+            // A no-op for a tab already displayed, e.g. in another split group.
+            area.select_panel(id, window, cx);
+            id
         });
+        // Set here, not from the layout event: selecting a displayed tab changes no layout.
+        self.displayed = self.displayed_tabs(cx);
+        self.set_active(Some(panel), cx);
     }
 
     /// Closes the tabs of connections that were closed. Closing a tab never disconnects.
@@ -156,6 +214,7 @@ impl RootView {
         let stale: Vec<_> = self
             .overview_tabs(cx)
             .into_iter()
+            .map(|(_, tab)| tab)
             .filter(|tab| !state.connections.contains(tab.read(cx).connection()))
             .collect();
         if stale.is_empty() {
@@ -168,51 +227,40 @@ impl RootView {
         });
     }
 
-    /// Finds the active tab after a layout change, brings the welcome screen back into an
-    /// empty center, and lets the sidebar selection follow the active tab.
+    /// Finds the active tab after a layout change and brings the welcome screen back into
+    /// an empty center.
     fn layout_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let area = self.dock.read(cx);
-        let mut displayed = Vec::new();
-        if let Some(center) = area.layout(DockPlacement::Center) {
-            center.root().walk(&mut |node| {
-                if let PaneRef::Tabs { panels, active_ix } = node.kind() {
-                    displayed.extend(
-                        panels
-                            .get(active_ix)
-                            .filter(|id| overview_panel(area, **id).is_some()),
-                    );
-                }
-            });
-        }
-        let center_empty = area
-            .layout(DockPlacement::Center)
-            .is_none_or(|tree| tree.panels().next().is_none());
-        // shortcut: a tab that just came on screen wins; focus moves between split groups
-        // do not change the active tab, until tabs report focus.
+        let displayed = self.displayed_tabs(cx);
+        // shortcut: a tab that just came on screen wins; a click into a group whose tab is
+        // already displayed changes nothing, until tabs report focus.
         let fresh = displayed.iter().find(|id| !self.displayed.contains(id));
-        self.active = fresh
+        let active = fresh
             .or_else(|| self.active.as_ref().filter(|id| displayed.contains(id)))
             .or(displayed.first())
             .copied();
         self.displayed = displayed;
+        let center_empty = self
+            .dock
+            .read(cx)
+            .layout(DockPlacement::Center)
+            .is_none_or(|tree| tree.panels().next().is_none());
         if center_empty {
             let welcome = panel_handle(self.welcome.clone());
             self.dock.update(cx, |area, cx| {
                 area.add_panel_view(welcome, DockPlacement::Center, None, window, cx);
             });
         }
-        let active = self.active_connection(cx).map(|c| c.read(cx).profile.id);
-        if active.is_some() {
-            self.state.update(cx, |s, cx| {
-                if s.selected != active {
-                    s.selected = active;
-                    cx.notify();
-                }
-            });
-        }
-        cx.notify();
+        self.set_active(active, cx);
     }
 }
+
+/// The regions of the dock area.
+const REGIONS: [DockPlacement; 4] = [
+    DockPlacement::Center,
+    DockPlacement::Left,
+    DockPlacement::Right,
+    DockPlacement::Bottom,
+];
 
 /// The overview tab `id`, if the dock holds one under that id.
 fn overview_panel(area: &DockArea, id: PanelId) -> Option<Entity<OverviewPanel>> {

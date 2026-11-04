@@ -2,7 +2,7 @@
 
 //! App-wide actions and their key bindings.
 
-use gpui_kit::component::dock::ClosePanel;
+use gpui_kit::component::dock::{ClosePanel, ToggleZoom};
 use gpui_kit::{App, KeyBinding};
 
 gpui_kit::actions!(
@@ -68,6 +68,10 @@ const CLOSE_TAB: &str = "cmd-w";
 #[cfg(not(target_os = "macos"))]
 const CLOSE_TAB: &str = "ctrl-w";
 #[cfg(target_os = "macos")]
+const ZOOM: &str = "cmd-shift-enter";
+#[cfg(not(target_os = "macos"))]
+const ZOOM: &str = "ctrl-shift-enter";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
@@ -78,8 +82,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(NEW_CONNECTION, NewConnection, None),
         KeyBinding::new(QUIT, Quit, None),
         KeyBinding::new(TOGGLE_LOG, ToggleRequestLog, None),
-        // The dock's own action, handled by the tab group that holds focus.
+        // The dock's own actions, handled by the tab group that holds focus.
         KeyBinding::new(CLOSE_TAB, ClosePanel, None),
+        KeyBinding::new(ZOOM, ToggleZoom, None),
         KeyBinding::new("enter", ConnectSelected, Some(SIDEBAR_ENTRY)),
         KeyBinding::new(DISCONNECT, DisconnectSelected, Some(SIDEBAR_ENTRY)),
         KeyBinding::new(EDIT, EditConnection, Some(SIDEBAR_ENTRY)),
