@@ -240,9 +240,16 @@ impl AppState {
     }
 
     /// Writes the saved profiles, without keys, to `path` on tokio's `spawn_blocking`.
+    /// Writes a temporary file next to it and renames it, so a failed export leaves no
+    /// half-written file.
     pub fn export_to(&self, path: PathBuf, cx: &App) -> Task<Result<(), String>> {
         let text = import::export_profiles(&self.profiles);
-        let job = blocking(cx, move || std::fs::write(&path, text));
+        let job = blocking(cx, move || {
+            let mut tmp = path.clone().into_os_string();
+            tmp.push(".tmp");
+            std::fs::write(&tmp, text)?;
+            std::fs::rename(&tmp, &path)
+        });
         cx.background_spawn(async move {
             match job.await {
                 Ok(result) => result.map_err(|e| e.to_string()),

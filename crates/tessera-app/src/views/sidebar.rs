@@ -35,8 +35,8 @@ const EXPORT_NAME: &str = "tessera-profiles.json";
 pub struct Sidebar {
     state: Entity<AppState>,
     focus: HashMap<Uuid, FocusHandle>,
-    /// Why the last export failed, shown under the header.
-    export_error: Option<SharedString>,
+    /// Why the last header action (export, reopen toggle, delete) failed, shown under the header.
+    header_error: Option<SharedString>,
     export_task: Option<Task<()>>,
     _subscription: Subscription,
 }
@@ -45,6 +45,8 @@ pub struct Sidebar {
 struct Entry {
     profile: Profile,
     saved: bool,
+    /// The connection from CLI flags or `TYPESENSE_*`.
+    temporary: bool,
     selected: bool,
     connecting: bool,
     connected: bool,
@@ -59,7 +61,7 @@ impl Sidebar {
         Self {
             state,
             focus: HashMap::new(),
-            export_error: None,
+            header_error: None,
             export_task: None,
             _subscription: subscription,
         }
@@ -67,9 +69,13 @@ impl Sidebar {
 
     /// Asks where to save and writes the profiles there, without keys.
     fn export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        if state.profiles.is_empty() || state.load_error.is_some() {
+            return;
+        }
         let dir = std::env::home_dir().unwrap_or_default();
         let picked = cx.prompt_for_new_path(&dir, Some(EXPORT_NAME));
-        self.export_error = None;
+        self.header_error = None;
         cx.notify();
         self.export_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = match picked.await {
@@ -88,7 +94,7 @@ impl Sidebar {
                 Ok(Ok(None)) | Err(_) => Ok(()),
             };
             this.update(cx, |view, cx| {
-                view.export_error = result.err().map(Into::into);
+                view.header_error = result.err().map(Into::into);
                 cx.notify();
             })
             .ok();
@@ -96,11 +102,23 @@ impl Sidebar {
     }
 
     fn toggle_reopen_last(&mut self, cx: &mut Context<Self>) {
-        self.state.update(cx, |s, cx| {
+        let saved = self.state.update(cx, |s, cx| {
             s.reopen_last = !s.reopen_last;
-            s.save(cx).detach();
             cx.notify();
+            s.save(cx)
         });
+        cx.spawn(async move |this, cx| {
+            let error = saved
+                .await
+                .err()
+                .map(|e| t!("connect.error.save_file", detail = e).to_string());
+            this.update(cx, |view, cx| {
+                view.header_error = error.map(Into::into);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Saved profiles in order, then the temporary and other unsaved connections.
@@ -124,6 +142,10 @@ impl Sidebar {
                 let conn = state.connection(profile.id, cx);
                 let conn = conn.as_ref().map(|c| c.read(cx));
                 Entry {
+                    temporary: state
+                        .temporary
+                        .as_ref()
+                        .is_some_and(|(p, _)| p.id == profile.id),
                     selected: state.selected == Some(profile.id),
                     connecting: conn.is_some_and(|c| c.connecting),
                     connected: conn.is_some_and(|c| c.connected.is_some()),
@@ -162,6 +184,7 @@ impl Sidebar {
             move |cx: &mut gpui_kit::App| state.update(cx, |s, cx| s.disconnect(id, cx))
         };
         let saved = entry.saved;
+        let temporary = entry.temporary;
         // Edit for a saved profile, "Save as profile…" for the temporary connection.
         let edit = {
             let state = self.state.clone();
@@ -178,21 +201,36 @@ impl Sidebar {
         };
         let delete = {
             let state = self.state.clone();
+            let sidebar = cx.entity().downgrade();
             let name = entry.profile.name.clone();
             move |window: &mut Window, cx: &mut gpui_kit::App| {
                 let state = state.clone();
+                let sidebar = sidebar.clone();
+                let key_name = name.clone();
                 confirm::open(
                     t!("delete.title", name = name.clone()).to_string(),
                     t!("delete.body", name = name.clone()).to_string(),
                     t!("delete.confirm").to_string(),
                     move |_, cx| {
                         let deleted = state.update(cx, |s, cx| s.delete_profile(id, cx));
-                        cx.spawn(async move |_| {
-                            if let Err(e) = deleted.await {
-                                // shortcut: the entry is gone, so there is no inline place for
-                                // this; logged until M1 has a place for background errors.
-                                tracing::warn!("removing the stored key failed: {e}");
-                            }
+                        let sidebar = sidebar.clone();
+                        let name = key_name.clone();
+                        cx.spawn(async move |cx| {
+                            // The entry is gone, so the header line reports a key left behind.
+                            let Err(e) = deleted.await else {
+                                return;
+                            };
+                            let text = t!(
+                                "sidebar.delete_key_error",
+                                name = name,
+                                detail = e.to_string()
+                            );
+                            sidebar
+                                .update(cx, |view, cx| {
+                                    view.header_error = Some(text.to_string().into());
+                                    cx.notify();
+                                })
+                                .ok();
                         })
                         .detach();
                     },
@@ -268,19 +306,21 @@ impl Sidebar {
                 if saved {
                     menu.menu(t!("sidebar.edit").to_string(), Box::new(EditConnection))
                         .menu(t!("sidebar.delete").to_string(), Box::new(DeleteConnection))
-                } else {
+                } else if temporary {
                     menu.menu(
                         t!("sidebar.save_temporary").to_string(),
                         Box::new(EditConnection),
                     )
+                } else {
+                    menu
                 }
             });
-        let button = if !saved {
+        let button = if temporary {
             Some((
                 "sidebar.save_temporary".to_string(),
                 t!("sidebar.save_temporary"),
             ))
-        } else if entry.missing_key {
+        } else if saved && entry.missing_key {
             Some((format!("{element_id}.add_key"), t!("sidebar.add_key")))
         } else {
             None
@@ -316,9 +356,9 @@ impl Sidebar {
             .key_context(SIDEBAR_ENTRY)
             .on_action(move |_: &ConnectSelected, _, cx| connect(cx))
             .on_action(move |_: &DisconnectSelected, _, cx| disconnect(cx))
-            .on_action({
+            .when(saved || temporary, |el| {
                 let edit = edit.clone();
-                move |_: &EditConnection, window, cx| edit(window, cx)
+                el.on_action(move |_: &EditConnection, window, cx| edit(window, cx))
             })
             .when(saved, |el| {
                 el.on_action(move |_: &DeleteConnection, window, cx| delete(window, cx))
@@ -369,7 +409,9 @@ impl Render for Sidebar {
             .into_iter()
             .map(|entry| self.render_entry(entry, window, cx))
             .collect();
-        let reopen_last = self.state.read(cx).reopen_last;
+        let state = self.state.read(cx);
+        let reopen_last = state.reopen_last;
+        let can_export = !state.profiles.is_empty() && state.load_error.is_none();
         let theme = cx.theme();
         v_flex()
             .on_action(cx.listener(|this, _: &ImportProfiles, window, cx| {
@@ -417,9 +459,10 @@ impl Render for Sidebar {
                                             t!("sidebar.import").to_string(),
                                             Box::new(ImportProfiles),
                                         )
-                                        .menu(
+                                        .menu_with_disabled(
                                             t!("sidebar.export").to_string(),
                                             Box::new(ExportProfiles),
+                                            !can_export,
                                         )
                                         .separator()
                                         .menu_with_check(
@@ -431,9 +474,9 @@ impl Render for Sidebar {
                             ),
                     ),
             )
-            .children(self.export_error.clone().map(|error| {
+            .children(self.header_error.clone().map(|error| {
                 div()
-                    .id("sidebar.export_error")
+                    .id("sidebar.header_error")
                     .test_support()
                     .aria_label(error.clone())
                     .px_2()

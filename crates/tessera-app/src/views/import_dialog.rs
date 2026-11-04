@@ -16,8 +16,9 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, IntoElement, ParentElement as _,
-    PathPromptOptions, Render, SharedString, Styled as _, Task, Window, div, prelude::*, px,
+    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, IntoElement,
+    ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Task, Window, div,
+    prelude::*, px,
 };
 use rust_i18n::t;
 use secrecy::ExposeSecret as _;
@@ -55,6 +56,9 @@ pub struct ImportDialog {
     save_error: Option<SharedString>,
     /// The running import. Esc waits for it.
     task: Option<Task<()>>,
+    /// The footer buttons, so Enter can activate the focused one.
+    cancel_focus: FocusHandle,
+    submit_focus: FocusHandle,
 }
 
 impl ImportDialog {
@@ -123,7 +127,7 @@ impl ImportDialog {
             Ok(c) => (c, None),
             Err(e) => (Vec::new(), Some(e)),
         };
-        let view = cx.new(|_| Self {
+        let view = cx.new(|cx| Self {
             state,
             rows: rows
                 .into_iter()
@@ -136,14 +140,27 @@ impl ImportDialog {
             error: error.map(Into::into),
             save_error: None,
             task: None,
+            cancel_focus: cx.focus_handle(),
+            submit_focus: cx.focus_handle(),
         });
         window.open_dialog(cx, move |dialog, _, _| {
             let busy = view.clone();
+            let enter = view.clone();
             dialog
                 .title(t!("import.title").to_string())
                 .w(px(720.))
-                // Enter would close the dialog; importing is the Import button's job.
-                .on_ok(|_, _, _| false)
+                // The dialog's Enter binding wins over the focused button's own key handling,
+                // so Enter activates the focused footer button here; elsewhere it does nothing.
+                .on_ok(move |_, window, cx| {
+                    enter.update(cx, |this, cx| {
+                        if this.submit_focus.is_focused(window) {
+                            this.submit(window, cx);
+                            false
+                        } else {
+                            this.cancel_focus.is_focused(window) && this.task.is_none()
+                        }
+                    })
+                })
                 .on_cancel(move |_, _, cx| busy.read(cx).task.is_none())
                 .child(view.clone())
         });
@@ -158,7 +175,8 @@ impl ImportDialog {
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = self.pending();
-        if self.task.is_some() || picked.is_empty() {
+        let blocked = self.state.read(cx).load_error.is_some();
+        if self.task.is_some() || picked.is_empty() || blocked {
             return;
         }
         let keys: Vec<_> = picked
@@ -248,8 +266,13 @@ impl ImportDialog {
         let c = &row.candidate;
         let name = SharedString::from(c.profile.name.clone());
         // A "SAME" host only works in the web version; such rows cannot be imported.
-        let locked =
-            row.imported || self.task.is_some() || c.notes.contains(&ImportNote::SkippedSameHost);
+        // "SAME" hosts only work in the web version, and an invalid node would bypass the
+        // connect dialog's host check: such rows cannot be imported.
+        let locked = row.imported
+            || self.task.is_some()
+            || c.notes
+                .iter()
+                .any(|n| matches!(n, ImportNote::SkippedSameHost | ImportNote::InvalidNode));
         let nodes = c
             .profile
             .nodes
@@ -379,6 +402,14 @@ impl Render for ImportDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let count = self.pending().len();
         let busy = self.task.is_some();
+        // While connections.json is unreadable nothing would be written, so nothing is imported.
+        let blocked = self
+            .state
+            .read(cx)
+            .load_error
+            .clone()
+            .filter(|_| !self.rows.is_empty())
+            .map(|e| SharedString::from(t!("import.blocked", error = e).to_string()));
         let rows: Vec<_> = self
             .rows
             .iter()
@@ -403,6 +434,11 @@ impl Render for ImportDialog {
                     .clone()
                     .map(|e| error_line("import.save_error".into(), e, cx)),
             )
+            .children(
+                blocked
+                    .clone()
+                    .map(|e| error_line("import.blocked".into(), e, cx)),
+            )
             .child(
                 h_flex()
                     .justify_end()
@@ -413,6 +449,7 @@ impl Render for ImportDialog {
                             .label(t!("common.cancel").to_string())
                             .children(Kbd::binding_for_action(&Cancel, Some("Dialog"), window))
                             .disabled(busy)
+                            .track_focus(&self.cancel_focus)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .when(!self.rows.is_empty(), |el| {
@@ -421,7 +458,8 @@ impl Render for ImportDialog {
                                 .primary()
                                 .label(submit)
                                 .loading(busy)
-                                .disabled(busy || count == 0)
+                                .disabled(busy || count == 0 || blocked.is_some())
+                                .track_focus(&self.submit_focus)
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.submit(window, cx)),
                                 ),
