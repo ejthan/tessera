@@ -276,3 +276,26 @@ async fn opening_twice_focuses_the_existing_tab(cx: &mut TestAppContext) {
     assert_eq!(panels, 1);
     assert_eq!(*f.backend.lists.lock().unwrap(), 1);
 }
+
+#[gpui_kit::test]
+async fn row_actions_ignore_a_row_the_search_hides(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    act(cx, f.handle, |window, cx| {
+        window.click("collections.row.authors".to_string(), cx);
+    });
+    act(cx, f.handle, |window, cx| {
+        window.press(FIND, cx);
+        window.input("current", cx);
+    });
+    act(cx, f.handle, |window, cx| {
+        assert!(window.try_find("collections.row.authors").is_none());
+        window.press(TOGGLE_FAVORITE, cx);
+    });
+    act(cx, f.handle, |window, cx| window.press("enter", cx));
+    let favorites = f
+        .state
+        .read_with(cx, |s, _| s.profiles[0].favorite_collections.clone());
+    assert!(favorites.is_empty());
+    assert!(f.opened.lock().unwrap().is_empty());
+}

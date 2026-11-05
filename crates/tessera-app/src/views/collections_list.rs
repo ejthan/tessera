@@ -21,7 +21,9 @@ use tessera_client::{Alias, Collection};
 use tessera_core::profile::Node;
 
 use super::overview::grouped;
-use crate::actions::{COLLECTIONS, COLLECTIONS_HEADER, OpenCollectionRow, Refresh, ToggleFavorite};
+use crate::actions::{
+    COLLECTIONS, COLLECTIONS_HEADER, FocusSearch, OpenCollectionRow, Refresh, ToggleFavorite,
+};
 use crate::collections::aliases_of;
 use crate::connection::ConnectionState;
 use crate::state::AppState;
@@ -527,9 +529,17 @@ impl CollectionsList {
         });
     }
 
+    /// The selected collection, only while its row is on screen: a search that hides it
+    /// leaves nothing for the row actions to act on.
+    fn visible_selected(&self, cx: &App) -> Option<String> {
+        let table = self.table.read(cx);
+        let ix = table.selected_row()?;
+        table.delegate().row(ix).map(|r| r.name.clone())
+    }
+
     /// Opens the tab of the selected collection.
     pub fn open_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(name) = self.selected.clone() else {
+        let Some(name) = self.visible_selected(cx) else {
             return;
         };
         let id = self.connection.read(cx).profile.id;
@@ -539,7 +549,7 @@ impl CollectionsList {
 
     /// Stars or unstars the selected collection; a failed save shows under the toolbar.
     pub fn toggle_favorite(&mut self, cx: &mut Context<Self>) {
-        let Some(name) = self.selected.clone() else {
+        let Some(name) = self.visible_selected(cx) else {
             return;
         };
         let id = self.connection.read(cx).profile.id;
@@ -586,6 +596,11 @@ impl CollectionsList {
             .child(
                 div().w(px(320.)).child(
                     Input::new(&self.search)
+                        .suffix(div().children(Kbd::binding_for_action(
+                            &FocusSearch,
+                            Some(COLLECTIONS),
+                            window,
+                        )))
                         .id("collections.search")
                         .aria_label(t!("collections.search").to_string()),
                 ),
