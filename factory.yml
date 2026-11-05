@@ -1,11 +1,11 @@
-# Config for the plant (loopia-plant), which turns specs into reviewed PRs.
-# The sandbox image is .plant/Dockerfile; macOS, Windows, release size and smoke start stay in CI.
+# Config for the factory (loopia-factory), which turns specs into reviewed PRs.
+# The sandbox image is .factory/Dockerfile; macOS, Windows, release size and smoke start stay in CI.
 verify:
   commands:
     - cargo fmt --check
     - cargo clippy --all-targets --locked -- -D warnings
     - cargo test --workspace --locked
-    - bash dev/plant-it.sh
+    - bash dev/factory-it.sh
 evidence:
   kind: cli
 limits:

@@ -1,4 +1,4 @@
-# Sandbox image for the plant (loopia-plant). Based on the plant's default image (node:24-bookworm, the `agent`
+# Sandbox image for the factory (loopia-factory). Based on the factory's default image (node:24-bookworm, the `agent`
 # user aligned to the host UID/GID, Claude Code, ctx7) plus Rust, the GPUI build packages and a typesense-server
 # binary, because the sandbox has no Docker. Never put secrets here.
 FROM node:24-bookworm
@@ -36,7 +36,7 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.99.1 -c rustfmt -c clippy
 ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:$PATH"
 
-# The plant caps sandboxes at 4 GB: fewer parallel rustc jobs and no debug info keep GPUI builds and links below it.
+# The factory caps sandboxes at 4 GB: fewer parallel rustc jobs and no debug info keep GPUI builds and links below it.
 ENV CARGO_BUILD_JOBS=4 \
   CARGO_PROFILE_DEV_DEBUG=0 \
   CARGO_PROFILE_TEST_DEBUG=0

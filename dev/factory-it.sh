@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Live integration tests inside the plant sandbox, which has no Docker: start the
-# typesense-server binary from .plant/Dockerfile on the port the live tests default
+# Live integration tests inside the factory sandbox, which has no Docker: start the
+# typesense-server binary from .factory/Dockerfile on the port the live tests default
 # to, then run them. Locally, use dev/docker-compose.yml instead (docs/building.md).
 set -euo pipefail
 
