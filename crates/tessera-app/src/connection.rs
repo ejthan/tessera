@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{App, Context, Global, SharedString, Task, Window};
+use gpui_kit::{App, Context, EventEmitter, Global, SharedString, Task, Window};
 use rust_i18n::t;
 use secrecy::SecretString;
 use tessera_client::{
@@ -178,6 +178,11 @@ pub struct ConnectionState {
     cache_task: Option<Task<()>>,
 }
 
+/// The schema of the named collection changed on the server; views showing it reload.
+pub struct CollectionChanged(pub String);
+
+impl EventEmitter<CollectionChanged> for ConnectionState {}
+
 impl ConnectionState {
     /// A connection that has not been attempted yet.
     pub fn new(profile: Profile) -> Self {
@@ -310,6 +315,12 @@ impl ConnectionState {
         self.collection_cache = CollectionsCache::default();
         self.cache_task = None;
         self.load_collection_list(cx);
+    }
+
+    /// Reloads the collection list and tells the views of collection `name` to reload.
+    pub fn collection_changed(&mut self, name: String, cx: &mut Context<Self>) {
+        self.invalidate_collections(cx);
+        cx.emit(CollectionChanged(name));
     }
 
     /// Loads the collections through the polling client (`polling`) or the user's client.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! UI tests of the create and clone dialog: form and JSON in sync, validation, the request
-//! body, server errors, clone and the read-only unlock.
+//! UI tests of the schema dialog: form and JSON in sync, validation, the request body, server
+//! errors, clone, edit with review and progress, and the read-only unlock.
 
 // Helpers outside #[test] functions unwrap too; a panic is the test failure we want.
 #![allow(clippy::unwrap_used)]
@@ -9,6 +9,7 @@
 mod common;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
@@ -16,7 +17,7 @@ use serde_json::{Value, json};
 use tessera_app::connection::ConnectionState;
 use tessera_app::state::{AppState, OpenCollection};
 use tessera_app::views::schema_dialog::SchemaDialog;
-use tessera_client::{Collection, Field};
+use tessera_client::{Collection, Field, SchemaChange};
 use tessera_core::profile::Profile;
 use tessera_core::schema::SchemaDraft;
 use uuid::Uuid;
@@ -28,6 +29,7 @@ const SHOW_JSON: &str = key("cmd-2", "ctrl-2");
 const SHOW_FORM: &str = key("cmd-1", "ctrl-1");
 const NEW_COLLECTION: &str = key("cmd-shift-n", "ctrl-shift-n");
 const CLONE: &str = key("cmd-shift-d", "ctrl-shift-d");
+const EDIT_SCHEMA: &str = EDIT;
 
 struct Fixture {
     handle: WindowHandle<Root>,
@@ -93,6 +95,63 @@ impl Fixture {
             .unwrap();
         self.settle(cx);
         dialog
+    }
+
+    /// Opens the edit dialog of `collection`, with `collections` as the server's list.
+    fn edit_of(
+        &self,
+        cx: &mut TestAppContext,
+        collection: Collection,
+        collections: Vec<Collection>,
+    ) -> Entity<SchemaDialog> {
+        *self.backend.data.lock().unwrap() = Some((collections, Vec::new()));
+        cx.update(|cx| self.conn.update(cx, |c, cx| c.invalidate_collections(cx)));
+        self.settle(cx);
+        let (state, conn) = (self.state.clone(), self.conn.clone());
+        let dialog = cx
+            .update_window(self.handle.into(), |_, window, cx| {
+                SchemaDialog::open_edit(state, conn, collection, window, cx)
+            })
+            .unwrap();
+        self.settle(cx);
+        dialog
+    }
+
+    /// Changes the JSON tab's content with `change`.
+    fn edit_json(
+        &self,
+        cx: &mut TestAppContext,
+        dialog: &Entity<SchemaDialog>,
+        change: impl FnOnce(&mut Value),
+    ) {
+        let mut json = self.json(cx, dialog);
+        change(&mut json);
+        self.set_json(cx, dialog, &json.to_string());
+    }
+
+    /// Edits `library()` the way the review tests expect and opens the review.
+    fn review_library_change(&self, cx: &mut TestAppContext) -> Entity<SchemaDialog> {
+        let dialog = self.edit_of(cx, library(), vec![library(), reviews()]);
+        self.edit_json(cx, &dialog, library_change);
+        // The dialog of four fields is taller than the test window; the keys reach it.
+        self.act(cx, |window, cx| window.press(SUBMIT, cx));
+        dialog
+    }
+
+    /// Tabs from Back to Apply and presses Enter there.
+    fn apply(&self, cx: &mut TestAppContext) {
+        self.act(cx, |window, cx| {
+            focus(window, "schema.review.apply", cx);
+            window.press("enter", cx);
+        });
+    }
+
+    fn label_of(&self, cx: &mut TestAppContext, id: &'static str) -> String {
+        self.query(cx, |w| label(w, id))
+    }
+
+    fn updates(&self) -> Vec<(String, Value)> {
+        self.backend.updates.lock().unwrap().clone()
     }
 
     /// Runs `step`, lets its effects run and draws a frame.
@@ -171,6 +230,42 @@ fn books() -> Collection {
         metadata: json!({"value": "x"}).as_object().cloned(),
         ..Default::default()
     }
+}
+
+/// A collection with 1000 documents, a default sorting field, an embedding with a key and
+/// metadata the schema view masks.
+fn library() -> Collection {
+    serde_json::from_value(json!({
+        "name": "books", "num_documents": 1000, "created_at": 1,
+        "default_sorting_field": "year",
+        "fields": [
+            {"name": "title", "type": "string", "facet": false, "index": true, "optional": false},
+            {"name": "author", "type": "string", "facet": true, "index": true, "optional": false},
+            {"name": "year", "type": "int32", "facet": false, "index": true, "optional": false},
+            {"name": "embedding", "type": "float[]", "embed": {"from": ["title"],
+                "model_config": {"model_name": "openai/text-embedding-3-small",
+                "api_key": "sk-secret-1"}}}
+        ],
+        "metadata": {"value": "x"}
+    }))
+    .unwrap()
+}
+
+/// A collection whose field references `books.author`.
+fn reviews() -> Collection {
+    serde_json::from_value(json!({
+        "name": "reviews", "num_documents": 5, "created_at": 1,
+        "fields": [{"name": "book_author", "type": "string", "reference": "books.author"}]
+    }))
+    .unwrap()
+}
+
+/// Facet on for title, author dropped, pages added.
+fn library_change(json: &mut Value) {
+    let fields = json["fields"].as_array_mut().unwrap();
+    fields[0]["facet"] = json!(true);
+    fields.retain(|f| f["name"] != "author");
+    fields.push(json!({"name": "pages", "type": "int32"}));
 }
 
 #[gpui_kit::test]
@@ -477,4 +572,305 @@ async fn create_without_connection_says_so(cx: &mut TestAppContext) {
         assert_eq!(w.find("schema.server_error").label(), Some("Not connected"))
     });
     assert!(f.creates().is_empty());
+}
+
+#[gpui_kit::test]
+async fn edit_locks_name_and_fixed_options(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = f.edit_of(cx, books(), vec![books()]);
+    let before = f.json(cx, &dialog);
+    // The fixed inputs take no focus, and the fixed checkbox no click.
+    f.act(cx, |window, cx| {
+        for id in [
+            "schema.name",
+            "schema.token_separators",
+            "schema.symbols_to_index",
+        ] {
+            window.click(id, cx);
+            assert_ne!(window.find(id).focused(), Some(true), "{id}");
+        }
+        window.click("schema.nested", cx);
+    });
+    f.query(cx, |w| {
+        assert_eq!(w.find("schema.name").value(), Some("books"));
+        assert_eq!(w.find("schema.token_separators").value(), Some(""));
+        assert_eq!(w.find("schema.submit").label(), Some("Review changes…"));
+        // The embedding key never shows, and the unchanged field needs none.
+        assert!(w.try_find("schema.field.1.secret").is_none());
+    });
+    assert_eq!(f.json(cx, &dialog), before);
+    assert!(!before.to_string().contains("sk-secret-1"));
+    // A fixed option changed in the JSON tab: named, and Review stays off.
+    f.edit_json(cx, &dialog, |j| {
+        j["token_separators"] = json!(["-"]);
+        j["fields"][0]["facet"] = json!(true);
+    });
+    let summary = f.label_of(cx, "schema.issues");
+    assert!(
+        summary.contains("Token separators cannot be changed after the collection is created."),
+        "{summary}"
+    );
+    assert!(f.submit_disabled(cx));
+    f.edit_json(cx, &dialog, |j| {
+        j.as_object_mut().unwrap().remove("token_separators");
+        j["name"] = json!("novels");
+    });
+    let summary = f.label_of(cx, "schema.issues");
+    assert!(
+        summary.contains("Collection name cannot be changed"),
+        "{summary}"
+    );
+    assert!(f.submit_disabled(cx));
+    f.edit_json(cx, &dialog, |j| j["name"] = json!("books"));
+    assert!(!f.submit_disabled(cx));
+}
+
+#[gpui_kit::test]
+async fn review_lists_changes_and_consequences(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = f.review_library_change(cx);
+    let review = f.label_of(cx, "schema.review");
+    for part in [
+        "pages",
+        "author",
+        "title",
+        "Typesense rewrites all 1,000 documents of books.",
+        "reviews.book_author",
+    ] {
+        assert!(review.contains(part), "{part} missing in {review}");
+    }
+    f.query(cx, |w| {
+        assert!(w.try_find("schema.review.added.pages").is_some());
+        assert!(w.try_find("schema.review.dropped.author").is_some());
+        assert!(w.try_find("schema.review.changed.title").is_some());
+    });
+    let body: Value =
+        serde_json::from_str(&cx.update(|cx| dialog.read(cx).review_body(cx).unwrap())).unwrap();
+    let fields = body["fields"].as_array().unwrap();
+    assert!(fields.contains(&json!({"name": "author", "drop": true})));
+    assert!(fields.contains(&json!({"name": "title", "drop": true})));
+    assert!(
+        fields
+            .iter()
+            .any(|f| f["name"] == "title" && f["facet"] == true)
+    );
+    assert!(fields.iter().any(|f| f["name"] == "pages"));
+    // Unchanged fields and options never travel, so the masked key does not either.
+    assert!(!body.to_string().contains("embedding"), "{body}");
+    assert_eq!(body.as_object().unwrap().len(), 1, "{body}");
+}
+
+#[gpui_kit::test]
+async fn review_focus_is_on_back(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = f.review_library_change(cx);
+    f.query(cx, |w| {
+        assert_eq!(w.find("schema.review.back").focused(), Some(true));
+        assert_ne!(w.find("schema.review.apply").focused(), Some(true));
+    });
+    // Enter on Back goes back to the draft as it was.
+    f.act(cx, |window, cx| window.press("enter", cx));
+    f.query(cx, |w| assert!(w.try_find("schema.review").is_none()));
+    assert!(f.updates().is_empty());
+    let json = f.json(cx, &dialog);
+    assert!(
+        json["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["name"] == "pages")
+    );
+}
+
+#[gpui_kit::test]
+async fn empty_diff_disables_review(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = f.edit_of(cx, library(), vec![library()]);
+    assert!(f.submit_disabled(cx));
+    f.act(cx, |window, cx| window.press(SUBMIT, cx));
+    f.query(cx, |w| assert!(w.try_find("schema.review").is_none()));
+    // A change and its undo: nothing to send again.
+    f.edit_json(cx, &dialog, |j| j["fields"][0]["facet"] = json!(true));
+    assert!(!f.submit_disabled(cx));
+    f.edit_json(cx, &dialog, |j| j["fields"][0]["facet"] = json!(false));
+    assert!(f.submit_disabled(cx));
+}
+
+#[gpui_kit::test]
+async fn changed_embedding_needs_the_key_again(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = f.edit_of(cx, library(), vec![library()]);
+    f.edit_json(cx, &dialog, |j| {
+        j["fields"][3]["embed"]["model_config"]["model_name"] = json!("openai/other")
+    });
+    f.query(cx, |w| {
+        assert_eq!(
+            w.find("schema.field.3.secret").label(),
+            Some("Enter the key for the embedding model again")
+        )
+    });
+    assert!(f.submit_disabled(cx));
+    f.edit_json(cx, &dialog, |j| {
+        j["fields"][3]["embed"]["model_config"]["api_key"] = json!("sk-new")
+    });
+    assert!(!f.submit_disabled(cx));
+    // Metadata edited around a masked value would send the mask.
+    f.edit_json(cx, &dialog, |j| j["metadata"]["other"] = json!(1));
+    let summary = f.label_of(cx, "schema.issues");
+    assert!(summary.contains("masked value"), "{summary}");
+    assert!(f.submit_disabled(cx));
+}
+
+#[gpui_kit::test]
+async fn apply_sends_patch_body(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let id = f.profile.id;
+    cx.update(|cx| {
+        f.state
+            .update(cx, |s, cx| s.open_collection(id, "books".into(), cx))
+    });
+    wait_for_element(cx, f.handle, "schema.edit".into(), true).await;
+    f.query(cx, |w| {
+        let edit = w.find("schema.edit");
+        assert!(format!("{edit:?}").contains("Edit schema…"), "{edit:?}");
+    });
+    let gets = f.backend.gets.lock().unwrap().len();
+    let lists = *f.backend.lists.lock().unwrap();
+    f.act(cx, |window, cx| window.click("schema.edit", cx));
+    f.act(cx, |window, cx| window.click("schema.add_field", cx));
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.2.name", "pages", cx)
+    });
+    // In the last row ⌘↩ adds a field; from the JSON tab it reviews.
+    f.act(cx, |window, cx| window.press(SHOW_JSON, cx));
+    f.act(cx, |window, cx| window.press(SUBMIT, cx));
+    f.apply(cx);
+    wait_for_element(cx, f.handle, "schema.review".into(), false).await;
+    wait_for_element(cx, f.handle, "schema.progress".into(), false).await;
+    let updates = f.updates();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].0, "books");
+    assert_eq!(
+        updates[0].1,
+        json!({"fields": [{"name": "pages", "type": "string"}]})
+    );
+    f.settle(cx);
+    assert!(*f.backend.lists.lock().unwrap() > lists, "the list reloads");
+    assert!(
+        f.backend.gets.lock().unwrap().len() > gets,
+        "the schema tab reloads"
+    );
+}
+
+#[gpui_kit::test]
+async fn progress_shows_schema_change_counts(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    *f.backend.schema_changes.lock().unwrap() = vec![SchemaChange {
+        collection: "books".into(),
+        validated_docs: 500,
+        altered_docs: 200,
+    }];
+    let release = f.backend.hold_update();
+    f.review_library_change(cx);
+    f.apply(cx);
+    wait_for_label(cx, f.handle, "schema.progress".into(), "Validated 500").await;
+    let progress = f.label_of(cx, "schema.progress");
+    assert!(
+        progress.contains("Validated 500, altered 200 of 1,000 documents"),
+        "{progress}"
+    );
+    // Polled every second while the change runs.
+    let calls = *f.backend.schema_change_calls.lock().unwrap();
+    cx.executor().advance_clock(Duration::from_secs(1));
+    f.settle(cx);
+    assert!(*f.backend.schema_change_calls.lock().unwrap() > calls);
+    // The change ends: the dialog closes and the poll stops.
+    release.send(()).unwrap();
+    wait_for_element(cx, f.handle, "schema.progress".into(), false).await;
+    let calls = *f.backend.schema_change_calls.lock().unwrap();
+    cx.executor().advance_clock(Duration::from_secs(3));
+    f.settle(cx);
+    assert_eq!(*f.backend.schema_change_calls.lock().unwrap(), calls);
+}
+
+#[gpui_kit::test]
+async fn stop_waiting_closes_and_says_server_continues(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let release = f.backend.hold_update();
+    f.review_library_change(cx);
+    f.apply(cx);
+    wait_for_element(cx, f.handle, "schema.progress".into(), true).await;
+    let note = f.label_of(cx, "schema.progress.note");
+    assert!(note.contains("The server keeps going"), "{note}");
+    assert!(note.contains("reloads the collection"), "{note}");
+    f.act(cx, |window, cx| window.click("schema.stop_waiting", cx));
+    wait_for_element(cx, f.handle, "schema.progress".into(), false).await;
+    // The poll stops with the dialog.
+    let calls = *f.backend.schema_change_calls.lock().unwrap();
+    cx.executor().advance_clock(Duration::from_secs(3));
+    f.settle(cx);
+    assert_eq!(*f.backend.schema_change_calls.lock().unwrap(), calls);
+    // When the server is done, the collection reloads.
+    let lists = *f.backend.lists.lock().unwrap();
+    release.send(()).unwrap();
+    f.settle(cx);
+    assert!(
+        *f.backend.lists.lock().unwrap() > lists,
+        "the list reloads later"
+    );
+}
+
+#[gpui_kit::test]
+async fn server_error_returns_to_review_with_message(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let message = "Field `pages` cannot be added: some documents have a string there.";
+    *f.backend.update_error.lock().unwrap() = Some((400, message.into()));
+    f.review_library_change(cx);
+    f.apply(cx);
+    wait_for_element(cx, f.handle, "schema.server_error".into(), true).await;
+    f.query(cx, |w| {
+        let shown = w
+            .find("schema.server_error")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(shown.contains(message), "{shown}");
+        assert!(w.try_find("schema.review").is_some());
+        assert!(w.try_find("schema.progress").is_none());
+    });
+}
+
+#[gpui_kit::test]
+async fn edit_on_read_only_asks_for_unlock(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, true).await;
+    f.review_library_change(cx);
+    f.apply(cx);
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+    assert!(f.updates().is_empty());
+    let name = f.profile.name.clone();
+    f.act(cx, |window, cx| {
+        window.click("danger.input".to_string(), cx);
+        window.input(&name, cx);
+    });
+    f.act(cx, |window, cx| window.click("danger.ok".to_string(), cx));
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    f.settle(cx);
+    assert_eq!(f.updates().len(), 1);
+}
+
+#[gpui_kit::test]
+async fn edit_shortcut_opens_edit_from_the_list(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    f.act(cx, |window, cx| {
+        window.click(format!("sidebar.{}.collections", f.profile.id), cx)
+    });
+    wait_for_element(cx, f.handle, "collections.row.books".into(), true).await;
+    f.act(cx, |window, cx| {
+        window.click("collections.row.books", cx);
+        window.press(EDIT_SCHEMA, cx);
+    });
+    f.query(cx, |w| {
+        assert_eq!(w.find("schema.name").value(), Some("books"));
+        assert_eq!(w.find("schema.submit").label(), Some("Review changes…"));
+    });
 }

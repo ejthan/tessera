@@ -23,9 +23,9 @@ use tessera_widgets::JsonEditor;
 use super::collections_list::created_text;
 use super::overview::grouped;
 use super::schema_dialog::SchemaDialog;
-use crate::actions::{COLLECTION, CloneCollection, Refresh};
+use crate::actions::{COLLECTION, CloneCollection, EditSchema, Refresh};
 use crate::collections::{CollectionsBackendGlobal, aliases_of};
-use crate::connection::{ConnectionState, error_text};
+use crate::connection::{CollectionChanged, ConnectionState, error_text};
 use crate::state::AppState;
 
 /// The attribute columns every field table has, in the order of the spec.
@@ -186,6 +186,7 @@ pub struct SchemaView {
     task: Option<Task<()>>,
     copy_reset: Option<Task<()>>,
     _observe: gpui_kit::Subscription,
+    _changed: gpui_kit::Subscription,
 }
 
 impl SchemaView {
@@ -213,8 +214,18 @@ impl SchemaView {
             .row_header(false)
         });
         let editor = cx.new(|cx| JsonEditor::new("", true, window, cx));
+        let changed = cx.subscribe_in(
+            &connection,
+            window,
+            |this, _, CollectionChanged(name): &CollectionChanged, window, cx| {
+                if *name == this.name {
+                    this.reload(false, window, cx);
+                }
+            },
+        );
         let mut this = Self {
             _observe: cx.observe(&connection, |_, _, cx| cx.notify()),
+            _changed: changed,
             state,
             connection,
             name,
@@ -311,6 +322,20 @@ impl SchemaView {
         }
     }
 
+    /// Opens the edit dialog for the loaded collection; the dialog masks it.
+    pub fn edit_schema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(loaded) = &self.loaded {
+            let collection = loaded.collection.clone();
+            SchemaDialog::open_edit(
+                self.state.clone(),
+                self.connection.clone(),
+                collection,
+                window,
+                cx,
+            );
+        }
+    }
+
     /// Puts the masked JSON on the clipboard and says "Copied" for a moment.
     fn copy_json(&mut self, cx: &mut Context<Self>) {
         let Some(loaded) = &self.loaded else {
@@ -370,6 +395,18 @@ impl SchemaView {
                     .child(text)
             }))
             .child(div().flex_1())
+            .child(
+                Button::new("schema.edit")
+                    .outline()
+                    .small()
+                    .label(t!("collections.edit_schema").to_string())
+                    .children(Kbd::binding_for_action(
+                        &EditSchema,
+                        Some(COLLECTION),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.edit_schema(window, cx))),
+            )
             .child(
                 Button::new("schema.clone")
                     .outline()

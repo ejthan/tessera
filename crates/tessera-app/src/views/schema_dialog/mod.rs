@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The create and clone dialog (design §7.6): a Form | JSON switch over one draft, kept in
-//! sync both ways ([`sync`]), validation, and Create, which sends exactly the JSON tab's
-//! content once the connection allows writes.
+//! The schema dialog. Create and clone (design §7.6): a Form | JSON switch over one draft,
+//! kept in sync both ways ([`sync`]), validation, and Create, which sends exactly the JSON
+//! tab's content once the connection allows writes. Edit (§7.7, [`review`]): the same draft
+//! with the fixed parts read-only, then a review of the diff, then progress while it applies.
 
 mod form;
+mod review;
 mod sync;
 
 use std::cell::Cell;
@@ -24,7 +26,7 @@ use gpui_kit::{
     prelude::*, px,
 };
 use rust_i18n::t;
-use tessera_client::Collection;
+use tessera_client::{Collection, SchemaChange};
 use tessera_core::schema::{
     DraftError, FieldDraft, FieldType, Issue, IssuePath, SchemaDraft, Severity, has_errors,
 };
@@ -47,11 +49,29 @@ enum Tab {
     Json,
 }
 
+/// What the dialog does with the draft.
+enum Mode {
+    Create,
+    /// Changes this collection, masked as the schema view shows it (design §5.4): secrets
+    /// never show, and the diff against it never sends an unchanged `embed`.
+    Edit(Box<Collection>),
+}
+
+/// Where an edit stands; create and clone stay at `Draft`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Draft,
+    Review,
+    Progress,
+}
+
 /// The dialog's state; lives while the dialog is open. Closing it drops a running create.
 pub struct SchemaDialog {
     state: Entity<AppState>,
     connection: Entity<ConnectionState>,
     focus_handle: FocusHandle,
+    mode: Mode,
+    step: Step,
     tab: Tab,
     /// The last draft the JSON parsed to; the form shows it.
     draft: SchemaDraft,
@@ -63,11 +83,25 @@ pub struct SchemaDialog {
     /// refill the form from.
     syncing: usize,
     issues: Vec<Issue>,
-    /// Fields whose embedding credentials the clone blanked (design §5.4).
+    /// Fields whose embedding credentials the clone blanked, or whose changed embedding
+    /// still holds the mask in edit mode (design §5.4).
     blanked: Vec<String>,
+    /// Edit mode: why the draft cannot be reviewed beyond validation, as summary lines.
+    edit_problems: Vec<String>,
+    /// Edit mode: the draft changes nothing the server would take.
+    unchanged: bool,
+    /// The diff and its PATCH body while reviewing.
+    review: Option<review::Review>,
+    /// The last counts `schema_changes` gave for this collection.
+    progress: Option<SchemaChange>,
+    /// Back in the review, "Stop waiting" in the progress; focus starts there.
+    safe_focus: FocusHandle,
+    apply_focus: FocusHandle,
     server_error: Option<SharedString>,
     busy: bool,
     task: Option<Task<()>>,
+    /// Polls `schema_changes` while a PATCH runs; dropped with the dialog.
+    poll: Option<Task<()>>,
     _subscription: Subscription,
 }
 
@@ -84,7 +118,16 @@ impl SchemaDialog {
             ..Default::default()
         };
         let title = t!("schema.title_create").to_string();
-        Self::open(state, connection, title, draft, Vec::new(), window, cx)
+        Self::open(
+            state,
+            connection,
+            title,
+            Mode::Create,
+            draft,
+            Vec::new(),
+            window,
+            cx,
+        )
     }
 
     /// Opens the dialog filled from `source`, named "{name}_copy" (selected), with the
@@ -108,31 +151,73 @@ impl SchemaDialog {
             .collect();
         draft.name = format!("{}_copy", source.name);
         let title = t!("schema.title_clone", name = source.name).to_string();
-        let view = Self::open(state, connection, title, draft, blanked, window, cx);
+        let view = Self::open(
+            state,
+            connection,
+            title,
+            Mode::Create,
+            draft,
+            blanked,
+            window,
+            cx,
+        );
         let name = view.read(cx).form.opt(Opt::Name).clone();
         name.update(cx, |n, cx| n.select_all(window, cx));
         view
     }
 
+    /// Opens the dialog to change `collection`'s schema. It masks the collection first, so
+    /// it may come unmasked from the list's cache.
+    pub fn open_edit(
+        state: Entity<AppState>,
+        connection: Entity<ConnectionState>,
+        collection: Collection,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let old = review::masked(collection);
+        let draft = SchemaDraft::from_collection(&old);
+        let title = t!("schema.title_edit", name = old.name).to_string();
+        Self::open(
+            state,
+            connection,
+            title,
+            Mode::Edit(Box::new(old)),
+            draft,
+            Vec::new(),
+            window,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn open(
         state: Entity<AppState>,
         connection: Entity<ConnectionState>,
         title: String,
+        mode: Mode,
         draft: SchemaDraft,
         blanked: Vec<String>,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
         let profile = connection.read(cx).profile.clone();
-        let view = cx.new(|cx| Self::new(state, connection, draft, blanked, window, cx));
-        let name = view.read(cx).form.opt(Opt::Name).clone();
+        let view = cx.new(|cx| Self::new(state, connection, mode, draft, blanked, window, cx));
+        let d = view.read(cx);
+        // The name is fixed in edit mode; start in the first field there.
+        let first = match (&d.mode, d.form.rows.first()) {
+            (Mode::Edit(_), Some(row)) => row.input(Text::Name),
+            _ => d.form.opt(Opt::Name),
+        }
+        .clone();
         let first_build = Cell::new(true);
         let dialog_view = view.clone();
         window.open_dialog(cx, move |dialog, window, cx| {
             if first_build.replace(false) {
-                name.focus_handle(cx).focus(window, cx);
+                first.focus_handle(cx).focus(window, cx);
             }
             let busy = dialog_view.clone();
+            let enter = dialog_view.clone();
             dialog
                 .title(
                     h_flex()
@@ -148,8 +233,12 @@ impl SchemaDialog {
                         .child(env_badge::render(&profile.environment, cx)),
                 )
                 .w(px(WIDTH))
-                // Enter would close the dialog; Create is ⌘↩ / Ctrl+↩ instead.
-                .on_ok(|_, _, _| false)
+                // Enter would close the dialog; Create is ⌘↩ / Ctrl+↩ instead. In the review,
+                // Enter activates the focused button.
+                .on_ok(move |_, window, cx| {
+                    enter.update(cx, |d, cx| d.press_focused(window, cx));
+                    false
+                })
                 // A create in flight finishes first, so its result lands in this dialog.
                 .on_cancel(move |_, _, cx| !busy.read(cx).busy)
                 .child(dialog_view.clone())
@@ -160,6 +249,7 @@ impl SchemaDialog {
     fn new(
         state: Entity<AppState>,
         connection: Entity<ConnectionState>,
+        mode: Mode,
         draft: SchemaDraft,
         blanked: Vec<String>,
         window: &mut Window,
@@ -174,6 +264,8 @@ impl SchemaDialog {
             state,
             connection,
             focus_handle: cx.focus_handle(),
+            mode,
+            step: Step::Draft,
             tab: Tab::Form,
             form: Form::new(&draft, window, cx),
             draft,
@@ -182,9 +274,16 @@ impl SchemaDialog {
             syncing: 0,
             issues: Vec::new(),
             blanked,
+            edit_problems: Vec::new(),
+            unchanged: false,
+            review: None,
+            progress: None,
+            safe_focus: cx.focus_handle(),
+            apply_focus: cx.focus_handle(),
             server_error: None,
             busy: false,
             task: None,
+            poll: None,
             _subscription: subscription,
         };
         this.refresh(window, cx);
@@ -204,6 +303,11 @@ impl SchemaDialog {
     /// The JSON does not parse into a draft, so the form is read-only.
     fn locked(&self) -> bool {
         self.json_error.is_some()
+    }
+
+    /// The dialog changes an existing collection.
+    fn editing(&self) -> bool {
+        matches!(self.mode, Mode::Edit(_))
     }
 
     /// Form inputs whose text the draft could not take, as summary lines.
@@ -241,13 +345,20 @@ impl SchemaDialog {
     }
 
     fn can_submit(&self, cx: &App) -> bool {
+        let edit_ok = !self.editing()
+            || (self.edit_problems.is_empty() && self.blanked.is_empty() && !self.unchanged);
         !self.busy
+            && self.step == Step::Draft
             && !self.locked()
             && !has_errors(&self.issues)
             && self.form_problems(cx).is_empty()
+            && edit_ok
     }
 
     fn show_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.step != Step::Draft {
+            return;
+        }
         self.tab = tab;
         // The control that had focus may be gone with the other tab; keep it in the dialog.
         match tab {
@@ -266,10 +377,14 @@ impl SchemaDialog {
         self.json.update(cx, |e, cx| e.jump_to_error(window, cx));
     }
 
-    /// Create: asks for the unlock on a read-only connection first, then sends.
+    /// Create: asks for the unlock on a read-only connection first, then sends. Edit: shows
+    /// the review.
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_submit(cx) {
             return;
+        }
+        if self.editing() {
+            return self.show_review(window, cx);
         }
         let this = cx.entity().downgrade();
         self.connection.update(cx, |c, cx| {
@@ -376,6 +491,12 @@ impl SchemaDialog {
         lines.extend(
             self.form_problems(cx)
                 .into_iter()
+                .chain(
+                    self.edit_problems
+                        .iter()
+                        .filter(|_| !self.locked())
+                        .cloned(),
+                )
                 .map(|l| (l, theme.danger)),
         );
         if lines.is_empty() {
@@ -396,6 +517,28 @@ impl SchemaDialog {
 
 impl Render for SchemaDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let content = match self.step {
+            Step::Draft => self.render_draft(window, cx).into_any_element(),
+            Step::Review => self.render_review(cx).into_any_element(),
+            Step::Progress => self.render_progress(cx).into_any_element(),
+        };
+        v_flex()
+            .key_context(SCHEMA_DIALOG)
+            .track_focus(&self.focus_handle)
+            .on_action(
+                cx.listener(|this, _: &ShowForm, window, cx| this.show_tab(Tab::Form, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ShowJson, window, cx| this.show_tab(Tab::Json, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &AddField, window, cx| this.add_field(window, cx)))
+            .on_action(cx.listener(|this, _: &SubmitSchema, window, cx| this.submit(window, cx)))
+            .child(content)
+    }
+}
+
+impl SchemaDialog {
+    fn render_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let kbd = |action: &dyn gpui_kit::Action| {
             Kbd::binding_for_action(action, Some(SCHEMA_DIALOG), window)
         };
@@ -425,17 +568,12 @@ impl Render for SchemaDialog {
             Tab::Json => self.render_json(cx).into_any_element(),
         };
         let danger = cx.theme().danger;
+        let submit_label = if self.editing() {
+            t!("schema.review_changes")
+        } else {
+            t!("schema.create")
+        };
         v_flex()
-            .key_context(SCHEMA_DIALOG)
-            .track_focus(&self.focus_handle)
-            .on_action(
-                cx.listener(|this, _: &ShowForm, window, cx| this.show_tab(Tab::Form, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &ShowJson, window, cx| this.show_tab(Tab::Json, window, cx)),
-            )
-            .on_action(cx.listener(|this, _: &AddField, window, cx| this.add_field(window, cx)))
-            .on_action(cx.listener(|this, _: &SubmitSchema, window, cx| this.submit(window, cx)))
             .gap_3()
             .child(tabs)
             .child(body)
@@ -459,7 +597,7 @@ impl Render for SchemaDialog {
                     .child(
                         Button::new("schema.submit")
                             .primary()
-                            .label(t!("schema.create").to_string())
+                            .label(submit_label.to_string())
                             .children(kbd(&SubmitSchema))
                             .loading(self.busy)
                             .disabled(!self.can_submit(cx))

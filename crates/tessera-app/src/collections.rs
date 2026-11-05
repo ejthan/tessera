@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use gpui_kit::{Global, SharedString};
 use serde_json::Value;
-use tessera_client::{Alias, Client, Collection, Error};
+use tessera_client::{Alias, Client, Collection, Error, SchemaChange};
 use tokio::runtime::Handle;
 
 use crate::runtime::AbortOnDrop;
@@ -30,6 +30,11 @@ pub trait CollectionsBackend: Send + Sync {
     fn get(&self, client: Client, name: String) -> BoxFuture<Result<Collection, Error>>;
     /// Creates a collection from `schema`, the request body as is.
     fn create(&self, client: Client, schema: Value) -> BoxFuture<Result<Collection, Error>>;
+    /// Changes the schema of collection `name` with `patch`, the PATCH body as is.
+    fn update(&self, client: Client, name: String, patch: Value) -> BoxFuture<Result<(), Error>>;
+    /// The schema changes in progress, asked of the client's active node: the node a PATCH
+    /// from the same client went to.
+    fn schema_changes(&self, client: Client) -> BoxFuture<Result<Vec<SchemaChange>, Error>>;
 }
 
 /// The backend the views use.
@@ -69,6 +74,14 @@ impl CollectionsBackend for TokioBackend {
 
     fn create(&self, client: Client, schema: Value) -> BoxFuture<Result<Collection, Error>> {
         self.run(async move { client.create_collection(&schema).await })
+    }
+
+    fn update(&self, client: Client, name: String, patch: Value) -> BoxFuture<Result<(), Error>> {
+        self.run(async move { client.update_collection(&name, &patch).await })
+    }
+
+    fn schema_changes(&self, client: Client) -> BoxFuture<Result<Vec<SchemaChange>, Error>> {
+        self.run(async move { client.node(client.active_node()).schema_changes().await })
     }
 }
 

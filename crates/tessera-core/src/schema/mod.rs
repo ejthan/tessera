@@ -205,7 +205,8 @@ impl FieldDraft {
         }
     }
 
-    pub(crate) fn to_value(&self) -> Value {
+    /// The field as a request sends it: only what differs from the server default.
+    pub fn to_value(&self) -> Value {
         let mut m = Map::new();
         m.insert("name".into(), self.name.clone().into());
         m.insert("type".into(), self.r#type.as_str().into());

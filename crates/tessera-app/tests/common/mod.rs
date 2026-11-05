@@ -24,7 +24,7 @@ use tessera_app::state::AppState;
 use tessera_app::views::root::RootView;
 use tessera_client::{
     Alias, Client, ClientOptions, Collection, CollectionSummary, Debug, Error, Health, KeyAccess,
-    Metrics, NodeClient, Origin, Stats,
+    Metrics, NodeClient, Origin, SchemaChange, Stats,
 };
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::secrets::{MemoryStore, SecretStore};
@@ -179,6 +179,25 @@ pub struct FakeData {
     /// `create` fails with this status and Typesense message; `None` creates the collection
     /// (and adds it to `data`).
     pub create_error: Mutex<Option<(u16, String)>>,
+    /// Names and bodies sent to `update`.
+    pub updates: Mutex<Vec<(String, serde_json::Value)>>,
+    /// `update` fails with this status and Typesense message.
+    pub update_error: Mutex<Option<(u16, String)>>,
+    /// When set, the next `update` answers only once the sender fires or is dropped.
+    pub update_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// What `schema_changes` answers.
+    pub schema_changes: Mutex<Vec<SchemaChange>>,
+    /// Number of `schema_changes` calls.
+    pub schema_change_calls: Mutex<usize>,
+}
+
+impl FakeData {
+    /// Holds the next `update` until the returned sender fires or is dropped.
+    pub fn hold_update(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.update_gate.lock().unwrap() = Some(rx);
+        tx
+    }
 }
 
 /// The installed backend; the test keeps the [`FakeData`] handle.
@@ -231,6 +250,39 @@ impl CollectionsBackend for FakeBackend {
             }
         };
         Box::pin(async move { answer })
+    }
+
+    fn update(
+        &self,
+        _: Client,
+        name: String,
+        patch: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0.updates.lock().unwrap().push((name, patch));
+        let answer = match self.0.update_error.lock().unwrap().clone() {
+            Some((status, message)) => Err(Error::Http {
+                status,
+                body: serde_json::json!({ "message": message }).to_string(),
+                message,
+            }),
+            None => Ok(()),
+        };
+        let gate = self.0.update_gate.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.await.ok();
+            }
+            answer
+        })
+    }
+
+    fn schema_changes(
+        &self,
+        _: Client,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<SchemaChange>, Error>> {
+        *self.0.schema_change_calls.lock().unwrap() += 1;
+        let answer = self.0.schema_changes.lock().unwrap().clone();
+        Box::pin(async move { Ok(answer) })
     }
 }
 

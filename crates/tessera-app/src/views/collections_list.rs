@@ -23,7 +23,7 @@ use tessera_core::profile::Node;
 use super::overview::grouped;
 use super::schema_dialog::SchemaDialog;
 use crate::actions::{
-    COLLECTIONS, COLLECTIONS_HEADER, CloneCollection, FocusSearch, NewCollection,
+    COLLECTIONS, COLLECTIONS_HEADER, CloneCollection, EditSchema, FocusSearch, NewCollection,
     OpenCollectionRow, Refresh, ToggleFavorite,
 };
 use crate::collections::aliases_of;
@@ -393,6 +393,10 @@ impl TableDelegate for Rows {
         )
         .menu(toggle.to_string(), Box::new(ToggleFavorite))
         .menu(
+            t!("collections.edit_schema").to_string(),
+            Box::new(EditSchema),
+        )
+        .menu(
             t!("collections.clone").to_string(),
             Box::new(CloneCollection),
         )
@@ -579,21 +583,35 @@ impl CollectionsList {
         SchemaDialog::open_create(self.state.clone(), self.connection.clone(), window, cx);
     }
 
-    /// Opens the clone dialog for the selected collection.
-    pub fn clone_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self.visible_selected(cx) else {
-            return;
-        };
-        let source = self
-            .connection
+    /// The cached collection of the selected row, unmasked.
+    fn selected_collection(&self, cx: &App) -> Option<Collection> {
+        let name = self.visible_selected(cx)?;
+        self.connection
             .read(cx)
             .collection_cache
             .collections
             .iter()
             .flatten()
             .find(|c| c.name == name)
-            .cloned();
-        if let Some(source) = source {
+            .cloned()
+    }
+
+    /// Opens the edit dialog for the selected collection; the dialog masks it.
+    pub fn edit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(collection) = self.selected_collection(cx) {
+            SchemaDialog::open_edit(
+                self.state.clone(),
+                self.connection.clone(),
+                collection,
+                window,
+                cx,
+            );
+        }
+    }
+
+    /// Opens the clone dialog for the selected collection.
+    pub fn clone_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(source) = self.selected_collection(cx) {
             SchemaDialog::open_clone(
                 self.state.clone(),
                 self.connection.clone(),

@@ -31,6 +31,7 @@ gpui_kit::actions!(
         OpenLink,
         LockAgain,
         CloneCollection,
+        EditSchema,
         ShowForm,
         ShowJson,
         AddField,
@@ -181,6 +182,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(NEW_COLLECTION, NewCollection, Some(COLLECTIONS)),
         KeyBinding::new(CLONE, CloneCollection, Some(COLLECTIONS)),
         KeyBinding::new(CLONE, CloneCollection, Some(COLLECTION)),
+        // ⌘E edits a connection only in SIDEBAR_ENTRY, so the two never meet.
+        KeyBinding::new(EDIT, EditSchema, Some(COLLECTIONS)),
+        KeyBinding::new(EDIT, EditSchema, Some(COLLECTION)),
         KeyBinding::new(SHOW_FORM, ShowForm, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SHOW_JSON, ShowJson, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SAVE, SubmitSchema, Some(SCHEMA_DIALOG)),
