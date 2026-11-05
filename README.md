@@ -30,6 +30,10 @@ Flags win over variables. A key is never accepted as a flag value, because it wo
 
 Profiles live in `connections.json` in the app's config directory, without keys. Keys are stored in the OS keychain (service `tessera`).
 
+## Request log
+
+Open the request log with ⌘J / Ctrl+J. It lists every request Tessera sends, with filters for errors, writes, methods, connections and polling traffic. The detail view shows headers and bodies with secrets masked. "Copy as curl" (⌘⇧C / Ctrl+Shift+C) puts a curl command on the clipboard that reads the key from `$TYPESENSE_API_KEY` instead of containing it, so export the variable before pasting it into a shell.
+
 ## Building
 
 ```bash

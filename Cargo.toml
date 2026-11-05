@@ -15,6 +15,8 @@ tessera-core = { path = "crates/tessera-core" }
 anyhow = "=1.0.104"
 directories = "=6.0.0"
 gpui-kit = "=0.9.0"
+insta = "=1.49.0"
+jiff = "=0.2.39"
 keyring = "=4.2.0"
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json", "http2", "charset"] }
 rust-i18n = "=4.2.4"
@@ -23,11 +25,11 @@ rustls = { version = "=0.23.46", default-features = false, features = ["std"] }
 secrecy = "=0.10.3"
 semver = "=1.0.28"
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.154"
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sys-locale = "=0.3.2"
 tempfile = "=3.27.0"
 thiserror = "=2.0.21"
-tokio = { version = "=1.54.1", features = ["rt-multi-thread", "time", "macros"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "time", "macros", "sync"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 url = "=2.5.8"
@@ -46,3 +48,8 @@ strip = true
 # codegen unit cut the macOS binary by 20 % (22.8 → 18.2 MB).
 lto = "fat"
 codegen-units = 1
+# The request log and dock pushed Linux to 43.0 MB. Without unwind tables macOS
+# went from 21.4 to 17.7 MB. A panic already ended the app (GPUI main thread,
+# tokio tasks re-panic in the connector); only tests catch unwinds, and they
+# build with the test profile.
+panic = "abort"

@@ -1,0 +1,6 @@
+---
+source: crates/tessera-core/src/curl.rs
+expression: command(&e)
+---
+curl 'https://ts.example.net:8443/collections/books/documents/search?q=dune&query_by=title' \
+  -H "X-TYPESENSE-API-KEY: $TYPESENSE_API_KEY"

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::{Global, SharedString, Task};
 use rust_i18n::t;
 use secrecy::SecretString;
-use tessera_client::{Client, ClientOptions, Error, KeyAccess, RaftState};
+use tessera_client::{Client, ClientOptions, Error, KeyAccess, RaftState, RequestHook};
 use tessera_core::ServerCapabilities;
 use tessera_core::profile::{InvalidNode, Profile};
 use tokio::runtime::Handle;
@@ -56,8 +56,8 @@ pub struct Connected {
 /// Future returned by a [`Connector`].
 pub type ConnectFuture = Pin<Box<dyn Future<Output = Result<Connected, Error>> + Send>>;
 
-/// Connects to the nodes of a profile with an API key.
-pub type Connector = Arc<dyn Fn(Profile, SecretString) -> ConnectFuture + Send + Sync>;
+/// Connects to the nodes of a profile with an API key; `RequestHook` sees every request.
+pub type Connector = Arc<dyn Fn(Profile, SecretString, RequestHook) -> ConnectFuture + Send + Sync>;
 
 /// The connector the app uses. The app installs [`tokio_connector`]; UI tests install fakes,
 /// because GPUI's test executor does not wait for real network I/O.
@@ -97,12 +97,12 @@ pub fn client_options(profile: &Profile) -> Result<(Vec<String>, ClientOptions),
 /// the key is valid), `GET /collections?limit=1&exclude_fields=fields` and the `GET /keys`
 /// probe. `AppState::connect` checks the nodes first, so `InvalidUrl` here is a fallback.
 pub fn tokio_connector(handle: Handle) -> Connector {
-    Arc::new(move |profile, key| {
+    Arc::new(move |profile, key, hook| {
         let task = AbortOnDrop::from_join_handle(handle.spawn(async move {
             let (nodes, options) =
                 client_options(&profile).map_err(|e| Error::InvalidUrl(e.to_string()))?;
             let nodes: Vec<&str> = nodes.iter().map(String::as_str).collect();
-            let client = Client::new(&nodes, key, options)?;
+            let client = Client::new(&nodes, key, options)?.with_hook(hook);
             let health = client.health().await?;
             let start = Instant::now();
             let debug = client.debug().await?;
@@ -256,7 +256,9 @@ mod tests {
         let addr = server.address();
         let profile = Profile::new("t", vec![node(&addr.ip().to_string(), addr.port())]);
         let connect = tokio_connector(Handle::current());
-        let c = connect(profile, SecretString::from("k")).await.unwrap();
+        let c = connect(profile, SecretString::from("k"), Arc::new(|_| {}))
+            .await
+            .unwrap();
         assert_eq!(c.info.version, "30.2");
         assert_eq!(c.info.state, RaftState::Leader);
         assert!(c.info.healthy);
@@ -269,7 +271,7 @@ mod tests {
     async fn invalid_node_is_a_connect_error() {
         let connect = tokio_connector(Handle::current());
         let profile = Profile::new("t", vec![node("ts.example.com/x", 8108)]);
-        let result = connect(profile, SecretString::from("k")).await;
+        let result = connect(profile, SecretString::from("k"), Arc::new(|_| {})).await;
         assert!(matches!(result, Err(Error::InvalidUrl(_))));
     }
 

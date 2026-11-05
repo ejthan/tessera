@@ -2,6 +2,7 @@
 
 //! App-wide actions and their key bindings.
 
+use gpui_kit::component::dock::{ClosePanel, ToggleZoom};
 use gpui_kit::{App, KeyBinding};
 
 gpui_kit::actions!(
@@ -18,7 +19,9 @@ gpui_kit::actions!(
         ToggleReopenLast,
         TestConnection,
         SaveConnection,
-        ToggleKeyMask
+        ToggleKeyMask,
+        ToggleRequestLog,
+        CopyAsCurl
     ]
 );
 
@@ -58,6 +61,22 @@ const TOGGLE_KEY: &str = "alt-cmd-k";
 #[cfg(not(target_os = "macos"))]
 const TOGGLE_KEY: &str = "ctrl-alt-k";
 #[cfg(target_os = "macos")]
+const TOGGLE_LOG: &str = "cmd-j";
+#[cfg(not(target_os = "macos"))]
+const TOGGLE_LOG: &str = "ctrl-j";
+#[cfg(target_os = "macos")]
+const COPY_CURL: &str = "cmd-shift-c";
+#[cfg(not(target_os = "macos"))]
+const COPY_CURL: &str = "ctrl-shift-c";
+#[cfg(target_os = "macos")]
+const CLOSE_TAB: &str = "cmd-w";
+#[cfg(not(target_os = "macos"))]
+const CLOSE_TAB: &str = "ctrl-w";
+#[cfg(target_os = "macos")]
+const ZOOM: &str = "cmd-shift-enter";
+#[cfg(not(target_os = "macos"))]
+const ZOOM: &str = "ctrl-shift-enter";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
@@ -67,6 +86,12 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(NEW_CONNECTION, NewConnection, None),
         KeyBinding::new(QUIT, Quit, None),
+        KeyBinding::new(TOGGLE_LOG, ToggleRequestLog, None),
+        // Global, so the selected log entry can be copied wherever focus is.
+        KeyBinding::new(COPY_CURL, CopyAsCurl, None),
+        // The dock's own actions, handled by the tab group that holds focus.
+        KeyBinding::new(CLOSE_TAB, ClosePanel, None),
+        KeyBinding::new(ZOOM, ToggleZoom, None),
         KeyBinding::new("enter", ConnectSelected, Some(SIDEBAR_ENTRY)),
         KeyBinding::new(DISCONNECT, DisconnectSelected, Some(SIDEBAR_ENTRY)),
         KeyBinding::new(EDIT, EditConnection, Some(SIDEBAR_ENTRY)),

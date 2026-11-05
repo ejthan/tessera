@@ -3,8 +3,11 @@
 //! Domain logic for Tessera that does not depend on the UI.
 
 pub mod cli;
+pub mod curl;
 pub mod import;
+pub mod log;
 pub mod profile;
+pub mod redact;
 pub mod secrets;
 pub mod store;
 

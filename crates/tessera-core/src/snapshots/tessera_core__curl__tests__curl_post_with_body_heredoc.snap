@@ -1,0 +1,18 @@
+---
+source: crates/tessera-core/src/curl.rs
+expression: command(&e)
+---
+curl -X POST 'http://localhost:8108/collections' \
+  -H "X-TYPESENSE-API-KEY: $TYPESENSE_API_KEY" \
+  -H 'Content-Type: application/json' \
+  --data-binary @- <<'EOF'
+{
+  "name": "books",
+  "fields": [
+    {
+      "name": "title",
+      "type": "string"
+    }
+  ]
+}
+EOF

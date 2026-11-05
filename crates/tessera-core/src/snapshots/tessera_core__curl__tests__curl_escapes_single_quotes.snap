@@ -1,0 +1,7 @@
+---
+source: crates/tessera-core/src/curl.rs
+expression: command(&e)
+---
+curl 'http://localhost:8108/health?q=it%27s' \
+  -H "X-TYPESENSE-API-KEY: $TYPESENSE_API_KEY" \
+  -H 'X-Note: it'\''s'

@@ -52,12 +52,22 @@ pub struct RequestEvent {
 }
 
 /// A request or response body, cut to [`BODY_LIMIT`] bytes on a UTF-8 boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Body {
     /// The (possibly cut) text.
     pub text: Arc<str>,
     /// Length in bytes before cutting.
     pub original_len: usize,
+}
+
+// Lengths only: a body can hold a created key's `value`.
+impl std::fmt::Debug for Body {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Body")
+            .field("len", &self.text.len())
+            .field("original_len", &self.original_len)
+            .finish()
+    }
 }
 
 impl Body {

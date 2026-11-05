@@ -455,6 +455,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn debug_of_a_body_prints_lengths_only() {
+        let body = event::Body::new(r#"{"value":"sk-secret-body"}"#);
+        let shown = format!("{body:?}");
+        assert!(!shown.contains("sk-secret-body"), "{shown}");
+        assert!(shown.contains("original_len: 26"), "{shown}");
+    }
+
+    #[test]
     fn backoff_doubles_and_caps_at_3_2_s() {
         let waits: Vec<u64> = (0..8).map(|n| backoff(n).as_millis() as u64).collect();
         assert_eq!(waits, [100, 200, 400, 800, 1600, 3200, 3200, 3200]);

@@ -275,10 +275,10 @@ EOF
 **PR B** rebuilds the shell on GPUI Kit `DockArea`:
 
 - Left dock: the sidebar panel, now a tree (connection → Overview).
-- Center: tabs. Each tab shows a color dot and a top edge in the profile color, plus the connection name.
+- Center: tabs. Each tab shows a color dot in the profile color, the connection name and the environment badge. Deviation (Task 15 spike): GPUI Kit 0.9 builds the tab chrome itself and offers no per-panel tab styling (`Panel::title_style` only colors the single-panel title bar), so the top edge in the profile color sits on the tab's content, directly under the tab bar. While no tab is open, the center shows the welcome screen.
 - Bottom dock: the request log panel, toggled with ⌘J / Ctrl+J. The shortcut is shown on the toggle.
 - Opening a connection's Overview again focuses the existing tab. Disconnecting closes that connection's tabs.
-- Panels can be moved and closed. The layout is not saved yet.
+- Panels can be moved and closed. The layout is not saved yet. Closing a tab (⌘W / Ctrl+W) does not disconnect; zooming a panel is ⌘⇧↩ / Ctrl+Shift+Enter. The tab menu shows both shortcuts. The active tab is the overview tab selected last, in the center or in an open dock; the sidebar's Overview entry opens the dock its tab was moved into. DockArea keeps the last panel of a region, so the last open tab cannot be closed; disconnecting closes it. The sidebar and the request log cannot be closed, since nothing could bring them back.
 
 ### 7.3 Environment visibility (UX rule 1)
 

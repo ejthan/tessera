@@ -13,11 +13,13 @@ secrecy.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tessera-client.workspace = true
 thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 tempfile.workspace = true
 
 [lints]

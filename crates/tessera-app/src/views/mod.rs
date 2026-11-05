@@ -4,9 +4,12 @@
 
 pub mod confirm;
 pub mod connect_dialog;
+pub mod dock;
 pub mod env_badge;
 pub mod import_dialog;
 pub mod overview;
+pub mod request_detail;
+pub mod request_log;
 pub mod root;
 pub mod sidebar;
 pub mod status_bar;

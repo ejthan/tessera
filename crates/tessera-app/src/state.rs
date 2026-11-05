@@ -9,14 +9,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui_kit::{App, AppContext as _, Context, Entity, Subscription, Task};
+use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use rust_i18n::t;
 use secrecy::{ExposeSecret as _, SecretString};
+use tessera_client::{RequestEvent, RequestHook};
 use tessera_core::cli::Launch;
 use tessera_core::import;
+use tessera_core::log::{LogEntry, RequestLog};
 use tessera_core::profile::Profile;
 use tessera_core::secrets::{SecretError, SecretStore};
 use tessera_core::store::{self, ConnectionsFile, SCHEMA_VERSION, StoreError};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -31,6 +34,10 @@ pub enum SaveError {
     /// The key could not be stored in the secret store.
     Keychain(SecretError),
 }
+
+/// Asks the window to show the overview of a connected profile: open its tab, or focus the
+/// existing one.
+pub struct OpenOverview(pub Uuid);
 
 /// Profiles, keys and open connections of the app.
 pub struct AppState {
@@ -59,6 +66,11 @@ pub struct AppState {
     save_task: Option<Task<()>>,
     /// Waits for `save_task` on quit; registered with the first save.
     on_quit: Option<Subscription>,
+    log: RequestLog,
+    log_tx: UnboundedSender<LogEntry>,
+    /// Taken by [`AppState::spawn_log_drain`].
+    log_rx: Option<UnboundedReceiver<LogEntry>>,
+    log_drain: Option<Task<()>>,
 }
 
 impl AppState {
@@ -75,7 +87,12 @@ impl AppState {
                 (ConnectionsFile::default(), Some(e.to_string()))
             }
         };
+        let (log_tx, log_rx) = unbounded_channel();
         Self {
+            log: RequestLog::default(),
+            log_tx,
+            log_rx: Some(log_rx),
+            log_drain: None,
             profiles: file.profiles,
             last_used: file.last_used,
             reopen_last: file.reopen_last,
@@ -89,6 +106,61 @@ impl AppState {
             save_task: None,
             on_quit: None,
         }
+    }
+
+    /// The request log of all connections.
+    pub fn log(&self) -> &RequestLog {
+        &self.log
+    }
+
+    /// Where request events enter the log. Hooks send here from tokio; tests inject events here.
+    pub fn log_sender(&self) -> UnboundedSender<LogEntry> {
+        self.log_tx.clone()
+    }
+
+    /// A hook that sends the events of `profile`'s requests to the log. Never carries the key.
+    pub fn log_hook(&self, profile: &Profile) -> RequestHook {
+        debug_assert!(
+            self.log_drain.is_some(),
+            "spawn_log_drain must run before connecting"
+        );
+        let tx = self.log_tx.clone();
+        let (connection, connection_name): (Uuid, Arc<str>) =
+            (profile.id, profile.name.as_str().into());
+        Arc::new(move |event: &RequestEvent| {
+            // A closed channel means the app is quitting.
+            tx.send(LogEntry {
+                connection,
+                connection_name: connection_name.clone(),
+                event: event.clone(),
+            })
+            .ok();
+        })
+    }
+
+    /// Starts the task that moves queued events into the log, one `notify` per batch.
+    /// Call once, right after the entity is created: `cx.new(|cx| { s.spawn_log_drain(cx); s })`.
+    pub fn spawn_log_drain(&mut self, cx: &mut Context<Self>) {
+        let Some(mut rx) = self.log_rx.take() else {
+            return;
+        };
+        self.log_drain = Some(cx.spawn(async move |this, cx| {
+            while let Some(first) = rx.recv().await {
+                let mut batch = vec![first];
+                while let Ok(entry) = rx.try_recv() {
+                    batch.push(entry);
+                }
+                if this
+                    .update(cx, |s, cx| {
+                        batch.into_iter().for_each(|e| s.log.push(e));
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
     }
 
     /// Applies the launch mode and returns the profile to connect at startup, if any.
@@ -262,6 +334,7 @@ impl AppState {
             && conn.read(cx).connected.is_some()
         {
             self.selected = Some(id);
+            cx.emit(OpenOverview(id));
             cx.notify();
             return;
         }
@@ -311,6 +384,7 @@ impl AppState {
             blocking(cx, move || secrets.get(id))
         });
         let connect = cx.global::<ConnectorGlobal>().0.clone();
+        let hook = self.log_hook(&profile);
         let weak = conn.downgrade();
         let task = cx.spawn(async move |this, cx| {
             let key = match stored_key {
@@ -322,27 +396,34 @@ impl AppState {
             let missing_key =
                 matches!(&key, Ok(k) if k.as_ref().is_none_or(|k| k.expose_secret().is_empty()));
             let result = match key {
-                Ok(Some(key)) if !key.expose_secret().is_empty() => connect(profile.clone(), key)
-                    .await
-                    .map_err(|e| error_text(&e, &profile)),
+                Ok(Some(key)) if !key.expose_secret().is_empty() => {
+                    connect(profile.clone(), key, hook)
+                        .await
+                        .map_err(|e| error_text(&e, &profile))
+                }
                 Ok(_) => Err(t!("connect.error.no_key").to_string()),
                 Err(e) => Err(t!("connect.error.keychain", detail = e.to_string()).to_string()),
             };
             let ok = result.is_ok();
-            weak.update(cx, |c, cx| {
-                c.connecting = false;
-                c.missing_key = missing_key;
-                match result {
-                    Ok(connected) => c.connected = Some(connected),
-                    Err(text) => c.error = Some(text.into()),
-                }
-                cx.notify();
-            })
-            .ok();
-            if ok && saved {
+            // A connection closed meanwhile gets no tab.
+            let alive = weak
+                .update(cx, |c, cx| {
+                    c.connecting = false;
+                    c.missing_key = missing_key;
+                    match result {
+                        Ok(connected) => c.connected = Some(connected),
+                        Err(text) => c.error = Some(text.into()),
+                    }
+                    cx.notify();
+                })
+                .is_ok();
+            if ok && alive {
                 this.update(cx, |s, cx| {
-                    s.last_used = Some(id);
-                    s.save(cx).detach();
+                    cx.emit(OpenOverview(id));
+                    if saved {
+                        s.last_used = Some(id);
+                        s.save(cx).detach();
+                    }
                 })
                 .ok();
             }
@@ -371,6 +452,7 @@ impl AppState {
         cx.observe(&conn, |_, _, cx| cx.notify()).detach();
         self.connections.push(conn);
         self.selected = Some(id);
+        cx.emit(OpenOverview(id));
         cx.notify();
     }
 
@@ -383,6 +465,8 @@ impl AppState {
         cx.notify();
     }
 }
+
+impl EventEmitter<OpenOverview> for AppState {}
 
 /// Runs a blocking secret-store or file call on tokio's blocking pool.
 fn blocking<T: Send + 'static>(cx: &App, f: impl FnOnce() -> T + Send + 'static) -> JoinHandle<T> {
@@ -470,14 +554,16 @@ mod tests {
         let record = seen.clone();
         let result = Arc::new(result);
         cx.update(|cx| {
-            cx.set_global(ConnectorGlobal(Arc::new(move |profile: Profile, key| {
-                record
-                    .lock()
-                    .unwrap()
-                    .push((profile.name, key.expose_secret().to_string()));
-                let r = result();
-                Box::pin(async move { r })
-            })));
+            cx.set_global(ConnectorGlobal(Arc::new(
+                move |profile: Profile, key, _hook| {
+                    record
+                        .lock()
+                        .unwrap()
+                        .push((profile.name, key.expose_secret().to_string()));
+                    let r = result();
+                    Box::pin(async move { r })
+                },
+            )));
         });
         seen
     }
@@ -488,7 +574,11 @@ mod tests {
         path: Option<std::path::PathBuf>,
         secrets: Arc<MemoryStore>,
     ) -> Entity<AppState> {
-        cx.new(|_| AppState::new(loaded, path, secrets))
+        cx.new(|cx| {
+            let mut s = AppState::new(loaded, path, secrets);
+            s.spawn_log_drain(cx);
+            s
+        })
     }
 
     #[gpui_kit::test]
@@ -559,7 +649,10 @@ mod tests {
             })
             .unwrap()
             .expect("temporary connection opens");
-        let state = cx.new(|_| s);
+        let state = cx.new(|cx| {
+            s.spawn_log_drain(cx);
+            s
+        });
         state.update(cx, |s, cx| s.connect(id, None, cx));
         cx.run_until_parked();
         state.read_with(cx, |s, cx| {
@@ -638,7 +731,10 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        let state = cx.new(|_| s);
+        let state = cx.new(|cx| {
+            s.spawn_log_drain(cx);
+            s
+        });
         state.update(cx, |s, cx| s.connect(id, None, cx));
         cx.run_until_parked();
         state.read_with(cx, |s, cx| {
@@ -727,7 +823,10 @@ mod tests {
             })
             .unwrap()
             .unwrap();
-        let state = cx.new(|_| s);
+        let state = cx.new(|cx| {
+            s.spawn_log_drain(cx);
+            s
+        });
         let attempt = state.update(cx, |s, cx| {
             s.connect(temp_id, None, cx);
             s.connect(saved_id, None, cx);
@@ -754,7 +853,11 @@ mod tests {
             profiles: vec![profile],
             ..Default::default()
         };
-        let state = cx.new(|_| AppState::new(Ok(file), None, Arc::new(NoReads)));
+        let state = cx.new(|cx| {
+            let mut s = AppState::new(Ok(file), None, Arc::new(NoReads));
+            s.spawn_log_drain(cx);
+            s
+        });
         state.update(cx, |s, cx| {
             s.connect(id, Some(SecretString::from("k-new")), cx)
         });
@@ -807,7 +910,11 @@ mod tests {
             profiles: vec![profile],
             ..Default::default()
         };
-        let state = cx.new(|_| AppState::new(Ok(file), None, Arc::new(NoReads)));
+        let state = cx.new(|cx| {
+            let mut s = AppState::new(Ok(file), None, Arc::new(NoReads));
+            s.spawn_log_drain(cx);
+            s
+        });
         state.update(cx, |s, cx| s.connect(id, Some(SecretString::from("k")), cx));
         cx.run_until_parked();
         let error = error_of(&state, id, cx).expect("inline error");
