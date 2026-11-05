@@ -93,7 +93,9 @@ impl Client {
                 request_headers,
                 key_prefix: key_prefix(key),
                 request_body,
-                response_body: text.map(|t| Body::new(t)),
+                response_body: text
+                    .filter(|_| self.keep_response_body)
+                    .map(|t| Body::new(t)),
                 status,
                 duration,
                 size: text.map(|t| t.len() as u64),

@@ -34,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - On read-only connections, every write (create, clone, schema change, truncate, delete) first asks to unlock writes for the session.
 - Create collections from a form or from JSON, kept in sync, with live validation and server errors shown inline (New collection ⌘⇧N / Ctrl+Shift+N). Clone a collection (⌘⇧D / Ctrl+Shift+D) from the list or the schema view; the clone blanks embedding credentials.
 - Unlock writes on a read-only connection by typing the profile name. A "Writes unlocked" banner offers "Lock again" (⌘⇧L / Ctrl+Shift+L); writes lock again on disconnect and the unlock is never saved.
+- Client calls to read documents: a page with filter, sort and excluded fields, counts, facet values, one document by id and a JSONL export. The request log notes when a response body is not kept for document pages.
 
 ### Fixed
 

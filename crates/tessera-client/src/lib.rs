@@ -3,6 +3,7 @@
 //! HTTP client for the Typesense API.
 
 mod collections;
+mod documents;
 mod error;
 mod event;
 mod models;
@@ -15,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 pub use collections::{Alias, Collection, Field, SchemaChange};
+pub use documents::{DocumentQuery, SearchPage};
 pub use error::Error;
 pub use event::{BODY_LIMIT, Body, Origin, RequestEvent, RequestHook};
 pub use models::{CollectionSummary, Debug, Health, KeyAccess, Metrics, RaftState, Stats};
@@ -81,6 +83,7 @@ pub struct Client {
     read_only: Arc<AtomicBool>,
     hook: Option<RequestHook>,
     origin: Origin,
+    keep_response_body: bool,
 }
 
 impl fmt::Debug for Client {
@@ -165,6 +168,7 @@ impl Client {
             read_only: Arc::new(AtomicBool::new(options.read_only)),
             hook: None,
             origin: Origin::User,
+            keep_response_body: true,
         })
     }
 
