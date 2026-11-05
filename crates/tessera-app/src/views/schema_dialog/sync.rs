@@ -8,7 +8,7 @@
 use gpui_kit::component::input::InputState;
 use gpui_kit::{Context, Entity, Window};
 use serde_json::{Map, Value};
-use tessera_core::schema::{FieldDraft, FieldType, SchemaDraft, validate};
+use tessera_core::schema::{FieldDraft, FieldType, SchemaDraft};
 
 use super::SchemaDialog;
 use super::form::FieldRow;
@@ -216,9 +216,10 @@ impl SchemaDialog {
         self.refresh(window, cx);
     }
 
-    /// Validation and the sorting field choices for the current draft.
+    /// Validation (and in edit mode the diff checks) and the sorting field choices for the
+    /// current draft.
     pub(super) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.issues = validate(&self.draft);
+        self.check_draft();
         let sortable = sortable(&self.draft);
         if sortable != self.form.sortable {
             self.form.sortable = sortable.clone();

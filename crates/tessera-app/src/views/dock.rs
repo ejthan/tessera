@@ -23,8 +23,9 @@ use super::schema_view::SchemaView;
 use super::sidebar::Sidebar;
 use super::{env_badge, unlock, welcome};
 use crate::actions::{
-    COLLECTION, COLLECTIONS, CloneCollection, FocusSearch, LockAgain, NewCollection, OVERVIEW,
-    OpenCollectionRow, Refresh, ToggleFavorite, TogglePolling,
+    COLLECTION, COLLECTIONS, CloneCollection, DeleteCollection, EditSchema, FocusSearch, LockAgain,
+    NewCollection, OVERVIEW, OpenCollectionRow, Refresh, ToggleFavorite, TogglePolling,
+    TruncateCollection,
 };
 use crate::connection::ConnectionState;
 use crate::poller::Poller;
@@ -277,6 +278,16 @@ impl Render for CollectionsPanel {
             .on_action(cx.listener(|this, _: &CloneCollection, window, cx| {
                 this.list.update(cx, |l, cx| l.clone_selected(window, cx));
             }))
+            .on_action(cx.listener(|this, _: &EditSchema, window, cx| {
+                this.list.update(cx, |l, cx| l.edit_selected(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &TruncateCollection, window, cx| {
+                this.list
+                    .update(cx, |l, cx| l.truncate_selected(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &DeleteCollection, window, cx| {
+                this.list.update(cx, |l, cx| l.delete_selected(window, cx));
+            }))
             .size_full()
             .border_t_2()
             .border_color(edge)
@@ -374,6 +385,15 @@ impl Render for CollectionPanel {
             .on_action(cx.listener(|this, _: &CloneCollection, window, cx| {
                 this.schema
                     .update(cx, |s, cx| s.clone_collection(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &EditSchema, window, cx| {
+                this.schema.update(cx, |s, cx| s.edit_schema(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &TruncateCollection, window, cx| {
+                this.schema.update(cx, |s, cx| s.truncate(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &DeleteCollection, window, cx| {
+                this.schema.update(cx, |s, cx| s.delete(window, cx));
             }))
             .size_full()
             .border_t_2()

@@ -24,7 +24,7 @@ use tessera_app::state::AppState;
 use tessera_app::views::root::RootView;
 use tessera_client::{
     Alias, Client, ClientOptions, Collection, CollectionSummary, Debug, Error, Health, KeyAccess,
-    Metrics, NodeClient, Origin, Stats,
+    Metrics, NodeClient, Origin, SchemaChange, Stats,
 };
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::secrets::{MemoryStore, SecretStore};
@@ -170,6 +170,8 @@ fn install_poll_fakes(cx: &mut gpui_kit::App) {
 #[derive(Default)]
 pub struct FakeData {
     pub data: Mutex<Option<(Vec<Collection>, Vec<Alias>)>>,
+    /// `list` fails to load the aliases with this status and Typesense message.
+    pub aliases_error: Mutex<Option<(u16, String)>>,
     /// Number of `list` calls.
     pub lists: Mutex<usize>,
     /// Names asked of `get`.
@@ -179,18 +181,85 @@ pub struct FakeData {
     /// `create` fails with this status and Typesense message; `None` creates the collection
     /// (and adds it to `data`).
     pub create_error: Mutex<Option<(u16, String)>>,
+    /// Names and bodies sent to `update`.
+    pub updates: Mutex<Vec<(String, serde_json::Value)>>,
+    /// `update` fails with this status and Typesense message.
+    pub update_error: Mutex<Option<(u16, String)>>,
+    /// When set, the next `update` answers only once the sender fires or is dropped.
+    pub update_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Names sent to `truncate`; it sets the document count to 0 in `data`.
+    pub truncates: Mutex<Vec<String>>,
+    /// Names sent to `delete`; it removes the collection from `data`.
+    pub deletes: Mutex<Vec<String>>,
+    /// `truncate` and `delete` fail with this status and Typesense message.
+    pub danger_error: Mutex<Option<(u16, String)>>,
+    /// When set, the next `truncate` or `delete` answers only once the sender fires or is
+    /// dropped; its effect on `data` happens then.
+    pub danger_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// What `schema_changes` answers.
+    pub schema_changes: Mutex<Vec<SchemaChange>>,
+    /// Number of `schema_changes` calls.
+    pub schema_change_calls: Mutex<usize>,
+    /// Origin of the client of each `schema_changes` call.
+    pub schema_change_origins: Mutex<Vec<Origin>>,
+}
+
+impl FakeData {
+    /// Holds the next `update` until the returned sender fires or is dropped.
+    pub fn hold_update(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.update_gate.lock().unwrap() = Some(rx);
+        tx
+    }
+
+    /// Holds the next `truncate` or `delete` until the returned sender fires or is dropped.
+    pub fn hold_danger(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.danger_gate.lock().unwrap() = Some(rx);
+        tx
+    }
+}
+
+/// Status that the fake errors below turn into [`Error::Timeout`] instead of an HTTP error.
+pub const TIMEOUT: u16 = 0;
+
+/// An HTTP error with `status` and a Typesense message, or a timeout for [`TIMEOUT`].
+pub fn http_error((status, message): (u16, String)) -> Error {
+    if status == TIMEOUT {
+        return Error::Timeout;
+    }
+    Error::Http {
+        status,
+        body: serde_json::json!({ "message": message }).to_string(),
+        message,
+    }
 }
 
 /// The installed backend; the test keeps the [`FakeData`] handle.
 pub struct FakeBackend(pub Arc<FakeData>);
 
+impl FakeBackend {
+    fn danger_answer(&self) -> Result<(), Error> {
+        match self.0.danger_error.lock().unwrap().clone() {
+            Some(e) => Err(http_error(e)),
+            None => Ok(()),
+        }
+    }
+}
+
 impl CollectionsBackend for FakeBackend {
     fn list(
         &self,
         _: Client,
-    ) -> tessera_app::collections::BoxFuture<Result<(Vec<Collection>, Vec<Alias>), Error>> {
+    ) -> tessera_app::collections::BoxFuture<Result<tessera_app::collections::CollectionList, Error>>
+    {
         *self.0.lists.lock().unwrap() += 1;
+        let aliases_error = self.0.aliases_error.lock().unwrap().clone();
         let answer = self.0.data.lock().unwrap().clone().ok_or(Error::Timeout);
+        let answer = answer.map(|(all, aliases)| match aliases_error {
+            Some(e) => (all, Err(http_error(e))),
+            None => (all, Ok(aliases)),
+        });
         Box::pin(async move { answer })
     }
 
@@ -217,11 +286,7 @@ impl CollectionsBackend for FakeBackend {
     ) -> tessera_app::collections::BoxFuture<Result<Collection, Error>> {
         self.0.creates.lock().unwrap().push(schema.clone());
         let answer = match self.0.create_error.lock().unwrap().clone() {
-            Some((status, message)) => Err(Error::Http {
-                status,
-                body: serde_json::json!({ "message": message }).to_string(),
-                message,
-            }),
+            Some(e) => Err(http_error(e)),
             None => {
                 let created: Collection = serde_json::from_value(schema).unwrap();
                 if let Some((all, _)) = self.0.data.lock().unwrap().as_mut() {
@@ -231,6 +296,77 @@ impl CollectionsBackend for FakeBackend {
             }
         };
         Box::pin(async move { answer })
+    }
+
+    fn update(
+        &self,
+        _: Client,
+        name: String,
+        patch: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0.updates.lock().unwrap().push((name, patch));
+        let answer = match self.0.update_error.lock().unwrap().clone() {
+            Some(e) => Err(http_error(e)),
+            None => Ok(()),
+        };
+        let gate = self.0.update_gate.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.await.ok();
+            }
+            answer
+        })
+    }
+
+    fn truncate(
+        &self,
+        _: Client,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<u64, Error>> {
+        self.0.truncates.lock().unwrap().push(name.clone());
+        let answer = self.danger_answer().map(|()| {
+            let mut data = self.0.data.lock().unwrap();
+            let found = data
+                .as_mut()
+                .and_then(|(all, _)| all.iter_mut().find(|c| c.name == name));
+            found.map_or(0, |c| std::mem::take(&mut c.num_documents))
+        });
+        Box::pin(async move { answer })
+    }
+
+    fn delete(
+        &self,
+        _: Client,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0.deletes.lock().unwrap().push(name.clone());
+        let answer = self.danger_answer();
+        let gate = self.0.danger_gate.lock().unwrap().take();
+        let data = self.0.clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.await.ok();
+            }
+            answer.inspect(|()| {
+                if let Some((all, _)) = data.data.lock().unwrap().as_mut() {
+                    all.retain(|c| c.name != name);
+                }
+            })
+        })
+    }
+
+    fn schema_changes(
+        &self,
+        client: Client,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<SchemaChange>, Error>> {
+        *self.0.schema_change_calls.lock().unwrap() += 1;
+        self.0
+            .schema_change_origins
+            .lock()
+            .unwrap()
+            .push(client.origin());
+        let answer = self.0.schema_changes.lock().unwrap().clone();
+        Box::pin(async move { Ok(answer) })
     }
 }
 

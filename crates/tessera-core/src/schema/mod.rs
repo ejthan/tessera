@@ -8,7 +8,9 @@ use tessera_client::Collection;
 /// Credential keys inside `embed.model_config`.
 const SECRET_KEYS: [&str; 4] = ["api_key", "access_token", "refresh_token", "client_secret"];
 
+mod diff;
 mod validate;
+pub use diff::{Consequence, FieldChange, SchemaDiff, diff, diff_with_references};
 pub use validate::{Issue, IssuePath, Severity, has_errors, validate};
 
 /// A Typesense field type. Unknown strings pass through as [`FieldType::Other`].
@@ -203,7 +205,8 @@ impl FieldDraft {
         }
     }
 
-    fn to_value(&self) -> Value {
+    /// The field as a request sends it: only what differs from the server default.
+    pub fn to_value(&self) -> Value {
         let mut m = Map::new();
         m.insert("name".into(), self.name.clone().into());
         m.insert("type".into(), self.r#type.as_str().into());

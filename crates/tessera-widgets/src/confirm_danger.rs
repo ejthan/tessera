@@ -40,6 +40,8 @@ pub struct DangerOptions {
 /// matches and the action button is activated (click, or Enter on the focused button);
 /// Enter anywhere else does nothing. The dialog stays open with the action busy until the
 /// task ends: `Ok` closes it, `Err` shows the text inline (`danger.error`) and re-enables it.
+/// While it runs, "Stop waiting" (`danger.stop_waiting`) closes the dialog; the task keeps
+/// running and its result then closes and shows nothing.
 pub fn open(
     opts: DangerOptions,
     on_confirm: impl Fn(&mut Window, &mut App) -> Task<Result<(), SharedString>> + 'static,
@@ -63,6 +65,7 @@ pub fn open(
         ok_focus: ok_focus.clone(),
         on_confirm: on_confirm.clone(),
         busy: false,
+        stopped: false,
         error: None,
         _watch: cx.subscribe(&input, |_, _, _: &InputEvent, cx| cx.notify()),
     });
@@ -136,6 +139,8 @@ struct Footer {
     ok_focus: FocusHandle,
     on_confirm: Rc<OnConfirm>,
     busy: bool,
+    /// The user stopped waiting and the dialog closed; the task's result is ignored.
+    stopped: bool,
     error: Option<SharedString>,
     _watch: Subscription,
 }
@@ -153,6 +158,9 @@ impl Footer {
             let result = task.await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = false;
+                if this.stopped {
+                    return;
+                }
                 match result {
                     Ok(()) => window.close_dialog(cx),
                     Err(text) => this.error = Some(text),
@@ -164,13 +172,31 @@ impl Footer {
         .detach();
         cx.notify();
     }
+
+    /// Closes the dialog while the task runs; the server keeps going.
+    fn stop_waiting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            self.stopped = true;
+            window.close_dialog(cx);
+        }
+    }
 }
 
 impl Render for Footer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let matches = self.input.read(cx).value() == self.expected;
+        let note = self.busy.then(|| {
+            let text = SharedString::from(t!("danger.stop_note").to_string());
+            div()
+                .id("danger.stop_note")
+                .test_support()
+                .aria_label(text.clone())
+                .text_sm()
+                .child(text)
+        });
         v_flex()
             .gap_2()
+            .children(note)
             .children(self.error.clone().map(|text| {
                 div()
                     .id("danger.error")
@@ -184,6 +210,17 @@ impl Render for Footer {
                 h_flex()
                     .justify_end()
                     .gap_2()
+                    .when(self.busy, |row| {
+                        row.child(
+                            Button::new("danger.stop_waiting")
+                                .label(t!("danger.stop_waiting").to_string())
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.stop_waiting(window, cx)
+                                    }),
+                                ),
+                        )
+                    })
                     .child(
                         Button::new("danger.cancel")
                             .label(t!("common.cancel").to_string())

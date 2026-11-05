@@ -19,7 +19,8 @@ pub(crate) fn collection_path(name: &str, rest: &str) -> String {
 }
 
 /// A collection schema. Attributes this version does not know are kept in `extra`.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+/// `Debug` masks embedding credentials.
+#[derive(Clone, PartialEq, Default, Deserialize, Serialize)]
 pub struct Collection {
     /// Collection name.
     pub name: String,
@@ -58,8 +59,8 @@ pub struct Collection {
     pub extra: Map<String, Value>,
 }
 
-/// One field of a [`Collection`].
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+/// One field of a [`Collection`]. `Debug` masks embedding credentials.
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct Field {
     /// Field name (may be a pattern such as `.*`).
     pub name: String,
@@ -83,6 +84,67 @@ impl Field {
     /// An attribute as sent, if present.
     pub fn attr(&self, name: &str) -> Option<&Value> {
         self.attributes.get(name)
+    }
+}
+
+/// Keys whose values `Debug` masks. Mirrors `tessera_core::redact` (this crate cannot depend
+/// on tessera-core); keep the two lists equal.
+const SECRET_KEYS: [&str; 5] = [
+    "api_key",
+    "value",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+];
+
+/// `map` with the value of every [`SECRET_KEYS`] key masked, at any depth.
+fn masked(map: &Map<String, Value>) -> Value {
+    fn mask(v: &mut Value) {
+        match v {
+            Value::Object(map) => {
+                for (k, child) in map.iter_mut() {
+                    if SECRET_KEYS.contains(&k.as_str()) {
+                        *child = Value::String("••••".into());
+                    } else {
+                        mask(child);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(mask),
+            _ => {}
+        }
+    }
+    let mut v = Value::Object(map.clone());
+    mask(&mut v);
+    v
+}
+
+impl std::fmt::Debug for Collection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Collection")
+            .field("name", &self.name)
+            .field("fields", &self.fields)
+            .field("default_sorting_field", &self.default_sorting_field)
+            .field("enable_nested_fields", &self.enable_nested_fields)
+            .field("symbols_to_index", &self.symbols_to_index)
+            .field("token_separators", &self.token_separators)
+            .field("metadata", &self.metadata.as_ref().map(masked))
+            .field("num_documents", &self.num_documents)
+            .field("created_at", &self.created_at)
+            .field("synonym_sets", &self.synonym_sets)
+            .field("curation_sets", &self.curation_sets)
+            .field("extra", &masked(&self.extra))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Field {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Field")
+            .field("name", &self.name)
+            .field("type", &self.r#type)
+            .field("attributes", &masked(&self.attributes))
+            .finish()
     }
 }
 
@@ -111,4 +173,46 @@ pub struct SchemaChange {
 #[derive(Deserialize)]
 pub(crate) struct AliasList {
     pub aliases: Vec<Alias>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_masks_embedding_credentials() {
+        let collection: Collection = serde_json::from_value(serde_json::json!({
+            "name": "docs",
+            "fields": [{
+                "name": "embedding",
+                "type": "float[]",
+                "embed": {
+                    "from": ["title"],
+                    "model_config": {
+                        "model_name": "openai/text-embedding-3-small",
+                        "api_key": "sk-field-secret",
+                        "access_token": "at-secret",
+                        "refresh_token": "rt-secret",
+                        "client_secret": "cs-secret"
+                    }
+                }
+            }],
+            "metadata": {"nested": [{"value": "meta-secret"}]},
+            "voice_query_model": {"api_key": "extra-secret"}
+        }))
+        .unwrap();
+        let shown = format!("{collection:?}");
+        for secret in [
+            "sk-field-secret",
+            "at-secret",
+            "rt-secret",
+            "cs-secret",
+            "meta-secret",
+            "extra-secret",
+        ] {
+            assert!(!shown.contains(secret), "{secret} in {shown}");
+        }
+        assert!(shown.contains("openai/text-embedding-3-small"), "{shown}");
+        assert!(!format!("{:?}", collection.fields[0]).contains("sk-field-secret"));
+    }
 }

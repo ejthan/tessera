@@ -28,12 +28,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Favorite collections, kept per connection.
 - `cargo xtask seed --url <url> [--key <key>] [--reset]` fills a dev server with five reproducible sample collections, an alias and a synonym set (see `docs/building.md`).
 - `tessera-widgets` crate for reusable GPUI widgets.
+- Change a collection's schema (⌘E / Ctrl+E) with a review before anything is sent: added, dropped and changed fields, the consequences (documents rewritten, default sorting field cleared, references that would break) and the exact PATCH body. Applying shows live schema-change progress, and "Stop waiting" leaves the change running on the server.
+- Truncate a collection (⌘⇧⌫ / Ctrl+Shift+Backspace) behind a type-the-name confirmation that shows the current document count.
+- Delete a collection (⌘⌫ / Ctrl+Backspace) behind a type-the-name confirmation that shows the current document count and the aliases that would dangle.
+- On read-only connections, every write (create, clone, schema change, truncate, delete) first asks to unlock writes for the session.
 - Create collections from a form or from JSON, kept in sync, with live validation and server errors shown inline (New collection ⌘⇧N / Ctrl+Shift+N). Clone a collection (⌘⇧D / Ctrl+Shift+D) from the list or the schema view; the clone blanks embedding credentials.
 - Unlock writes on a read-only connection by typing the profile name. A "Writes unlocked" banner offers "Lock again" (⌘⇧L / Ctrl+Shift+L); writes lock again on disconnect and the unlock is never saved.
 
 ### Fixed
 
-- Embedding credentials (`api_key` and similar) are masked in the schema view.
+- Embedding credentials (`api_key` and similar) are masked in the schema view, the request log and "Copy as curl".
+- A key that may read collections but not aliases still lists its collections; the list, the schema view and the delete dialog say inline that the aliases could not be loaded and why.
+- A long truncate or delete no longer blocks the window: "Stop waiting" closes its dialog while the server keeps going, and the list reloads when it is done. A schema change, truncate or delete that hits the 30-minute timeout is not retried on another node and says the server may still be applying it.
+- On read-only connections, the write controls (New collection, Edit schema, Clone, Truncate, Delete) show the lock until writes are unlocked.
 
 ### Changed
 

@@ -46,6 +46,9 @@ pub struct OpenCollections(pub Uuid);
 /// Asks the window to show the tab of one collection of a profile.
 pub struct OpenCollection(pub Uuid, pub String);
 
+/// Asks the window to close the tab of one collection of a profile, which no longer exists.
+pub struct CloseCollection(pub Uuid, pub String);
+
 /// Profiles, keys and open connections of the app.
 pub struct AppState {
     /// Saved profiles, in sidebar order.
@@ -305,6 +308,24 @@ impl AppState {
         collection: &str,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), String>> {
+        let favorite = self
+            .profiles
+            .iter()
+            .chain(self.temporary.as_ref().map(|(p, _)| p))
+            .find(|p| p.id == profile)
+            .is_some_and(|p| p.favorite_collections.iter().any(|c| c == collection));
+        self.set_favorite(profile, collection, !favorite, cx)
+    }
+
+    /// Stars (`favorite`) or unstars `collection` of profile `profile` and saves, like
+    /// [`Self::toggle_favorite`]. Nothing to change is `Ok` without a save.
+    pub fn set_favorite(
+        &mut self,
+        profile: Uuid,
+        collection: &str,
+        favorite: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
         let saved = self.profiles.iter_mut().find(|p| p.id == profile);
         let temporary = self
             .temporary
@@ -317,11 +338,15 @@ impl AppState {
         }) else {
             return Task::ready(Ok(()));
         };
-        match p.favorite_collections.iter().position(|c| c == collection) {
-            Some(i) => {
+        match (
+            p.favorite_collections.iter().position(|c| c == collection),
+            favorite,
+        ) {
+            (Some(i), false) => {
                 p.favorite_collections.remove(i);
             }
-            None => p.favorite_collections.push(collection.to_owned()),
+            (None, true) => p.favorite_collections.push(collection.to_owned()),
+            _ => return Task::ready(Ok(())),
         }
         let favorites = p.favorite_collections.clone();
         if let Some(conn) = self.connection(profile, cx) {
@@ -331,11 +356,16 @@ impl AppState {
             });
         }
         cx.notify();
-        if saved {
-            self.save(cx)
-        } else {
-            Task::ready(Ok(()))
+        if !saved {
+            return Task::ready(Ok(()));
         }
+        // `save` skips the write after a failed load; the favorite would be lost silently.
+        if let (Some(error), Some(path)) = (&self.load_error, &self.store_path) {
+            let path = path.display().to_string();
+            let text = t!("collections.favorite_unsaved", path = path, error = error);
+            return Task::ready(Err(text.to_string()));
+        }
+        self.save(cx)
     }
 
     /// Removes a profile, its connection and its stored key, and saves.
@@ -524,6 +554,11 @@ impl AppState {
         cx.notify();
     }
 
+    /// Asks for the tab of collection `name` of profile `id` to close.
+    pub fn close_collection(&mut self, id: Uuid, name: String, cx: &mut Context<Self>) {
+        cx.emit(CloseCollection(id, name));
+    }
+
     /// Closes the connection of profile `id`. Dropping it cancels a running attempt.
     pub fn disconnect(&mut self, id: Uuid, cx: &mut Context<Self>) {
         if let Some(conn) = self.connection(id, cx) {
@@ -564,6 +599,7 @@ fn observe_connection(conn: &Entity<ConnectionState>, cx: &mut Context<AppState>
 impl EventEmitter<OpenOverview> for AppState {}
 impl EventEmitter<OpenCollections> for AppState {}
 impl EventEmitter<OpenCollection> for AppState {}
+impl EventEmitter<CloseCollection> for AppState {}
 
 /// Runs a blocking secret-store or file call on tokio's blocking pool.
 fn blocking<T: Send + 'static>(cx: &App, f: impl FnOnce() -> T + Send + 'static) -> JoinHandle<T> {
@@ -1121,6 +1157,24 @@ mod tests {
             );
         });
         assert!(!path.exists(), "nothing written");
+    }
+
+    #[gpui_kit::test]
+    async fn favorite_after_a_failed_load_says_it_is_not_saved(cx: &mut TestAppContext) {
+        rust_i18n::set_locale("en");
+        let _rt = tokio(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        let state = new_state(cx, store::load(&path), Some(path.clone()), Arc::default());
+        let profile = Profile::new("kept in memory", vec![node()]);
+        let id = profile.id;
+        state.update(cx, |s, cx| s.upsert_profile(profile, None, cx).detach());
+        let save = state.update(cx, |s, cx| s.toggle_favorite(id, "books", cx));
+        let error = save.await.unwrap_err();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains("could not be read"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
     }
 
     #[gpui_kit::test]

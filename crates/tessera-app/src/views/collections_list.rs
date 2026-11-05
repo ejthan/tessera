@@ -22,12 +22,13 @@ use tessera_core::profile::Node;
 
 use super::overview::grouped;
 use super::schema_dialog::SchemaDialog;
+use super::{collection_danger, env_badge};
 use crate::actions::{
-    COLLECTIONS, COLLECTIONS_HEADER, CloneCollection, FocusSearch, NewCollection,
-    OpenCollectionRow, Refresh, ToggleFavorite,
+    COLLECTIONS, COLLECTIONS_HEADER, CloneCollection, DeleteCollection, EditSchema, FocusSearch,
+    NewCollection, OpenCollectionRow, Refresh, ToggleFavorite, TruncateCollection,
 };
-use crate::collections::aliases_of;
-use crate::connection::ConnectionState;
+use crate::collections::{CollectionsBackendGlobal, aliases_of};
+use crate::connection::{ConnectionState, error_text};
 use crate::state::AppState;
 
 /// Where the empty state points to.
@@ -198,6 +199,8 @@ struct Rows {
     favorites: Vec<String>,
     sort: (SortKey, bool),
     headers: Vec<gpui_kit::FocusHandle>,
+    /// Writes ask to unlock first; their menu entries show the lock.
+    locked: bool,
 }
 
 impl Rows {
@@ -382,21 +385,55 @@ impl TableDelegate for Rows {
         let Some(row) = self.row(row_ix) else {
             return menu;
         };
-        let toggle = if self.favorites.contains(&row.name) {
-            t!("collections.favorite_remove")
-        } else {
-            t!("collections.favorite_add")
-        };
-        menu.menu(
+        let favorite = self.favorites.contains(&row.name);
+        menu_entries(favorite, self.locked)
+            .into_iter()
+            .fold(menu, |menu, (label, action, lock)| {
+                if lock {
+                    let icon = Icon::new(gpui_kit::assets::IconName::Lock);
+                    menu.menu_with_icon(label, icon, action)
+                } else {
+                    menu.menu(label, action)
+                }
+            })
+    }
+}
+
+/// The row menu: label, action, and whether it shows the lock (a write while `locked`).
+fn menu_entries(favorite: bool, locked: bool) -> Vec<(String, Box<dyn gpui_kit::Action>, bool)> {
+    let toggle = if favorite {
+        t!("collections.favorite_remove")
+    } else {
+        t!("collections.favorite_add")
+    };
+    vec![
+        (
             t!("collections.open").to_string(),
             Box::new(OpenCollectionRow),
-        )
-        .menu(toggle.to_string(), Box::new(ToggleFavorite))
-        .menu(
+            false,
+        ),
+        (toggle.to_string(), Box::new(ToggleFavorite), false),
+        (
+            t!("collections.edit_schema").to_string(),
+            Box::new(EditSchema),
+            locked,
+        ),
+        (
             t!("collections.clone").to_string(),
             Box::new(CloneCollection),
-        )
-    }
+            locked,
+        ),
+        (
+            t!("collections.truncate").to_string(),
+            Box::new(TruncateCollection),
+            locked,
+        ),
+        (
+            t!("collections.delete").to_string(),
+            Box::new(DeleteCollection),
+            locked,
+        ),
+    ]
 }
 
 /// The content of a collections tab.
@@ -410,6 +447,9 @@ pub struct CollectionsList {
     /// Why the last favorite save failed, shown under the toolbar.
     favorite_error: Option<SharedString>,
     save_task: Option<Task<()>>,
+    /// Why the schema for the edit dialog could not be loaded, shown under the toolbar.
+    edit_error: Option<SharedString>,
+    edit_task: Option<Task<()>>,
     /// What the rows were built from.
     loaded: Option<(Option<Instant>, Vec<String>)>,
     _subscriptions: Vec<Subscription>,
@@ -434,6 +474,7 @@ impl CollectionsList {
             favorites: Vec::new(),
             sort: (SortKey::Name, true),
             headers,
+            locked: false,
         };
         let table = cx.new(|cx| {
             TableState::new(rows, window, cx)
@@ -485,6 +526,8 @@ impl CollectionsList {
             selected: None,
             favorite_error: None,
             save_task: None,
+            edit_error: None,
+            edit_task: None,
             loaded: None,
             _subscriptions: subscriptions,
         };
@@ -497,6 +540,7 @@ impl CollectionsList {
     /// Rebuilds the rows when the cache or the favorites changed.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let conn = self.connection.read(cx);
+        let locked = conn.writes_locked();
         let cache = &conn.collection_cache;
         let stamp = (cache.loaded_at, conn.profile.favorite_collections.clone());
         if self.loaded.as_ref() != Some(&stamp) {
@@ -516,6 +560,8 @@ impl CollectionsList {
             self.loaded = Some(stamp);
             self.reselect(cx);
         }
+        self.table
+            .update(cx, |t, _| t.delegate_mut().locked = locked);
         cx.notify();
     }
 
@@ -579,21 +625,59 @@ impl CollectionsList {
         SchemaDialog::open_create(self.state.clone(), self.connection.clone(), window, cx);
     }
 
-    /// Opens the clone dialog for the selected collection.
-    pub fn clone_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self.visible_selected(cx) else {
-            return;
-        };
-        let source = self
-            .connection
+    /// The cached collection of the selected row, unmasked.
+    fn selected_collection(&self, cx: &App) -> Option<Collection> {
+        let name = self.visible_selected(cx)?;
+        self.connection
             .read(cx)
             .collection_cache
             .collections
             .iter()
             .flatten()
             .find(|c| c.name == name)
-            .cloned();
-        if let Some(source) = source {
+            .cloned()
+    }
+
+    /// Loads the selected collection again and opens the edit dialog for it; the dialog
+    /// masks it. A failed load shows under the toolbar: a diff against a stale schema could
+    /// send the wrong change.
+    pub fn edit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.visible_selected(cx) else {
+            return;
+        };
+        let conn = self.connection.read(cx);
+        let Some(client) = conn.connected.as_ref().map(|c| c.client.clone()) else {
+            return;
+        };
+        let profile = conn.profile.clone();
+        let load = cx
+            .global::<CollectionsBackendGlobal>()
+            .0
+            .get(client, name.clone());
+        self.edit_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = load.await;
+            this.update_in(cx, |view, window, cx| {
+                match result {
+                    Ok(collection) => {
+                        view.edit_error = None;
+                        let (state, conn) = (view.state.clone(), view.connection.clone());
+                        SchemaDialog::open_edit(state, conn, collection, window, cx);
+                    }
+                    Err(e) => {
+                        let detail = error_text(&e, &profile);
+                        let text = t!("collections.edit_error", name = name, detail = detail);
+                        view.edit_error = Some(text.to_string().into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Opens the clone dialog for the selected collection.
+    pub fn clone_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(source) = self.selected_collection(cx) {
             SchemaDialog::open_clone(
                 self.state.clone(),
                 self.connection.clone(),
@@ -601,6 +685,22 @@ impl CollectionsList {
                 window,
                 cx,
             );
+        }
+    }
+
+    /// Asks for the name of the selected collection, then empties it.
+    pub fn truncate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(c) = self.selected_collection(cx) {
+            let (state, conn) = (self.state.clone(), self.connection.clone());
+            collection_danger::truncate(state, conn, c.name, c.num_documents, window, cx);
+        }
+    }
+
+    /// Asks for the name of the selected collection, then deletes it.
+    pub fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(c) = self.selected_collection(cx) {
+            let (state, conn) = (self.state.clone(), self.connection.clone());
+            collection_danger::delete(state, conn, c.name, c.num_documents, window, cx);
         }
     }
 
@@ -616,6 +716,7 @@ impl CollectionsList {
     }
 
     fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let locked = self.connection.read(cx).writes_locked();
         let delegate = self.table.read(cx).delegate();
         let count = SharedString::from(
             t!(
@@ -656,6 +757,9 @@ impl CollectionsList {
                     .primary()
                     .small()
                     .label(t!("collections.new").to_string())
+                    .when(locked, |b| {
+                        b.child(env_badge::lock("collections.new", false, cx))
+                    })
                     .children(Kbd::binding_for_action(
                         &NewCollection,
                         Some(COLLECTIONS),
@@ -716,6 +820,9 @@ impl Render for CollectionsList {
         let (danger, muted) = (theme.danger, theme.muted_foreground);
         let cache = &self.connection.read(cx).collection_cache;
         let error = cache.error.clone();
+        let aliases_error = cache.aliases_error.as_ref().map(|detail| {
+            SharedString::from(t!("collections.aliases_error", detail = detail).to_string())
+        });
         let loaded = cache.collections.as_ref().map(Vec::len);
         let loading = cache.loading && loaded.is_none();
         let (shown, query) = {
@@ -766,7 +873,13 @@ impl Render for CollectionsList {
                     .clone()
                     .map(|e| notice("collections.favorite_error", e, danger)),
             )
+            .children(
+                self.edit_error
+                    .clone()
+                    .map(|e| notice("collections.edit_error", e, danger)),
+            )
             .children(error.map(|e| notice("collections.error", e, danger)))
+            .children(aliases_error.map(|e| notice("collections.aliases_error", e, danger)))
             .child(body)
     }
 }
@@ -801,6 +914,19 @@ mod tests {
         assert_eq!(names(&rows), ["a", "c", "b"]);
         sort_rows(&mut rows, SortKey::Name, false, &[]);
         assert_eq!(names(&rows), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn row_menu_locks_only_the_writes() {
+        let locks = |locked| -> Vec<bool> {
+            menu_entries(false, locked)
+                .into_iter()
+                .map(|(_, _, lock)| lock)
+                .collect()
+        };
+        // Open, toggle favorite, edit, clone, truncate, delete.
+        assert_eq!(locks(true), [false, false, true, true, true, true]);
+        assert_eq!(locks(false), [false; 6]);
     }
 
     #[test]

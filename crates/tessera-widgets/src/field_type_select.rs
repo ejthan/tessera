@@ -72,10 +72,17 @@ impl SearchableListItem for TypeItem {
     }
 }
 
-/// A `Select` over [`FieldType::ALL`]. A type outside the list (`Other`) shows no selection.
+/// A `Select` over [`FieldType::ALL`]. A type outside the list (`Other`) shows no selection;
+/// the placeholder names it.
 pub struct FieldTypeSelect {
     state: gpui_kit::Entity<SelectState<Vec<TypeItem>>>,
+    /// The selected type when it is not in the list.
+    other: Option<String>,
     _sub: Subscription,
+}
+
+fn other_name(ty: &FieldType) -> Option<String> {
+    matches!(ty, FieldType::Other(_)).then(|| ty.as_str().to_string())
 }
 
 impl EventEmitter<FieldTypeChanged> for FieldTypeSelect {}
@@ -95,19 +102,31 @@ impl FieldTypeSelect {
             };
             cx.emit(FieldTypeChanged(ty.clone()));
         });
-        Self { state, _sub }
+        Self {
+            state,
+            other: other_name(selected),
+            _sub,
+        }
     }
 
     /// Selects `ty` without emitting [`FieldTypeChanged`].
     pub fn set(&mut self, ty: &FieldType, window: &mut Window, cx: &mut Context<Self>) {
+        self.other = other_name(ty);
         self.state
             .update(cx, |s, cx| s.set_selected_value(ty, window, cx));
+        cx.notify();
     }
 }
 
 impl Render for FieldTypeSelect {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // GPUI Kit's own placeholder is not translated.
+        let placeholder = match &self.other {
+            Some(name) => t!("field_type.other", name = name),
+            None => t!("field_type.placeholder"),
+        };
         Select::new(&self.state)
+            .placeholder(placeholder.to_string())
             .id("field_type")
             .accessibility_label(t!("field_type.label").to_string())
     }

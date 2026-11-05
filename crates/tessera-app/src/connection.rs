@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{App, Context, Global, SharedString, Task, Window};
+use gpui_kit::{App, Context, EventEmitter, Global, SharedString, Task, Window};
 use rust_i18n::t;
 use secrecy::SecretString;
 use tessera_client::{
@@ -174,9 +174,16 @@ pub struct ConnectionState {
     pub interval: Duration,
     /// Collections with schemas and aliases, shared by the collection views.
     pub collection_cache: CollectionsCache,
+    /// A truncate or delete dialog is loading its numbers.
+    pub danger_loading: bool,
     collections_task: Option<Task<()>>,
     cache_task: Option<Task<()>>,
 }
+
+/// The schema of the named collection changed on the server; views showing it reload.
+pub struct CollectionChanged(pub String);
+
+impl EventEmitter<CollectionChanged> for ConnectionState {}
 
 impl ConnectionState {
     /// A connection that has not been attempted yet.
@@ -200,6 +207,7 @@ impl ConnectionState {
             interval: DEFAULT_INTERVAL,
             collections_task: None,
             collection_cache: CollectionsCache::default(),
+            danger_loading: false,
             cache_task: None,
             profile,
         }
@@ -214,11 +222,17 @@ impl ConnectionState {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut Window, &mut App) + 'static,
     ) {
-        if self.profile.read_only && !self.writes_unlocked {
+        if self.writes_locked() {
             unlock::open(cx.entity().downgrade(), &self.profile, then, window, cx);
         } else {
             window.defer(cx, then);
         }
+    }
+
+    /// A write first asks to unlock: the profile is read-only and writes are not unlocked.
+    /// Write controls show the lock then (spec §7.3).
+    pub fn writes_locked(&self) -> bool {
+        self.profile.read_only && !self.writes_unlocked
     }
 
     /// Allows writes until [`Self::lock`] or disconnect. Nothing is written to disk.
@@ -292,7 +306,12 @@ impl ConnectionState {
                 match result {
                     Ok((collections, aliases)) => {
                         cache.collections = Some(collections);
-                        cache.aliases = aliases;
+                        let profile = &state.profile;
+                        cache.aliases_error = aliases
+                            .as_ref()
+                            .err()
+                            .map(|e| error_text(e, profile).into());
+                        cache.aliases = aliases.unwrap_or_default();
                         cache.loaded_at = Some(Instant::now());
                         cache.error = None;
                     }
@@ -310,6 +329,12 @@ impl ConnectionState {
         self.collection_cache = CollectionsCache::default();
         self.cache_task = None;
         self.load_collection_list(cx);
+    }
+
+    /// Reloads the collection list and tells the views of collection `name` to reload.
+    pub fn collection_changed(&mut self, name: String, cx: &mut Context<Self>) {
+        self.invalidate_collections(cx);
+        cx.emit(CollectionChanged(name));
     }
 
     /// Loads the collections through the polling client (`polling`) or the user's client.
@@ -370,6 +395,19 @@ fn chain(e: &(dyn std::error::Error + 'static)) -> String {
 pub fn error_text(err: &Error, profile: &Profile) -> String {
     let host = profile.nodes.first().map(|n| n.label()).unwrap_or_default();
     node_error_text(err, &host, profile)
+}
+
+/// User-facing text for a failed schema change, truncate or delete of `profile`: these wait
+/// [`tessera_client::LONG_TIMEOUT`], and the server may still be working after it.
+pub fn long_error_text(err: &Error, profile: &Profile) -> String {
+    match err {
+        Error::Timeout => {
+            let host = profile.nodes.first().map(|n| n.label()).unwrap_or_default();
+            let minutes = tessera_client::LONG_TIMEOUT.as_secs() / 60;
+            t!("connect.error.long_timeout", host = host, minutes = minutes).to_string()
+        }
+        _ => error_text(err, profile),
+    }
 }
 
 /// User-facing text for a failed request to `host` (`host:port`) of `profile`.
@@ -515,6 +553,21 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("k-secret"), "{text}");
+    }
+
+    #[test]
+    fn long_operation_timeout_names_the_long_timeout() {
+        rust_i18n::set_locale("en");
+        let profile = Profile::new("t", vec![node("localhost", 8108)]);
+        assert_eq!(
+            long_error_text(&Error::Timeout, &profile),
+            "localhost:8108 did not finish within 30 minutes. The server may still be applying the change; reload to see its current state."
+        );
+        let other = Error::InvalidKey;
+        assert_eq!(
+            long_error_text(&other, &profile),
+            error_text(&other, &profile)
+        );
     }
 
     #[test]

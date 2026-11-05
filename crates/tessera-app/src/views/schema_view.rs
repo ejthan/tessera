@@ -23,9 +23,12 @@ use tessera_widgets::JsonEditor;
 use super::collections_list::created_text;
 use super::overview::grouped;
 use super::schema_dialog::SchemaDialog;
-use crate::actions::{COLLECTION, CloneCollection, Refresh};
+use super::{collection_danger, env_badge};
+use crate::actions::{
+    COLLECTION, CloneCollection, DeleteCollection, EditSchema, Refresh, TruncateCollection,
+};
 use crate::collections::{CollectionsBackendGlobal, aliases_of};
-use crate::connection::{ConnectionState, error_text};
+use crate::connection::{CollectionChanged, ConnectionState, error_text};
 use crate::state::AppState;
 
 /// The attribute columns every field table has, in the order of the spec.
@@ -186,6 +189,7 @@ pub struct SchemaView {
     task: Option<Task<()>>,
     copy_reset: Option<Task<()>>,
     _observe: gpui_kit::Subscription,
+    _changed: gpui_kit::Subscription,
 }
 
 impl SchemaView {
@@ -213,8 +217,18 @@ impl SchemaView {
             .row_header(false)
         });
         let editor = cx.new(|cx| JsonEditor::new("", true, window, cx));
+        let changed = cx.subscribe_in(
+            &connection,
+            window,
+            |this, _, CollectionChanged(name): &CollectionChanged, window, cx| {
+                if *name == this.name {
+                    this.reload(false, window, cx);
+                }
+            },
+        );
         let mut this = Self {
             _observe: cx.observe(&connection, |_, _, cx| cx.notify()),
+            _changed: changed,
             state,
             connection,
             name,
@@ -311,6 +325,38 @@ impl SchemaView {
         }
     }
 
+    /// Opens the edit dialog for the loaded collection; the dialog masks it.
+    pub fn edit_schema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(loaded) = &self.loaded {
+            let collection = loaded.collection.clone();
+            SchemaDialog::open_edit(
+                self.state.clone(),
+                self.connection.clone(),
+                collection,
+                window,
+                cx,
+            );
+        }
+    }
+
+    /// Asks for the name, then empties the collection.
+    pub fn truncate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(loaded) = &self.loaded {
+            let (state, conn) = (self.state.clone(), self.connection.clone());
+            let (name, documents) = (self.name.clone(), loaded.raw.num_documents);
+            collection_danger::truncate(state, conn, name, documents, window, cx);
+        }
+    }
+
+    /// Asks for the name, then deletes the collection.
+    pub fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(loaded) = &self.loaded {
+            let (state, conn) = (self.state.clone(), self.connection.clone());
+            let (name, documents) = (self.name.clone(), loaded.raw.num_documents);
+            collection_danger::delete(state, conn, name, documents, window, cx);
+        }
+    }
+
     /// Puts the masked JSON on the clipboard and says "Copied" for a moment.
     fn copy_json(&mut self, cx: &mut Context<Self>) {
         let Some(loaded) = &self.loaded else {
@@ -331,6 +377,7 @@ impl SchemaView {
 
     fn header(&self, c: &Collection, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let conn = self.connection.read(cx);
+        let locked = conn.writes_locked();
         let aliases: Vec<&str> = aliases_of(&conn.collection_cache.aliases, &c.name).collect();
         let list = |items: &[&str]| {
             if items.is_empty() {
@@ -340,15 +387,20 @@ impl SchemaView {
             }
         };
         let sets = |s: &[String]| list(&s.iter().map(String::as_str).collect::<Vec<_>>());
+        let aliases = match &conn.collection_cache.aliases_error {
+            Some(detail) => t!("schema.aliases_error", detail = detail).to_string(),
+            None => list(&aliases),
+        };
         let facts = [
             ("documents", grouped(c.num_documents)),
             ("created", created_text(c.created_at)),
-            ("aliases", list(&aliases)),
+            ("aliases", aliases),
             ("synonym_sets", sets(&c.synonym_sets)),
             ("curation_sets", sets(&c.curation_sets)),
         ];
         let muted = cx.theme().muted_foreground;
-        h_flex()
+        let facts = h_flex()
+            .flex_wrap()
             .gap_4()
             .items_center()
             .child(
@@ -368,13 +420,35 @@ impl SchemaView {
                     .text_sm()
                     .text_color(muted)
                     .child(text)
-            }))
-            .child(div().flex_1())
+            }));
+        // Linux and Windows spell shortcuts out, so the buttons must wrap, not run off the window.
+        let actions = h_flex()
+            .flex_wrap()
+            .gap_2()
+            .items_center()
+            .child(
+                Button::new("schema.edit")
+                    .outline()
+                    .small()
+                    .label(t!("collections.edit_schema").to_string())
+                    .when(locked, |b| {
+                        b.child(env_badge::lock("schema.edit", false, cx))
+                    })
+                    .children(Kbd::binding_for_action(
+                        &EditSchema,
+                        Some(COLLECTION),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.edit_schema(window, cx))),
+            )
             .child(
                 Button::new("schema.clone")
                     .outline()
                     .small()
                     .label(t!("collections.clone").to_string())
+                    .when(locked, |b| {
+                        b.child(env_badge::lock("schema.clone", false, cx))
+                    })
                     .children(Kbd::binding_for_action(
                         &CloneCollection,
                         Some(COLLECTION),
@@ -383,13 +457,46 @@ impl SchemaView {
                     .on_click(cx.listener(|this, _, window, cx| this.clone_collection(window, cx))),
             )
             .child(
+                Button::new("schema.truncate")
+                    .outline()
+                    .danger()
+                    .small()
+                    .label(t!("collections.truncate").to_string())
+                    .when(locked, |b| {
+                        b.child(env_badge::lock("schema.truncate", false, cx))
+                    })
+                    .children(Kbd::binding_for_action(
+                        &TruncateCollection,
+                        Some(COLLECTION),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.truncate(window, cx))),
+            )
+            .child(
+                Button::new("schema.delete")
+                    .outline()
+                    .danger()
+                    .small()
+                    .label(t!("collections.delete").to_string())
+                    .when(locked, |b| {
+                        b.child(env_badge::lock("schema.delete", false, cx))
+                    })
+                    .children(Kbd::binding_for_action(
+                        &DeleteCollection,
+                        Some(COLLECTION),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.delete(window, cx))),
+            )
+            .child(
                 Button::new("schema.reload")
                     .ghost()
                     .small()
                     .label(t!("collections.reload").to_string())
                     .children(Kbd::binding_for_action(&Refresh, Some(COLLECTION), window))
                     .on_click(cx.listener(|this, _, window, cx| this.reload(true, window, cx))),
-            )
+            );
+        v_flex().gap_2().child(facts).child(actions)
     }
 
     fn options(&self, c: &Collection, cx: &App) -> impl IntoElement {

@@ -96,6 +96,17 @@ pub fn mask_value(v: &mut Value) {
     }
 }
 
+/// True when a string in `v`, at any depth, is the mask [`mask_value`] puts in: a value
+/// that came from a masked view and must be entered again before it is sent.
+pub fn contains_mask(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s == MASK,
+        Value::Object(map) => map.values().any(contains_mask),
+        Value::Array(items) => items.iter().any(contains_mask),
+        _ => false,
+    }
+}
+
 /// Byte index just past the string literal that starts at `start` (a `"`), or the end of
 /// the text if it is unterminated.
 fn string_end(b: &[u8], start: usize) -> usize {
@@ -160,6 +171,16 @@ mod tests {
         let out = json(r#"{"a":{"api_key":"sk"},"keys":[{"value":"abc"}]}"#);
         assert!(!out.contains("sk\"") && !out.contains("abc"));
         assert_eq!(out.matches(MASK).count(), 2);
+    }
+
+    #[test]
+    fn contains_mask_finds_a_masked_value_at_any_depth() {
+        let mut v: Value =
+            serde_json::from_str(r#"{"a":[{"model_config":{"api_key":"sk"}}]}"#).unwrap();
+        assert!(!contains_mask(&v));
+        mask_value(&mut v);
+        assert!(contains_mask(&v));
+        assert!(!contains_mask(&serde_json::json!({"k": "•••", "n": 1})));
     }
 
     const EMBED: &str = r#"{"name":"emb","type":"float[]","embed":{"from":["title"],"model_config":{"model_name":"openai/text-embedding-3-small","api_key":"sk-embed-1234","access_token":"at-5678","refresh_token":"rt-9012","client_secret":"cs-3456"}}}"#;

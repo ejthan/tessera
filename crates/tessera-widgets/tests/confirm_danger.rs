@@ -336,3 +336,106 @@ async fn dismissing_while_busy_is_refused_and_completion_closes_only_its_dialog(
     })
     .unwrap();
 }
+
+/// Opens a dialog whose task waits for `gate`, confirms it, and returns while it runs.
+async fn open_busy(
+    cx: &mut TestAppContext,
+    gate: Rc<Gate>,
+    result: Result<(), &'static str>,
+) -> WindowHandle<Root> {
+    let handle = open_window(cx);
+    cx.update_window(handle.into(), move |_, window, cx| {
+        confirm_danger::open(
+            DangerOptions {
+                title: "Delete".into(),
+                consequences: vec![],
+                expected: "books".into(),
+                action_label: "Delete".into(),
+                prod: false,
+            },
+            move |_, cx| {
+                let g = gate.clone();
+                cx.spawn(async move |_| {
+                    std::future::poll_fn(|c| {
+                        if g.open.get() {
+                            std::task::Poll::Ready(())
+                        } else {
+                            *g.waker.borrow_mut() = Some(c.waker().clone());
+                            std::task::Poll::Pending
+                        }
+                    })
+                    .await;
+                    result.map_err(SharedString::from)
+                })
+            },
+            window,
+            cx,
+        );
+    })
+    .unwrap();
+    shown(cx, handle, "danger.ok", true).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.input("books", cx);
+        window.render_frame(cx);
+        window.click("danger.ok", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    handle
+}
+
+#[gpui_kit::test]
+async fn stop_waiting_then_success_closes_no_other_dialog(cx: &mut TestAppContext) {
+    stop_then_complete(cx, Ok(())).await;
+}
+
+#[gpui_kit::test]
+async fn stop_waiting_then_failure_shows_nothing(cx: &mut TestAppContext) {
+    stop_then_complete(cx, Err("late failure")).await;
+}
+
+/// Stops waiting, opens a second dialog, then lets the first task end with `result`.
+async fn stop_then_complete(cx: &mut TestAppContext, result: Result<(), &'static str>) {
+    let gate = Rc::new(Gate {
+        open: Cell::new(false),
+        waker: Default::default(),
+    });
+    let handle = open_busy(cx, gate.clone(), result).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("danger.stop_waiting").is_some());
+        let note = window.find("danger.stop_note").label().unwrap().to_string();
+        assert!(note.contains("server keeps going"), "{note}");
+        window.click("danger.stop_waiting", cx);
+    })
+    .unwrap();
+    shown(cx, handle, "danger.ok", false).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.open_dialog(cx, |d, _, _| d.title("second"));
+    })
+    .unwrap();
+    gate.open.set(true);
+    if let Some(w) = gate.waker.borrow_mut().take() {
+        w.wake();
+    }
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.has_active_dialog(cx), "the second dialog stays open");
+        assert!(window.try_find("danger.error").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn stop_waiting_shows_only_while_busy(cx: &mut TestAppContext) {
+    let (handle, _) = open(cx, false);
+    shown(cx, handle, "danger.ok", true).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("danger.stop_waiting").is_none());
+        assert!(window.try_find("danger.stop_note").is_none());
+    })
+    .unwrap();
+}

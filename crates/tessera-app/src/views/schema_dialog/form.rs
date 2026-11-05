@@ -245,9 +245,7 @@ impl SchemaDialog {
             return;
         }
         self.form.rows.remove(i);
-        self.form
-            .opt(Opt::Name)
-            .update(cx, |n, cx| n.focus(window, cx));
+        self.focus_first(window, cx);
         self.edit(|d| drop(d.fields.remove(i)), window, cx);
     }
 
@@ -435,10 +433,12 @@ impl SchemaDialog {
                 ))
             })
             .when(self.blanked.contains(&f.name), |el| {
+                // Edit mode would send the mask: that blocks the review.
+                let color = if self.editing() { danger } else { warning };
                 el.child(line(
                     id("secret"),
                     t!("schema.field.secret_blanked").to_string().into(),
-                    warning,
+                    color,
                 ))
             })
             .when(f.embed.is_some(), |el| {
@@ -470,10 +470,14 @@ impl SchemaDialog {
         let theme = cx.theme();
         let (danger, muted) = (theme.danger, theme.muted_foreground);
         let label = |key: &str| t!(key).to_string();
+        // PATCH cannot change these (design §5.3).
+        let fixed = self.editing();
         let opt_input = |which: Opt, id: &'static str, key: &str| {
+            let fixed = fixed && !matches!(which, Opt::SynonymSets | Opt::Metadata);
             Input::new(self.form.opt(which))
                 .id(id)
                 .aria_label(label(key))
+                .disabled(fixed)
         };
         let hint = |key: &str| div().text_xs().text_color(muted).child(label(key));
         let metadata_ok = sync::metadata(&self.form.opt(Opt::Metadata).read(cx).value()).is_some();
@@ -531,7 +535,8 @@ impl SchemaDialog {
                                     Select::new(&self.form.sorting)
                                         .id("schema.sorting")
                                         .placeholder(label("schema.sorting_none"))
-                                        .cleanable(true),
+                                        .cleanable(true)
+                                        .disabled(fixed),
                                 ),
                         ),
                     )
@@ -573,6 +578,7 @@ impl SchemaDialog {
             .child(
                 Checkbox::new("schema.nested")
                     .checked(self.draft.enable_nested_fields)
+                    .disabled(fixed)
                     .label(label("schema.opt.enable_nested_fields"))
                     .on_click(cx.listener(|this, on: &bool, window, cx| {
                         let on = *on;
