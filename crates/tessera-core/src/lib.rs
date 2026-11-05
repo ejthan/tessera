@@ -4,6 +4,7 @@
 
 pub mod cli;
 pub mod curl;
+pub mod documents;
 pub mod import;
 pub mod log;
 pub mod metrics;

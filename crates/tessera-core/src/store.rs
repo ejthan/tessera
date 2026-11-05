@@ -92,20 +92,24 @@ pub fn load(path: &Path) -> Result<ConnectionsFile, StoreError> {
     serde_json::from_value(value).map_err(parse_err)
 }
 
-/// Writes `file` as pretty JSON via a synced temporary file and a rename, creating parent
-/// directories.
+/// Writes `file` as pretty JSON via [`write_atomic`].
 pub fn save(path: &Path, file: &ConnectionsFile) -> Result<(), StoreError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let json = serde_json::to_string_pretty(file).map_err(|e| StoreError::Parse {
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;
+    write_atomic(path, json.as_bytes())
+}
+
+/// Writes `bytes` via a synced temporary file and a rename, creating parent directories.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let tmp = path.with_extension("json.tmp");
     // Synced before the rename, so a power loss cannot leave an empty file in its place.
     let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(json.as_bytes())?;
+    f.write_all(bytes)?;
     f.sync_all()?;
     std::fs::rename(&tmp, path)?;
     Ok(())

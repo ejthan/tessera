@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Document browser groundwork: columns from the schema (vector fields left out), a page cache with previews built off the UI thread, and per-collection column preferences in `document_views.json`.
 - `cargo xtask seed` also creates `products`, 200,000 documents with a nested `dimensions` object, for testing the document browser.
 - Connect to a Typesense server by URL and API key and see its version, Raft role and health.
 - Welcome screen with the Docker command for a local Typesense server.
