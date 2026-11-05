@@ -50,8 +50,10 @@ impl Fixture {
         let calls = Calls::default();
         let seen = calls.clone();
         let fetch: FacetFetch = Rc::new(move |field, prefix, _: &mut App| {
-            seen.borrow_mut().push((field, prefix));
-            Task::ready(vec!["crime".to_string(), "science fiction".to_string()])
+            seen.borrow_mut().push((field, prefix.clone()));
+            let values = ["crime", "crimea", "science fiction", "`odd"];
+            let values = values.iter().filter(|v| v.starts_with(&prefix));
+            Task::ready(values.map(ToString::to_string).collect())
         });
         let fields = vec![
             field("title", "string", false),
@@ -178,10 +180,101 @@ async fn after_field_offers_operators(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn finished_clause_offers_joins(cx: &mut TestAppContext) {
+async fn a_finished_condition_opens_no_menu_so_enter_submits(cx: &mut TestAppContext) {
     let f = Fixture::open(cx);
     f.type_text(cx, "title:a ");
-    assert_eq!(f.menu(cx), ["&&", "||"]);
+    assert!(f.menu(cx).is_empty());
+    f.press(cx, "enter");
+    assert_eq!(f.value(cx), "title:a ");
+    assert_eq!(f.submitted(), ["title:a"]);
+}
+
+#[gpui_kit::test]
+async fn joins_are_typed_and_the_next_field_is_offered(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx);
+    f.type_text(cx, "title:a &");
+    assert!(f.menu(cx).is_empty());
+    f.type_text(cx, "& g");
+    assert_eq!(f.menu(cx), ["genre"]);
+}
+
+#[gpui_kit::test]
+async fn a_blank_text_opens_no_menu_and_enter_submits_it(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx);
+    f.type_text(cx, "t");
+    f.press(cx, "backspace");
+    assert!(f.menu(cx).is_empty());
+    f.press(cx, "enter");
+    assert_eq!(f.value(cx), "");
+    assert_eq!(f.submitted(), [""]);
+    f.type_text(cx, "  ");
+    assert!(f.menu(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn a_value_equal_to_its_only_suggestion_needs_one_enter(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx);
+    f.type_text(cx, "genre:=crimea");
+    f.wait(cx, FACET_DELAY);
+    assert!(f.menu(cx).is_empty());
+    f.press(cx, "enter");
+    assert_eq!(f.submitted(), ["genre:=crimea"]);
+}
+
+#[gpui_kit::test]
+async fn a_value_with_longer_suggestions_keeps_the_menu(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx);
+    f.type_text(cx, "genre:=crime");
+    f.wait(cx, FACET_DELAY);
+    assert_eq!(f.menu(cx), ["crime", "crimea"]);
+}
+
+#[gpui_kit::test]
+async fn a_finished_bool_opens_no_menu(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx);
+    f.type_text(cx, "active:=true");
+    assert!(f.menu(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn an_open_quote_keeps_the_menu_so_a_pick_closes_it(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx);
+    f.type_text(cx, "genre:=`science fiction");
+    f.wait(cx, FACET_DELAY);
+    assert_eq!(f.menu(cx), ["science fiction"]);
+}
+
+#[gpui_kit::test]
+async fn a_value_that_cannot_be_quoted_is_not_offered(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx);
+    f.type_text(cx, "genre: ");
+    f.wait(cx, FACET_DELAY);
+    assert_eq!(f.menu(cx), ["crime", "crimea", "science fiction"]);
+}
+
+#[gpui_kit::test]
+async fn enter_cancels_a_pending_fetch(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx);
+    f.type_text(cx, "genre:=cr");
+    f.press(cx, "enter");
+    assert_eq!(f.submitted(), ["genre:=cr"]);
+    f.wait(cx, FACET_DELAY);
+    assert!(f.calls.borrow().is_empty());
+    assert!(f.menu(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn secondary_enter_submits_and_closes_an_open_menu(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx);
+    f.type_text(cx, "tit");
+    let key = if cfg!(target_os = "macos") {
+        "cmd-enter"
+    } else {
+        "ctrl-enter"
+    };
+    f.press(cx, key);
+    assert_eq!(f.submitted(), ["tit"]);
+    assert!(f.menu(cx).is_empty());
 }
 
 #[gpui_kit::test]
@@ -192,7 +285,7 @@ async fn facet_value_waits_then_fetches(cx: &mut TestAppContext) {
     assert!(f.calls.borrow().is_empty());
     f.wait(cx, Duration::from_millis(1));
     assert_eq!(*f.calls.borrow(), [("genre".to_string(), "cr".to_string())]);
-    assert_eq!(f.menu(cx), ["crime", "science fiction"]);
+    assert_eq!(f.menu(cx), ["crime", "crimea"]);
 }
 
 #[gpui_kit::test]
@@ -287,7 +380,6 @@ async fn pick_quotes_a_value_and_replaces_its_opening_backtick(cx: &mut TestAppC
     let f = Fixture::open(cx);
     f.type_text(cx, "genre:=`sci");
     f.wait(cx, FACET_DELAY);
-    f.press(cx, "down");
     f.press(cx, "enter");
     assert_eq!(f.value(cx), "genre:=`science fiction`");
 }

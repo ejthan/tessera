@@ -170,12 +170,15 @@ pub fn operators_for(field_type: &str) -> &'static [&'static str] {
     }
 }
 
-/// `value` as `filter_by` needs it written.
-pub fn quote_value(value: &str) -> String {
-    if value.contains([' ', ',', '[', ']', '(', ')', '&']) {
-        format!("`{value}`")
+/// `value` as `filter_by` needs it written. `None` for a value with a backtick: `filter_by`
+/// has no escape, and such a value matches nothing however it is written.
+pub fn quote_value(value: &str) -> Option<String> {
+    if value.contains('`') {
+        None
+    } else if value.contains([' ', ',', '[', ']', '(', ')', '&', '|']) {
+        Some(format!("`{value}`"))
     } else {
-        value.to_string()
+        Some(value.to_string())
     }
 }
 
@@ -262,11 +265,18 @@ mod tests {
 
     #[test]
     fn values_are_quoted_when_they_need_it() {
-        assert_eq!(quote_value("crime"), "crime");
-        assert_eq!(quote_value("science fiction"), "`science fiction`");
-        assert_eq!(quote_value("a,b"), "`a,b`");
-        assert_eq!(quote_value("a[1]"), "`a[1]`");
-        assert_eq!(quote_value("(a)"), "`(a)`");
-        assert_eq!(quote_value("a&b"), "`a&b`");
+        let quoted = |value| quote_value(value).unwrap();
+        assert_eq!(quoted("crime"), "crime");
+        assert_eq!(quoted("science fiction"), "`science fiction`");
+        assert_eq!(quoted("a,b"), "`a,b`");
+        assert_eq!(quoted("a[1]"), "`a[1]`");
+        assert_eq!(quoted("(a)"), "`(a)`");
+        assert_eq!(quoted("a&b"), "`a&b`");
+        assert_eq!(quoted("a|b"), "`a|b`");
+    }
+
+    #[test]
+    fn a_backtick_cannot_be_quoted() {
+        assert_eq!(quote_value("a`b"), None);
     }
 }

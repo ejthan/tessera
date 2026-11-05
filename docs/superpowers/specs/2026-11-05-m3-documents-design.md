@@ -210,12 +210,12 @@ pub enum FilterContext {
 }
 pub fn context_at(text: &str, offset: usize) -> FilterContext;
 pub fn operators_for(field_type: &str) -> &'static [&'static str];
-pub fn quote_value(value: &str) -> String;
+pub fn quote_value(value: &str) -> Option<String>;
 ```
 
 - A forward scan tracks parentheses, `&&`, `||`, a backtick string and a `[…]` list. Inside a list, the context is `Value` for the current element.
 - Operators: strings `:`, `:=`, `:!=`; numbers `:=`, `:>`, `:>=`, `:<`, `:<=`, `:!=`, `:[`; bools `:=`, `:!=`.
-- `quote_value` wraps a value in backticks when it has a space, comma, bracket, parenthesis or `&`.
+- `quote_value` wraps a value in backticks when it has a space, comma, bracket, parenthesis, `&` or `|`. A value with a backtick cannot be written in `filter_by` (§4.4), so it gets `None` and is not offered.
 - Field candidates are the schema's indexed fields plus `id` (filtering a field with `index: false` is confirmed 400). Nested fields appear with their dotted name.
 
 ### 5.5 Document edits (`edit.rs`, `validate.rs`, `template.rs`)
@@ -274,6 +274,8 @@ fn focus(&self, window, cx)
 
 - Pinned facts (`gpui-base-0.9.0/src/input/base/state.rs`, `input/editor/mod.rs`, `input/editor/lsp/completions.rs`): the completion provider exists on `EditorState` only (`lsp_mut().completion_provider`); `InputState` has none. So the input is `EditorState::new(window, cx).line_number(false).folding(false).searchable(false).submit_on_enter(true).scroll_beyond_last_line(None)` drawn with `Editor::new(&state).h(px(32.))`.
 - `enter` hands the action to an open completion menu first and only then submits, so Enter picks a suggestion when the menu is open and applies the filter when it is not. `submit_on_enter` emits `InputEvent::PressEnter`.
+- Enter must apply a finished filter without a surprise pick, so no menu opens on a blank text, after a complete condition (a `Join`: `a:1 `, where the user types `&&` or `||` to continue), or when the typed value is exactly the only suggestion (`genre:=crime` needs one Enter).
+- Submitting closes the menu and drops a facet fetch still waiting, so ⌘Enter and a quick Enter leave no menu over the result.
 - `Shift+Enter` would insert a newline, which `filter_by` cannot use: the widget replaces newlines with spaces on `Change`.
 - The provider answers from `context_at`. Field and operator candidates are synchronous. A `Value` on a `bool` field offers `true` and `false`. A `Value` on a facet field waits 150 ms, then calls `fetch`. Candidates carry a `CompletionTextEdit` over `start..offset`, with positions from `RopeExt::offset_to_position`, so a pick replaces the prefix and keeps the rest of the text.
 - Direct dependencies added for the trait's types: `lsp-types = "=0.97.0"` (same as `Cargo.lock`), `anyhow`. `Rope` and `Position` are re-exported by `gpui_kit::component::input`.

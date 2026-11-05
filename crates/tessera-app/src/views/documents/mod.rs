@@ -214,6 +214,13 @@ impl DocumentsView {
         });
     }
 
+    /// Puts the focus in the filter bar, which exists once the schema is known.
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_schema {
+            self.filter.update(cx, |f, cx| f.focus(window, cx));
+        }
+    }
+
     /// Empties the filter bar and, when a filter is applied, drops it.
     fn clear_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.filter.update(cx, |f, cx| f.set_value("", window, cx));
@@ -489,9 +496,9 @@ impl Render for DocumentsView {
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(DOCUMENTS)
-            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                this.filter.update(cx, |f, cx| f.focus(window, cx))
-            }))
+            .on_action(
+                cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &ClearFilter, window, cx| this.clear_filter(window, cx)),
             )

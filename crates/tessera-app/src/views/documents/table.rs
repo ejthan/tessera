@@ -130,6 +130,10 @@ impl DocRows {
     }
 
     fn fetch_wanted(&mut self, cx: &mut Context<TableState<Self>>) {
+        // The query was refused; only a new one can answer.
+        if self.query_error.is_some() {
+            return;
+        }
         let wanted = wanted_pages(self.visible.clone(), ROWS_PER_PAGE, self.found);
         // Page 1 of a new query answers `replacing`, wherever the table scrolled meanwhile.
         let replacing = self.replacing;

@@ -71,6 +71,15 @@ fn matching(options: &[&str], typed: &str) -> Vec<(String, String)> {
     matches.map(|o| (o.to_string(), o.to_string())).collect()
 }
 
+/// Nothing for a value already written as its only candidate: a menu there would make Enter
+/// pick instead of apply.
+fn unfinished(candidates: Vec<(String, String)>, typed: &str) -> Vec<(String, String)> {
+    match candidates.as_slice() {
+        [(_, new_text)] if new_text == typed => Vec::new(),
+        _ => candidates,
+    }
+}
+
 impl CompletionProvider for Provider {
     fn completions(
         &self,
@@ -81,6 +90,10 @@ impl CompletionProvider for Provider {
         cx: &mut App,
     ) -> Task<anyhow::Result<CompletionResponse>> {
         let filter = text.to_string();
+        // A menu here would turn Enter on an emptied filter into a pick.
+        if filter.trim().is_empty() {
+            return Task::ready(Ok(CompletionResponse::Array(Vec::new())));
+        }
         let context = context_at(&filter, offset);
         let (FilterContext::Field { start, .. }
         | FilterContext::Operator { start, .. }
@@ -101,26 +114,28 @@ impl CompletionProvider for Provider {
             FilterContext::Operator { field: name, .. } => field(name)
                 .map(|f| matching(operators_for(&f.r#type), &filter[start..offset]))
                 .unwrap_or_default(),
-            FilterContext::Join { .. } => matching(&["&&", "||"], &filter[start..offset]),
+            // The condition may be the whole filter, so Enter stays free to apply it.
+            FilterContext::Join { .. } => Vec::new(),
             FilterContext::Value {
                 field: name,
                 prefix,
                 ..
             } => match field(name) {
                 Some(f) if f.r#type.trim_end_matches("[]") == "bool" => {
-                    matching(&["true", "false"], prefix)
+                    unfinished(matching(&["true", "false"], prefix), &filter[start..offset])
                 }
                 Some(f) if f.facet => {
                     let (fetch, name, prefix) = (self.fetch.clone(), name.clone(), prefix.clone());
+                    let typed = filter[start..offset].to_string();
                     // A newer keystroke drops this task, so only the last one reaches the server.
                     return cx.spawn(async move |cx| {
                         cx.background_executor().timer(FACET_DELAY).await;
                         let values = cx.update(|cx| fetch(name, prefix, cx)).await;
-                        let candidates = values.into_iter().map(|value| {
-                            let quoted = quote_value(&value);
-                            (value, quoted)
+                        let candidates = values.into_iter().filter_map(|value| {
+                            let quoted = quote_value(&value)?;
+                            Some((value, quoted))
                         });
-                        Ok(response(range, candidates.collect()))
+                        Ok(response(range, unfinished(candidates.collect(), &typed)))
                     });
                 }
                 _ => Vec::new(),
@@ -201,6 +216,8 @@ impl FilterInput {
             }
             // Shift+Enter comes here too, after inserting its line break.
             InputEvent::PressEnter { shift: false, .. } => {
+                // Also drops a fetch still waiting, which would open a menu over the result.
+                state.update(cx, |state, cx| state.dismiss_lsp_overlays(cx));
                 cx.emit(FilterInputEvent::Submitted(
                     self.value(cx).trim().to_string(),
                 ));

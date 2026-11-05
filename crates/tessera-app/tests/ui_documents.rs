@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use gpui_kit::component::table::TableState;
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
-use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
+use gpui_kit::{AppContext as _, Entity, Focusable as _, TestAppContext, WindowHandle, base::Root};
 use serde_json::json;
 use tessera_app::connection::ConnectionState;
 use tessera_app::state::AppState;
@@ -748,9 +748,19 @@ async fn clear_shortcut_works_inside_the_filter(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn an_empty_filter_means_no_filter(cx: &mut TestAppContext) {
+async fn an_emptied_filter_means_no_filter(cx: &mut TestAppContext) {
     let f = open_found(cx, plain_schema(), 1_000).await;
+    f.submit_filter(cx, "price:>1");
+    let asked = f.docs.pages.lock().unwrap().len();
+    f.act(cx, |window, cx| {
+        window.press(SELECT_ALL, cx);
+        window.press("backspace", cx);
+    });
     f.submit_filter(cx, "   ");
+    assert!(
+        f.docs.pages.lock().unwrap().len() > asked,
+        "no new query ran"
+    );
     assert_eq!(f.last_filter(), None);
 }
 
@@ -767,6 +777,54 @@ async fn bad_filter_shows_the_server_message_and_keeps_rows(cx: &mut TestAppCont
     f.click(cx, "documents.filter.clear");
     f.settle(cx);
     assert_eq!(f.cell(cx, "documents.filter.error"), None);
+}
+
+#[gpui_kit::test]
+async fn scrolling_does_not_resend_a_refused_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    *f.docs.fail.lock().unwrap() = Some((400, "bad".into()));
+    f.submit_filter(cx, "nope:1");
+    let asked = f.docs.pages.lock().unwrap().len();
+    f.scroll_to(cx, 900);
+    f.settle(cx);
+    assert_eq!(f.docs.pages.lock().unwrap().len(), asked);
+    assert!(f.cell(cx, "documents.filter.error").is_some());
+    *f.docs.fail.lock().unwrap() = None;
+    f.act(cx, |window, cx| {
+        window.press(SELECT_ALL, cx);
+        window.press("backspace", cx);
+    });
+    f.submit_filter(cx, "price:>1");
+    assert_eq!(f.cell(cx, "documents.filter.error"), None);
+    let pages = f.docs.page_numbers();
+    assert!(
+        pages[asked..].len() > 1,
+        "the visible page loads: {pages:?}"
+    );
+}
+
+#[gpui_kit::test]
+async fn focus_shortcut_before_the_schema_does_nothing(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    let f = open_tab(cx, plain_schema(), docs).await;
+    fake_backend(cx, None);
+    let id = f.profile_id(cx);
+    cx.update(|cx| {
+        f.state
+            .update(cx, |s, cx| s.open_collection(id, "gone".into(), cx))
+    });
+    wait_for_element(cx, f.handle, format!("tab.{id}.collection.gone"), true).await;
+    f.settle(cx);
+    let panel = collection_panel(cx, f.handle, "gone");
+    let documents = cx.update(|cx| panel.read(cx).documents().clone());
+    let filter = cx.update(|cx| documents.read(cx).filter().clone());
+    f.act(cx, |window, cx| {
+        documents.update(cx, |d, cx| d.focus_search(window, cx));
+    });
+    f.act(cx, |window, cx| {
+        let focused = filter.read(cx).state().focus_handle(cx);
+        assert!(!focused.is_focused(window));
+    });
 }
 
 #[gpui_kit::test]
