@@ -10,13 +10,14 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::table::TableState;
+use gpui_kit::component::table::{TableEvent, TableState};
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, Focusable as _, TestAppContext, WindowHandle, base::Root};
 use serde_json::json;
 use tessera_app::connection::ConnectionState;
 use tessera_app::state::AppState;
 use tessera_app::views::dock::CollectionPanel;
+use tessera_app::views::documents::inspector::Inspector;
 use tessera_app::views::documents::table::DocRows;
 use tessera_client::Collection;
 use tessera_widgets::FilterInput;
@@ -152,6 +153,52 @@ impl Fixture {
             let columns = &table.read(cx).delegate().columns;
             columns.iter().map(|c| c.key.clone()).collect()
         })
+    }
+
+    fn inspector(&self, cx: &mut TestAppContext) -> Entity<Inspector> {
+        let panel = self.panel(cx);
+        cx.update(|cx| panel.read(cx).documents().read(cx).inspector().clone())
+    }
+
+    fn inspector_text(&self, cx: &mut TestAppContext) -> String {
+        let inspector = self.inspector(cx);
+        cx.update(|cx| inspector.read(cx).editor().read(cx).text(cx))
+    }
+
+    fn inspector_id(&self, cx: &mut TestAppContext) -> Option<String> {
+        let inspector = self.inspector(cx);
+        cx.update(|cx| inspector.read(cx).current_id().map(str::to_string))
+    }
+
+    /// Selects a cell of `row` and leaves the keyboard on the table.
+    fn select_row(&self, cx: &mut TestAppContext, row: usize) {
+        let table = self.table(cx);
+        self.act(cx, |window, cx| {
+            table.read(cx).focus_handle(cx).focus(window, cx);
+            table.update(cx, |t, cx| t.set_selected_cell(row, 0, cx));
+        });
+    }
+
+    /// Lets the wait before following a selection pass.
+    fn follow(&self, cx: &mut TestAppContext) {
+        cx.executor().advance_clock(Duration::from_millis(150));
+        self.settle(cx);
+    }
+
+    /// Focuses Go to ID, types `id` and presses Enter.
+    fn go_to(&self, cx: &mut TestAppContext, id: &str) {
+        self.act(cx, |window, cx| {
+            window.press(GO_TO, cx);
+        });
+        self.act(cx, |window, cx| {
+            window.input(id, cx);
+            window.press("enter", cx);
+        });
+        self.settle(cx);
+    }
+
+    fn clipboard(&self, cx: &mut TestAppContext) -> Option<String> {
+        cx.read_from_clipboard().and_then(|c| c.text())
     }
 
     fn select_cell(&self, cx: &mut TestAppContext, col: usize) {
@@ -912,4 +959,321 @@ async fn quick_filters_keep_only_the_last_answer(cx: &mut TestAppContext) {
     assert_eq!(f.last_filter().as_deref(), Some("price:>10"));
     let status = f.cell(cx, "documents.status").unwrap();
     assert!(status.starts_with("3 of 3"), "{status}");
+}
+
+#[gpui_kit::test]
+async fn enter_opens_the_inspector_with_the_full_document(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 3);
+    f.act(cx, |window, cx| {
+        assert!(window.try_find("documents.inspector").is_none());
+        window.press("enter", cx);
+    });
+    f.settle(cx);
+    f.act(cx, |window, _| {
+        assert!(window.try_find("documents.inspector").is_some());
+    });
+    let text = f.inspector_text(cx);
+    assert!(text.contains("embedding"), "{text}");
+    assert!(text.contains("\n  \"id\": \"3\""), "pretty: {text}");
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("3"));
+}
+
+#[gpui_kit::test]
+async fn inspector_shortcut_toggles_and_shows_the_selected_row(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let table = f.table(cx);
+    f.act(cx, |window, cx| {
+        table.read(cx).focus_handle(cx).focus(window, cx);
+        window.press(INSPECTOR, cx);
+    });
+    f.act(cx, |window, _| {
+        assert_eq!(
+            label(window, "documents.inspector.body"),
+            "Select a row",
+            "nothing selected"
+        );
+    });
+    f.act(cx, |window, cx| window.press(INSPECTOR, cx));
+    f.act(cx, |window, _| {
+        assert!(window.try_find("documents.inspector").is_none());
+    });
+    f.select_row(cx, 2);
+    f.act(cx, |window, cx| window.press(INSPECTOR, cx));
+    f.settle(cx);
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("2"));
+}
+
+#[gpui_kit::test]
+async fn closing_the_inspector_from_its_editor_leaves_the_keyboard_working(
+    cx: &mut TestAppContext,
+) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 2);
+    f.act(cx, |window, cx| window.press("enter", cx));
+    f.settle(cx);
+    let inspector = f.inspector(cx);
+    let editor = cx.update(|cx| inspector.read(cx).editor().clone());
+    f.act(cx, |window, cx| {
+        editor.update(cx, |e, cx| e.focus(window, cx));
+    });
+    f.act(cx, |window, cx| window.press(INSPECTOR, cx));
+    f.act(cx, |window, cx| window.press(INSPECTOR, cx));
+    f.act(cx, |window, _| {
+        assert!(window.try_find("documents.inspector").is_some());
+    });
+}
+
+#[gpui_kit::test]
+async fn inspector_follows_the_selected_row(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 0);
+    f.act(cx, |window, cx| window.press("enter", cx));
+    f.settle(cx);
+    f.select_row(cx, 1);
+    f.select_row(cx, 2);
+    f.follow(cx);
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("2"));
+    assert_eq!(
+        *f.docs.document_calls.lock().unwrap(),
+        ["0", "2"],
+        "a passed row is not fetched"
+    );
+    // The same row again, in another column.
+    let table = f.table(cx);
+    cx.update(|cx| table.update(cx, |t, cx| t.set_selected_cell(2, 1, cx)));
+    f.follow(cx);
+    assert_eq!(f.docs.document_calls.lock().unwrap().len(), 2);
+}
+
+#[gpui_kit::test]
+async fn inspector_does_not_follow_while_closed(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 1);
+    f.follow(cx);
+    assert!(f.docs.document_calls.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn inspector_says_when_it_is_loading(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let release = f.docs.hold_next();
+    f.select_row(cx, 1);
+    f.act(cx, |window, cx| window.press("enter", cx));
+    f.settle(cx);
+    f.act(cx, |window, _| {
+        assert_eq!(label(window, "documents.inspector.body"), "Loading…");
+    });
+    release.send(()).unwrap();
+    f.settle(cx);
+    assert!(f.inspector_text(cx).contains("embedding"));
+}
+
+#[gpui_kit::test]
+async fn failed_load_shows_in_the_inspector(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.document_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.select_row(cx, 1);
+    f.act(cx, |window, cx| window.press("enter", cx));
+    f.settle(cx);
+    f.act(cx, |window, _| {
+        assert!(label(window, "documents.inspector.error").contains("boom"));
+    });
+}
+
+#[gpui_kit::test]
+async fn goto_shows_the_document(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.go_to(cx, "424242");
+    f.act(cx, |window, _| {
+        assert!(window.try_find("documents.inspector").is_some());
+    });
+    assert!(f.inspector_text(cx).contains("424242"));
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("424242"));
+}
+
+#[gpui_kit::test]
+async fn goto_404_shows_inline(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 1);
+    f.act(cx, |window, cx| window.press("enter", cx));
+    f.settle(cx);
+    *f.docs.document_fail.lock().unwrap() = Some((404, "no such document".into()));
+    f.go_to(cx, "nope");
+    f.act(cx, |window, _| {
+        assert!(label(window, "documents.goto.error").contains("no such document"));
+        assert!(window.try_find("documents.inspector.error").is_none());
+    });
+    assert_eq!(
+        f.inspector_id(cx).as_deref(),
+        Some("1"),
+        "the inspector keeps its document"
+    );
+    *f.docs.document_fail.lock().unwrap() = None;
+    f.act(cx, |window, cx| window.press("enter", cx));
+    f.settle(cx);
+    f.act(cx, |window, _| {
+        assert!(window.try_find("documents.goto.error").is_none());
+    });
+}
+
+#[gpui_kit::test]
+async fn copy_cell_copies_the_full_value(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 10;
+    let long = "x".repeat(500);
+    *docs.extra_key.lock().unwrap() = Some("body".into());
+    *docs.extra_value.lock().unwrap() = json!(long);
+    let f = open_tab(cx, plain_schema(), docs).await;
+    let col = f.column_keys(cx).iter().position(|k| k == "body").unwrap();
+    let table = f.table(cx);
+    f.act(cx, |window, cx| {
+        table.read(cx).focus_handle(cx).focus(window, cx);
+        table.update(cx, |t, cx| t.set_selected_cell(0, col, cx));
+    });
+    f.act(cx, |window, cx| window.press(COPY_CELL, cx));
+    assert_eq!(f.clipboard(cx), Some(long));
+    let preview = f.cell(cx, "documents.cell.0.title");
+    assert_eq!(preview.as_deref(), Some("t0"));
+}
+
+#[gpui_kit::test]
+async fn copy_cell_of_an_absent_key_copies_nothing_but_succeeds(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let table = f.table(cx);
+    cx.update(|cx| {
+        table.update(cx, |t, _| {
+            let column = t.delegate().columns[0].clone();
+            t.delegate_mut().columns[0] = tessera_core::documents::columns::ColumnDef {
+                key: "absent".into(),
+                ..column
+            };
+        })
+    });
+    f.select_row(cx, 0);
+    f.act(cx, |window, cx| window.press(COPY_CELL, cx));
+    let written = cx.read_from_clipboard().expect("the clipboard is written");
+    assert_eq!(written.text().unwrap_or_default(), "");
+}
+
+#[gpui_kit::test]
+async fn copy_row_is_pretty_json(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 4);
+    f.act(cx, |window, cx| window.press(COPY_ROW, cx));
+    f.settle(cx);
+    let text = f.clipboard(cx).unwrap();
+    assert!(text.contains("embedding"), "{text}");
+    assert!(text.contains("\n  \"id\": \"4\""), "{text}");
+}
+
+#[gpui_kit::test]
+async fn failed_copy_row_shows_above_the_table(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.document_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.select_row(cx, 4);
+    f.act(cx, |window, cx| window.press(COPY_ROW, cx));
+    f.settle(cx);
+    f.act(cx, |window, _| {
+        assert!(label(window, "documents.error").contains("boom"));
+    });
+    assert_eq!(f.clipboard(cx), None);
+    *f.docs.document_fail.lock().unwrap() = None;
+    f.act(cx, |window, cx| window.press(COPY_ROW, cx));
+    f.settle(cx);
+    f.act(cx, |window, _| {
+        assert!(window.try_find("documents.error").is_none());
+    });
+}
+
+#[gpui_kit::test]
+async fn copy_on_unloaded_row_does_nothing(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 100_000).await;
+    f.select_row(cx, 90_000);
+    f.act(cx, |window, cx| {
+        window.press(COPY_CELL, cx);
+        window.press(COPY_ROW, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(f.clipboard(cx), None);
+    assert!(f.docs.document_calls.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn copy_menu_copies_and_says_so(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 1);
+    f.click(cx, "documents.copy");
+    cx.wait_for(f.handle.into(), Duration::from_millis(500), |window, _| {
+        window.try_find("popup-menu").is_some()
+    })
+    .await;
+    f.act(cx, |window, cx| {
+        let mut menu = window.within("popup-menu");
+        assert_eq!(menu.find(0).label(), Some("Copy cell"));
+        assert_eq!(menu.find(1).label(), Some("Copy row as JSON"));
+        menu.click(0, cx);
+    });
+    assert_eq!(f.clipboard(cx).as_deref(), Some("1"));
+    f.act(cx, |window, _| {
+        assert_eq!(label(window, "documents.copy"), "Copied");
+    });
+    cx.executor().advance_clock(Duration::from_secs(3));
+    f.settle(cx);
+    f.act(cx, |window, _| {
+        assert_eq!(label(window, "documents.copy"), "Copy");
+    });
+}
+
+#[gpui_kit::test]
+async fn shortcuts_are_shown(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 1);
+    let shown = |cx: &mut TestAppContext, chord: &str| {
+        gpui_kit::VisualTestContext::from_window(f.handle.into(), cx)
+            .debug_bounds(chord.to_string().leak())
+            .unwrap_or_else(|| panic!("no Kbd for {chord}"))
+    };
+    let (toggle, goto) = f.act(cx, |window, _| {
+        (
+            window.find("documents.toggle_inspector").bounds(),
+            window.find("documents.goto").bounds(),
+        )
+    });
+    let i = shown(cx, key("kbd:cmd-i", "kbd:ctrl-i"));
+    assert!(toggle.contains(&i.center()), "{i:?} not in {toggle:?}");
+    let g = shown(cx, key("kbd:cmd-g", "kbd:ctrl-g"));
+    assert!(goto.contains(&g.center()), "{g:?} not in {goto:?}");
+    f.click(cx, "documents.copy");
+    cx.wait_for(f.handle.into(), Duration::from_millis(500), |window, _| {
+        window.try_find("popup-menu").is_some()
+    })
+    .await;
+    f.act(cx, |_, _| {});
+    shown(cx, key("kbd:cmd-c", "kbd:ctrl-c"));
+    shown(cx, key("kbd:alt-cmd-c", "kbd:ctrl-alt-c"));
+}
+
+#[gpui_kit::test]
+async fn right_clicked_row_is_what_the_menu_copies(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let table = f.table(cx);
+    cx.update(|cx| {
+        table.update(cx, |t, cx| {
+            t.set_selected_cell(0, 1, cx);
+            cx.emit(TableEvent::RightClickedRow(Some(3)));
+        })
+    });
+    cx.run_until_parked();
+    let selected = cx.update(|cx| table.read(cx).selected_cell());
+    assert_eq!(selected, Some((3, 1)));
+}
+
+#[gpui_kit::test]
+async fn empty_collection_links_the_docs_and_the_seed_hint(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 0).await;
+    f.act(cx, |window, _| {
+        assert!(window.try_find("documents.docs").is_some());
+        assert!(label(window, "documents.empty").contains("cargo xtask seed"));
+    });
 }

@@ -3,6 +3,8 @@
 //! The documents view of a collection tab.
 
 pub mod columns;
+pub mod copy;
+pub mod inspector;
 pub mod table;
 
 use std::rc::Rc;
@@ -10,12 +12,17 @@ use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Selectable as _, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
+};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, Styled as _, Subscription, Task, Window, div, prelude::*,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription, Task, Window, div,
+    prelude::*, px,
 };
 use rust_i18n::t;
 use tessera_client::Collection;
@@ -23,11 +30,13 @@ use tessera_core::documents::columns::{columns_from_schema, exclude_fields, merg
 use tessera_widgets::{FacetFetch, FilterField, FilterInput, FilterInputEvent};
 use uuid::Uuid;
 
+use self::inspector::{GoToResult, Inspector};
 use self::table::DocRows;
 use super::overview::grouped;
+use super::schema_view::COPIED_FOR;
 use crate::actions::{
-    ClearFilter, DOCUMENTS, FocusSearch, NarrowerColumn, SortByColumn, ToggleColumns,
-    TogglePinColumn, WiderColumn,
+    ClearFilter, CopyCell, CopyRowJson, DOCUMENTS, FocusSearch, GoToId, NarrowerColumn,
+    OpenDocument, SortByColumn, ToggleColumns, ToggleInspector, TogglePinColumn, WiderColumn,
 };
 use crate::connection::{CollectionChanged, ConnectionState};
 use crate::documents::DocumentsBackendGlobal;
@@ -65,6 +74,12 @@ fn filter_fields(collection: &Collection) -> Vec<FilterField> {
 /// How long a resize waits for the next one before it is saved, so a drag writes once.
 const SAVE_DELAY: Duration = Duration::from_millis(300);
 
+/// How long a selection waits for the next one before the inspector loads it, so arrowing
+/// through rows fetches only where it stops.
+const FOLLOW_DELAY: Duration = Duration::from_millis(120);
+const INSPECTOR_WIDTH: f32 = 420.;
+const GOTO_WIDTH: f32 = 200.;
+
 /// The documents of one collection, as a table.
 pub struct DocumentsView {
     state: Entity<AppState>,
@@ -78,8 +93,20 @@ pub struct DocumentsView {
     has_schema: bool,
     table: Entity<TableState<DocRows>>,
     filter: Entity<FilterInput>,
+    inspector: Entity<Inspector>,
+    inspector_open: bool,
+    /// The wait before the inspector follows the selection; a newer selection replaces it.
+    follow_task: Option<Task<()>>,
+    goto: Entity<InputState>,
+    goto_error: Option<SharedString>,
+    /// Says "Copied" on the button for a moment.
+    copied: bool,
+    copied_reset: Option<Task<()>>,
+    copy_task: Option<Task<()>>,
+    copy_error: Option<SharedString>,
+    connection: Entity<ConnectionState>,
     focus_handle: FocusHandle,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 6],
 }
 
 impl DocumentsView {
@@ -116,6 +143,10 @@ impl DocumentsView {
             cx.spawn(async move |_| values.await.unwrap_or_default())
         });
         let filter = cx.new(|cx| FilterInput::new(Vec::new(), fetch, window, cx));
+        let inspector = cx.new(|cx| Inspector::new(connection.clone(), name.clone(), window, cx));
+        let goto = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("documents.goto.placeholder").to_string())
+        });
         Self {
             _subscriptions: [
                 cx.subscribe(&filter, |this, _, event: &FilterInputEvent, cx| {
@@ -126,10 +157,35 @@ impl DocumentsView {
                     }
                 }),
                 cx.observe(&table, |_, _, cx| cx.notify()),
-                cx.subscribe_in(&table, window, |this, _, event: &TableEvent, _, cx| {
-                    if let TableEvent::ColumnWidthsChanged(widths) = event {
-                        this.widths_changed(widths, cx);
+                cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
+                    match event {
+                        TableEvent::ColumnWidthsChanged(widths) => this.widths_changed(widths, cx),
+                        TableEvent::SelectCell(row, _) => this.follow(*row, window, cx),
+                        TableEvent::DoubleClickedCell(row, _) => this.open_row(*row, window, cx),
+                        // The menu's copy actions work on the selected cell.
+                        TableEvent::RightClickedRow(Some(row)) => {
+                            this.table.update(cx, |t, cx| {
+                                let col = t.selected_cell().map_or(0, |(_, col)| col);
+                                t.set_selected_cell(*row, col, cx);
+                            });
+                        }
+                        _ => {}
                     }
+                }),
+                cx.subscribe_in(&goto, window, |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.go_to(window, cx);
+                    }
+                }),
+                cx.subscribe(&inspector, |this, _, event: &GoToResult, cx| {
+                    match event {
+                        GoToResult::Found => {
+                            this.goto_error = None;
+                            this.inspector_open = true;
+                        }
+                        GoToResult::Failed(error) => this.goto_error = Some(error.clone()),
+                    }
+                    cx.notify();
                 }),
                 cx.subscribe(&connection, |this, _, CollectionChanged(name), cx| {
                     if *name == this.name {
@@ -146,6 +202,16 @@ impl DocumentsView {
             has_schema: false,
             table,
             filter,
+            inspector,
+            inspector_open: false,
+            follow_task: None,
+            goto,
+            goto_error: None,
+            copied: false,
+            copied_reset: None,
+            copy_task: None,
+            copy_error: None,
+            connection,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -370,9 +436,112 @@ impl DocumentsView {
         &self.filter
     }
 
+    /// The inspector.
+    pub fn inspector(&self) -> &Entity<Inspector> {
+        &self.inspector
+    }
+
     /// The table.
     pub fn table(&self) -> &Entity<TableState<DocRows>> {
         &self.table
+    }
+
+    /// The id of a loaded row.
+    fn row_id(&self, row: usize, cx: &App) -> Option<String> {
+        let rows = self.table.read(cx).delegate();
+        rows.row(row).map(|r| r.id.to_string())
+    }
+
+    /// The id of the selected cell's row, if it is loaded.
+    fn selected_id(&self, cx: &App) -> Option<String> {
+        let (row, _) = self.table.read(cx).selected_cell()?;
+        self.row_id(row, cx)
+    }
+
+    /// The inspector, while open, moves to `row` once the selection rests.
+    fn follow(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.follow_task = None;
+        let inspector = self.inspector.read(cx);
+        if !self.inspector_open || inspector.is_dirty(cx) {
+            return;
+        }
+        let Some(id) = self.row_id(row, cx) else {
+            return;
+        };
+        if inspector.current_id() == Some(&id) {
+            return;
+        }
+        self.follow_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(FOLLOW_DELAY).await;
+            this.update_in(cx, |this, window, cx| {
+                this.inspector.update(cx, |i, cx| i.show(id, window, cx));
+            })
+            .ok();
+        }));
+    }
+
+    /// Opens the inspector on `row`.
+    fn open_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.follow_task = None;
+        self.inspector_open = true;
+        if let Some(id) = self.row_id(row, cx)
+            && !self.inspector.read(cx).is_dirty(cx)
+        {
+            self.inspector.update(cx, |i, cx| i.show(id, window, cx));
+        }
+        cx.notify();
+    }
+
+    fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((row, _)) = self.table.read(cx).selected_cell() {
+            self.open_row(row, window, cx);
+        }
+    }
+
+    fn toggle_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.inspector_open {
+            self.inspector_open = true;
+            self.open_selected(window, cx);
+            return cx.notify();
+        }
+        self.follow_task = None;
+        self.inspector_open = false;
+        // The closed panel is not drawn, and with it would go every shortcut of this view.
+        if self.inspector.read(cx).has_focus(window, cx) {
+            self.table.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Puts the focus in the Go to ID input, which exists once the schema is known.
+    fn focus_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_schema {
+            self.goto.read(cx).focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    /// Loads the document whose id is in the Go to ID input.
+    fn go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.goto.read(cx).value().trim().to_string();
+        if !id.is_empty() {
+            self.follow_task = None;
+            self.inspector.update(cx, |i, cx| i.go_to(id, window, cx));
+        }
+    }
+
+    /// Says "Copied" on the button for a moment.
+    fn copied(&mut self, cx: &mut Context<Self>) {
+        self.copied = true;
+        self.copy_error = None;
+        cx.notify();
+        self.copied_reset = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_FOR).await;
+            this.update(cx, |view, cx| {
+                view.copied = false;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Sorts by the selected cell's column: the keyboard path to the header's sort icon.
@@ -433,6 +602,55 @@ impl DocumentsView {
                 window,
             ))
             .children(clear)
+            .child(
+                div().w(px(GOTO_WIDTH)).child(
+                    Input::new(&self.goto)
+                        .suffix(div().children(Kbd::binding_for_action(
+                            &GoToId,
+                            Some(DOCUMENTS),
+                            window,
+                        )))
+                        .id("documents.goto")
+                        .aria_label(t!("documents.goto.placeholder").to_string()),
+                ),
+            )
+    }
+
+    /// The Copy dropdown and the inspector's toggle.
+    fn actions(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let label = if self.copied {
+            t!("documents.copy.copied")
+        } else {
+            t!("documents.copy")
+        };
+        // Its shortcuts and actions are the table's, whatever holds the focus.
+        let target = self.table.read(cx).focus_handle(cx);
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                Button::new("documents.copy")
+                    .ghost()
+                    .small()
+                    .dropdown_caret(true)
+                    .label(label.to_string())
+                    .dropdown_menu(move |menu, _, _| {
+                        copy::entries(menu.action_context(target.clone()))
+                    }),
+            )
+            .child(
+                Button::new("documents.toggle_inspector")
+                    .ghost()
+                    .small()
+                    .selected(self.inspector_open)
+                    .label(t!("documents.inspector.title").to_string())
+                    .children(Kbd::binding_for_action(
+                        &ToggleInspector,
+                        Some(DOCUMENTS),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_inspector(window, cx))),
+            )
     }
 
     fn status(&self, window: &Window, cx: &App) -> Option<impl IntoElement + use<>> {
@@ -480,7 +698,7 @@ impl Render for DocumentsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.table.read(cx).delegate();
         let query_error = rows.query_error.clone();
-        let error = rows.error.clone();
+        let error = rows.error.clone().or_else(|| self.copy_error.clone());
         let picker = self.has_schema.then(|| {
             columns::picker(
                 cx.entity(),
@@ -493,6 +711,8 @@ impl Render for DocumentsView {
         let save_error = self.save_error.clone();
         let dimmed = query_error.is_some();
         let bar = self.has_schema.then(|| self.filter_bar(window, cx));
+        let actions = self.has_schema.then(|| self.actions(window, cx));
+        let goto_error = self.goto_error.clone();
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(DOCUMENTS)
@@ -501,6 +721,17 @@ impl Render for DocumentsView {
             )
             .on_action(
                 cx.listener(|this, _: &ClearFilter, window, cx| this.clear_filter(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ToggleInspector, window, cx| {
+                this.toggle_inspector(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &OpenDocument, window, cx| this.open_selected(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &GoToId, window, cx| this.focus_goto(window, cx)))
+            .on_action(cx.listener(|this, _: &CopyCell, _, cx| copy::copy_cell(this, cx)))
+            .on_action(
+                cx.listener(|this, _: &CopyRowJson, window, cx| copy::copy_row(this, window, cx)),
             )
             .on_action(cx.listener(|this, _: &SortByColumn, _, cx| this.sort_selected(cx)))
             .on_action(cx.listener(|this, _: &ToggleColumns, _, cx| {
@@ -526,12 +757,21 @@ impl Render for DocumentsView {
                     .text_color(cx.theme().danger)
                     .child(e)
             }))
+            .children(goto_error.map(|e| {
+                div()
+                    .id("documents.goto.error")
+                    .test_support()
+                    .aria_label(e.clone())
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(e)
+            }))
             .child(
                 h_flex()
                     .justify_between()
                     .items_center()
                     .child(div().children(self.status(window, cx)))
-                    .children(picker),
+                    .child(h_flex().gap_2().children(actions).children(picker)),
             )
             .children(save_error.map(|e| {
                 div()
@@ -552,13 +792,27 @@ impl Render for DocumentsView {
                     .child(e)
             }))
             .child(
-                div()
-                    .id("documents.table")
-                    .test_support()
-                    .flex_1()
-                    .min_h_0()
-                    .when(dimmed, |table| table.opacity(0.5))
-                    .child(DataTable::new(&self.table).bordered(true)),
+                div().flex_1().min_h_0().child(
+                    h_resizable("documents.split")
+                        .child(
+                            resizable_panel().child(
+                                div()
+                                    .id("documents.table")
+                                    .test_support()
+                                    .size_full()
+                                    .when(dimmed, |table| table.opacity(0.5))
+                                    .child(DataTable::new(&self.table).bordered(true)),
+                            ),
+                        )
+                        .child(
+                            resizable_panel()
+                                .visible(self.inspector_open)
+                                .size(px(INSPECTOR_WIDTH))
+                                .border_l_1()
+                                .border_color(cx.theme().border)
+                                .child(self.inspector.clone()),
+                        ),
+                ),
             )
     }
 }

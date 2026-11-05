@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::{
@@ -20,8 +22,10 @@ use tessera_core::documents::columns::{ColumnDef, merge_keys, sort_key};
 use tessera_core::documents::page::{DocumentPage, PageCache, Row, row_position, wanted_pages};
 use tessera_core::documents::views::CollectionView;
 use tessera_core::documents::{PAGE_CACHE, PER_PAGE};
+use tessera_core::profile::Node;
 
 use super::columns::{MIN_WIDTH, visible_columns};
+use super::copy;
 use crate::connection::{ConnectionState, error_text};
 use crate::documents::{DocumentsBackendGlobal, PageResult};
 
@@ -33,6 +37,8 @@ const MAX_INFLIGHT: usize = 4;
 const DEFAULT_WIDTH: f32 = 160.;
 const ID_WIDTH: f32 = 120.;
 const NUMERIC_WIDTH: f32 = 100.;
+/// Where the empty state points to.
+const DOCS_URL: &str = "https://typesense.org/docs/30.2/api/documents.html";
 
 /// Where pages come from. The client is read per request, so a reconnect needs no new table.
 struct Target {
@@ -230,7 +236,8 @@ impl DocRows {
         }
     }
 
-    fn row(&self, row_ix: usize) -> Option<&Row> {
+    /// Row `row_ix`, if its page is loaded.
+    pub fn row(&self, row_ix: usize) -> Option<&Row> {
         let (page, offset) = row_position(row_ix, ROWS_PER_PAGE);
         self.pages.get(page)?.rows.get(offset)
     }
@@ -361,16 +368,31 @@ impl TableDelegate for DocRows {
             return div().into_any_element();
         }
         let filtered = self.filter.is_some();
+        let seed = !filtered
+            && self
+                .target
+                .connection
+                .read(cx)
+                .profile
+                .nodes
+                .iter()
+                .any(Node::is_local);
         let key = if filtered {
             "documents.no_match"
         } else {
             "documents.empty"
         };
-        let title = SharedString::from(t!(key).to_string());
+        let title = t!(key).to_string();
+        let seed_hint = t!("documents.seed_hint").to_string();
+        let label = if seed {
+            format!("{title} {seed_hint}")
+        } else {
+            title.clone()
+        };
         v_flex()
             .id("documents.empty")
             .test_support()
-            .aria_label(title.clone())
+            .aria_label(SharedString::from(label))
             .size_full()
             .items_center()
             .justify_center()
@@ -383,8 +405,38 @@ impl TableDelegate for DocRows {
                         .text_color(cx.theme().muted_foreground)
                         .child(t!("documents.empty_hint").to_string()),
                 )
+                .child(
+                    Button::new("documents.docs")
+                        .link()
+                        .label(t!("documents.docs").to_string())
+                        .on_click(|_, _, cx| cx.open_url(DOCS_URL)),
+                )
+            })
+            .when(seed, |this| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(seed_hint),
+                )
             })
             .into_any_element()
+    }
+
+    // shortcut: the kit's cell handler stops a right click before the table's context menu sees
+    // it, so this opens only beside the last column; upgrade with our own menu on the cell event.
+    fn context_menu(
+        &mut self,
+        row_ix: usize,
+        menu: PopupMenu,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> PopupMenu {
+        if self.row(row_ix).is_some() {
+            copy::entries(menu)
+        } else {
+            menu
+        }
     }
 
     fn loading(&self, _: &App) -> bool {

@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use gpui_kit::Global;
+use serde_json::Value;
 use tessera_client::{Client, DocumentQuery, Error};
 use tessera_core::documents::page::DocumentPage;
 use tessera_widgets::filter_input::FACET_LIMIT;
@@ -44,6 +45,14 @@ pub trait DocumentsBackend: Send + Sync {
         field: String,
         prefix: String,
     ) -> BoxFuture<Result<Vec<String>, Error>>;
+
+    /// The whole document `id` of `collection`, with the fields pages leave out.
+    fn document(
+        &self,
+        client: Client,
+        collection: String,
+        id: String,
+    ) -> BoxFuture<Result<Value, Error>>;
 }
 
 /// The backend the views use.
@@ -84,6 +93,15 @@ impl DocumentsBackend for TokioBackend {
                 .facet_values(&collection, &field, &prefix, FACET_LIMIT)
                 .await
         })
+    }
+
+    fn document(
+        &self,
+        client: Client,
+        collection: String,
+        id: String,
+    ) -> BoxFuture<Result<Value, Error>> {
+        self.run(async move { client.document(&collection, &id).await })
     }
 }
 

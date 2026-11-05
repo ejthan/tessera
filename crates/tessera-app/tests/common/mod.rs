@@ -407,10 +407,16 @@ pub struct FakeDocs {
     pub hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// Every document also carries this key, as a key outside the schema does.
     pub extra_key: Mutex<Option<String>>,
+    /// The value of `extra_key`; `null` means "x".
+    pub extra_value: Mutex<serde_json::Value>,
     /// What `facet_values` answers; `fail` makes it fail too.
     pub facets: Mutex<Vec<String>>,
     /// Collection, field and prefix of every `facet_values` call.
     pub facet_calls: Mutex<Vec<(String, String, String)>>,
+    /// `document` fails with this status and Typesense message.
+    pub document_fail: Mutex<Option<(u16, String)>>,
+    /// Ids asked of `document`, in order.
+    pub document_calls: Mutex<Vec<String>>,
 }
 
 impl FakeDocs {
@@ -435,6 +441,7 @@ impl FakeDocs {
     pub fn answer(&self, query: &DocumentQuery) -> PageResult {
         let found = *self.found.lock().unwrap();
         let extra = self.extra_key.lock().unwrap().clone();
+        let value = self.extra_value.lock().unwrap().clone();
         let start = u64::from(query.page - 1) * u64::from(query.per_page);
         let end = (start + u64::from(query.per_page)).min(found);
         let descending = query.sort_by.as_ref().is_some_and(|s| s.ends_with(":desc"));
@@ -446,7 +453,11 @@ impl FakeDocs {
                     "id": n.to_string(), "title": format!("t{n}"), "price": n,
                 });
                 if let Some(key) = extra.as_ref().filter(|k| !excluded(k)) {
-                    doc[key] = "x".into();
+                    doc[key] = if value.is_null() {
+                        "x".into()
+                    } else {
+                        value.clone()
+                    };
                 }
                 doc.as_object().unwrap().clone()
             })
@@ -498,6 +509,28 @@ impl DocumentsBackend for FakeDocsBackend {
             None => Ok(self.0.facets.lock().unwrap().clone()),
         };
         Box::pin(async move { answer })
+    }
+
+    fn document(
+        &self,
+        _: Client,
+        _: String,
+        id: String,
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
+        let answer = match self.0.document_fail.lock().unwrap().clone() {
+            Some(e) => Err(http_error(e)),
+            None => Ok(serde_json::json!({
+                "id": id, "title": format!("t{id}"), "embedding": [0.25, 0.5],
+            })),
+        };
+        self.0.document_calls.lock().unwrap().push(id);
+        let hold = self.0.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
     }
 }
 
@@ -592,6 +625,10 @@ pub const CLEAR_FILTER: &str = key("cmd-shift-f", "ctrl-shift-f");
 pub const PIN: &str = key("cmd-shift-p", "ctrl-shift-p");
 pub const NARROWER: &str = key("cmd-shift-left", "ctrl-shift-left");
 pub const WIDER: &str = key("cmd-shift-right", "ctrl-shift-right");
+pub const INSPECTOR: &str = key("cmd-i", "ctrl-i");
+pub const GO_TO: &str = key("cmd-g", "ctrl-g");
+pub const COPY_CELL: &str = key("cmd-c", "ctrl-c");
+pub const COPY_ROW: &str = key("cmd-alt-c", "ctrl-alt-c");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 pub fn fake_connector(

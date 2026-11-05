@@ -45,7 +45,12 @@ gpui_kit::actions!(
         TogglePinColumn,
         NarrowerColumn,
         WiderColumn,
-        ClearFilter
+        ClearFilter,
+        ToggleInspector,
+        OpenDocument,
+        GoToId,
+        CopyCell,
+        CopyRowJson
     ]
 );
 
@@ -186,6 +191,22 @@ const WIDER: &str = "ctrl-shift-right";
 const CLEAR_FILTER: &str = "cmd-shift-f";
 #[cfg(not(target_os = "macos"))]
 const CLEAR_FILTER: &str = "ctrl-shift-f";
+#[cfg(target_os = "macos")]
+const TOGGLE_INSPECTOR: &str = "cmd-i";
+#[cfg(not(target_os = "macos"))]
+const TOGGLE_INSPECTOR: &str = "ctrl-i";
+#[cfg(target_os = "macos")]
+const GO_TO_ID: &str = "cmd-g";
+#[cfg(not(target_os = "macos"))]
+const GO_TO_ID: &str = "ctrl-g";
+#[cfg(target_os = "macos")]
+const COPY_CELL: &str = "cmd-c";
+#[cfg(not(target_os = "macos"))]
+const COPY_CELL: &str = "ctrl-c";
+#[cfg(target_os = "macos")]
+const COPY_ROW: &str = "cmd-alt-c";
+#[cfg(not(target_os = "macos"))]
+const COPY_ROW: &str = "ctrl-alt-c";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -249,6 +270,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(WIDER, WiderColumn, Some(DOCUMENTS)),
         KeyBinding::new(FIND, FocusSearch, Some(DOCUMENTS)),
         KeyBinding::new(CLEAR_FILTER, ClearFilter, Some(DOCUMENTS)),
+        KeyBinding::new(TOGGLE_INSPECTOR, ToggleInspector, Some(DOCUMENTS)),
+        KeyBinding::new(GO_TO_ID, GoToId, Some(DOCUMENTS)),
+        KeyBinding::new(COPY_ROW, CopyRowJson, Some(DOCUMENTS)),
+        KeyBinding::new("enter", OpenDocument, Some(DOCUMENTS_TABLE)),
+        // Only on the table: elsewhere ⌘C copies the selected text.
+        KeyBinding::new(COPY_CELL, CopyCell, Some(DOCUMENTS_TABLE)),
         // Schema actions must not fire from the documents view, where they are not shown.
         KeyBinding::new(EDIT, NoAction, Some(DOCUMENTS)),
         KeyBinding::new(CLONE, NoAction, Some(DOCUMENTS)),

@@ -51,7 +51,7 @@ pub const KNOWN_ATTRIBUTES: [&str; 14] = [
 ];
 
 /// How long the Copy button says "Copied".
-const COPIED_FOR: Duration = Duration::from_secs(2);
+pub(super) const COPIED_FOR: Duration = Duration::from_secs(2);
 /// Row height of the field table, for sizing it to its content.
 const ROW_HEIGHT: f32 = 32.;
 /// The field table scrolls beyond this many rows.
