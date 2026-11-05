@@ -8,6 +8,9 @@ use tessera_client::Collection;
 /// Credential keys inside `embed.model_config`.
 const SECRET_KEYS: [&str; 4] = ["api_key", "access_token", "refresh_token", "client_secret"];
 
+mod validate;
+pub use validate::{Issue, IssuePath, Severity, has_errors, validate};
+
 /// A Typesense field type. Unknown strings pass through as [`FieldType::Other`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(missing_docs)] // the variants are the Typesense type names
