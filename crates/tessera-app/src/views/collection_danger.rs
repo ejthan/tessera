@@ -229,7 +229,16 @@ fn open(
                     Kind::Delete => c.invalidate_collections(cx),
                 });
                 if kind == Kind::Delete {
-                    state.update(cx, |s, cx| s.close_collection(profile.id, name, cx));
+                    // A favorite of a deleted collection would leave a sidebar entry that opens
+                    // a 404 (UX rule 4).
+                    let unstarred = state.update(cx, |s, cx| {
+                        s.close_collection(profile.id, name.clone(), cx);
+                        s.set_favorite(profile.id, &name, false, cx)
+                    });
+                    if let Err(detail) = unstarred.await {
+                        let text = t!("danger.delete.favorite_error", name = name, detail = detail);
+                        return Err(text.to_string().into());
+                    }
                 }
                 Ok(())
             })

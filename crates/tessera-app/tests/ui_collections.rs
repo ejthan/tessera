@@ -885,3 +885,44 @@ async fn favorite_after_a_failed_load_says_so_inline(cx: &mut TestAppContext) {
         assert!(text.contains("could not be read"), "{text}");
     });
 }
+
+#[gpui_kit::test]
+async fn deleting_a_favorite_removes_its_sidebar_entry(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    f.row_shortcut(cx, "books", TOGGLE_FAVORITE).await;
+    let sidebar = f.sidebar("collection.books");
+    assert!(f.shown(cx, &sidebar));
+    f.row_shortcut(cx, "books", DELETE).await;
+    f.confirm(cx, "books").await;
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    assert!(!f.shown(cx, &sidebar));
+    let favorites = f
+        .state
+        .read_with(cx, |s, _| s.profiles[0].favorite_collections.clone());
+    assert!(favorites.is_empty(), "{favorites:?}");
+}
+
+#[gpui_kit::test]
+async fn failed_favorite_removal_after_delete_shows_inline(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("file");
+    std::fs::write(&blocker, "").unwrap();
+    // The parent of the store path is a file, so every save fails.
+    let path = blocker.join("connections.json");
+    let f = connected_saving_to(cx, Some(data()), false, Some((path, Ok(())))).await;
+    f.open_collections(cx).await;
+    f.row_shortcut(cx, "books", TOGGLE_FAVORITE).await;
+    f.row_shortcut(cx, "books", DELETE).await;
+    f.confirm(cx, "books").await;
+    wait_for_element(cx, f.handle, "danger.error".into(), true).await;
+    act(cx, f.handle, |window, _| {
+        let text = label(window, "danger.error");
+        assert!(
+            text.contains("Deleted books") && text.contains("favorite"),
+            "{text}"
+        );
+    });
+    assert_eq!(*f.backend.deletes.lock().unwrap(), ["books"]);
+    assert!(!f.shown(cx, &f.sidebar("collection.books")));
+}

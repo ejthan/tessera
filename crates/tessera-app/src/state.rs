@@ -308,6 +308,24 @@ impl AppState {
         collection: &str,
         cx: &mut Context<Self>,
     ) -> Task<Result<(), String>> {
+        let favorite = self
+            .profiles
+            .iter()
+            .chain(self.temporary.as_ref().map(|(p, _)| p))
+            .find(|p| p.id == profile)
+            .is_some_and(|p| p.favorite_collections.iter().any(|c| c == collection));
+        self.set_favorite(profile, collection, !favorite, cx)
+    }
+
+    /// Stars (`favorite`) or unstars `collection` of profile `profile` and saves, like
+    /// [`Self::toggle_favorite`]. Nothing to change is `Ok` without a save.
+    pub fn set_favorite(
+        &mut self,
+        profile: Uuid,
+        collection: &str,
+        favorite: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
         let saved = self.profiles.iter_mut().find(|p| p.id == profile);
         let temporary = self
             .temporary
@@ -320,11 +338,15 @@ impl AppState {
         }) else {
             return Task::ready(Ok(()));
         };
-        match p.favorite_collections.iter().position(|c| c == collection) {
-            Some(i) => {
+        match (
+            p.favorite_collections.iter().position(|c| c == collection),
+            favorite,
+        ) {
+            (Some(i), false) => {
                 p.favorite_collections.remove(i);
             }
-            None => p.favorite_collections.push(collection.to_owned()),
+            (None, true) => p.favorite_collections.push(collection.to_owned()),
+            _ => return Task::ready(Ok(())),
         }
         let favorites = p.favorite_collections.clone();
         if let Some(conn) = self.connection(profile, cx) {
