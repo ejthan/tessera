@@ -96,7 +96,11 @@ pub fn validate(draft: &SchemaDraft) -> Vec<Issue> {
             if !vector {
                 add(p, "schema.issue.embed_type", Error);
             }
-            if e.get("from").is_none() {
+            if !e
+                .get("from")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty())
+            {
                 add(p, "schema.issue.embed_from", Error);
             }
         }
