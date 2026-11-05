@@ -3,6 +3,7 @@
 //! Tessera desktop app.
 
 pub mod actions;
+pub mod collections;
 pub mod connection;
 pub mod i18n;
 pub mod poller;
@@ -94,6 +95,9 @@ pub fn run(launch: Launch) -> Result<(), String> {
         cx.set_global(poller::CollectionsFetcherGlobal(poller::tokio_collections(
             handle.clone(),
         )));
+        cx.set_global(collections::CollectionsBackendGlobal(
+            collections::tokio_backend(handle.clone()),
+        ));
         cx.set_global(runtime::Tokio(handle));
         gpui_kit::init(cx);
         i18n::init();

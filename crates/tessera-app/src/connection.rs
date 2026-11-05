@@ -19,6 +19,7 @@ use tessera_core::profile::{InvalidNode, Profile};
 use tokio::runtime::Handle;
 use url::Url;
 
+use crate::collections::{CollectionsBackendGlobal, CollectionsCache};
 use crate::poller::{CollectionsFetcherGlobal, DEFAULT_INTERVAL, HISTORY_WINDOW, NodeStatus};
 use crate::runtime::AbortOnDrop;
 
@@ -166,7 +167,10 @@ pub struct ConnectionState {
     pub paused: bool,
     /// Time between two polls of a node, kept for the session.
     pub interval: Duration,
+    /// Collections with schemas and aliases, shared by the collection views.
+    pub collection_cache: CollectionsCache,
     collections_task: Option<Task<()>>,
+    cache_task: Option<Task<()>>,
 }
 
 impl ConnectionState {
@@ -188,6 +192,8 @@ impl ConnectionState {
             paused: false,
             interval: DEFAULT_INTERVAL,
             collections_task: None,
+            collection_cache: CollectionsCache::default(),
+            cache_task: None,
             profile,
         }
     }
@@ -219,6 +225,46 @@ impl ConnectionState {
     /// Reloads the collections as a user action (⌘R / Ctrl+R).
     pub fn refresh_collections(&mut self, cx: &mut Context<Self>) {
         self.load_collections(false, cx);
+    }
+
+    /// Loads collections and aliases into [`Self::collection_cache`]. A load still running is
+    /// cancelled. The old list stays visible until the new one arrives; a failure keeps it
+    /// and sets the error.
+    pub fn load_collection_list(&mut self, cx: &mut Context<Self>) {
+        let Some(connected) = &self.connected else {
+            return;
+        };
+        let load = cx
+            .global::<CollectionsBackendGlobal>()
+            .0
+            .list(connected.client.clone());
+        self.collection_cache.loading = true;
+        self.cache_task = Some(cx.spawn(async move |this, cx| {
+            let result = load.await;
+            this.update(cx, |state, cx| {
+                let cache = &mut state.collection_cache;
+                cache.loading = false;
+                match result {
+                    Ok((collections, aliases)) => {
+                        cache.collections = Some(collections);
+                        cache.aliases = aliases;
+                        cache.loaded_at = Some(Instant::now());
+                        cache.error = None;
+                    }
+                    Err(e) => cache.error = Some(error_text(&e, &state.profile).into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Drops the cached list (and a running load) and loads it again.
+    pub fn invalidate_collections(&mut self, cx: &mut Context<Self>) {
+        self.collection_cache = CollectionsCache::default();
+        self.cache_task = None;
+        self.load_collection_list(cx);
     }
 
     /// Loads the collections through the polling client (`polling`) or the user's client.

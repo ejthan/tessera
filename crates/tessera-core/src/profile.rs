@@ -38,6 +38,9 @@ pub struct Profile {
     /// TLS settings.
     #[serde(default)]
     pub tls: TlsOptions,
+    /// Names of the collections the user starred.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favorite_collections: Vec<String>,
 }
 
 fn default_timeout() -> u32 {
@@ -62,6 +65,7 @@ impl Profile {
             retries: default_retries(),
             read_only: false,
             tls: TlsOptions::default(),
+            favorite_collections: Vec::new(),
         }
     }
 }
@@ -341,5 +345,13 @@ mod tests {
         let c = Environment::Custom("prod".into());
         assert!(c.is_prod());
         assert_eq!(serde_json::to_string(&c).unwrap(), r#""prod""#);
+    }
+
+    #[test]
+    fn m1_file_loads_without_favorites() {
+        let json = r#"{"id":"67e55044-10b1-426f-9247-bb680e5fe0c8","name":"old","nodes":[]}"#;
+        let p: Profile = serde_json::from_str(json).unwrap();
+        assert!(p.favorite_collections.is_empty());
+        assert!(!serde_json::to_string(&p).unwrap().contains("favorite"));
     }
 }

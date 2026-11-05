@@ -290,6 +290,32 @@ impl AppState {
         })
     }
 
+    /// Stars or unstars `collection` of profile `profile` and saves. A temporary connection
+    /// keeps the favorite in memory only.
+    pub fn toggle_favorite(&mut self, profile: Uuid, collection: &str, cx: &mut Context<Self>) {
+        fn toggle(p: &mut Profile, collection: &str) {
+            match p.favorite_collections.iter().position(|c| c == collection) {
+                Some(i) => {
+                    p.favorite_collections.remove(i);
+                }
+                None => p.favorite_collections.push(collection.to_owned()),
+            }
+        }
+        if let Some(p) = self.profiles.iter_mut().find(|p| p.id == profile) {
+            toggle(p, collection);
+            self.save(cx).detach();
+        } else if let Some((p, _)) = self.temporary.as_mut().filter(|(p, _)| p.id == profile) {
+            toggle(p, collection);
+        }
+        if let Some(conn) = self.connection(profile, cx) {
+            conn.update(cx, |c, cx| {
+                toggle(&mut c.profile, collection);
+                cx.notify();
+            });
+        }
+        cx.notify();
+    }
+
     /// Removes a profile, its connection and its stored key, and saves.
     pub fn delete_profile(
         &mut self,
@@ -988,5 +1014,63 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[gpui_kit::test]
+    async fn favorite_is_saved(cx: &mut TestAppContext) {
+        let _rt = tokio(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let profile = Profile::new("saved", vec![node()]);
+        let id = profile.id;
+        let file = ConnectionsFile {
+            profiles: vec![profile],
+            ..Default::default()
+        };
+        let state = new_state(
+            cx,
+            Ok(file),
+            Some(path.clone()),
+            Arc::new(MemoryStore::default()),
+        );
+        state.update(cx, |s, cx| s.toggle_favorite(id, "books", cx));
+        let save = state.update(cx, |s, cx| s.save(cx));
+        save.await.unwrap();
+        let saved = store::load(&path).unwrap();
+        assert_eq!(saved.profiles[0].favorite_collections, ["books"]);
+        state.update(cx, |s, cx| s.toggle_favorite(id, "books", cx));
+        state.update(cx, |s, cx| s.save(cx)).await.unwrap();
+        assert!(
+            store::load(&path).unwrap().profiles[0]
+                .favorite_collections
+                .is_empty()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn temporary_favorite_is_not_saved(cx: &mut TestAppContext) {
+        let _rt = tokio(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let profile = Profile::new("tmp", vec![node()]);
+        let id = profile.id;
+        let state = new_state(
+            cx,
+            Ok(ConnectionsFile::default()),
+            Some(path.clone()),
+            Arc::new(MemoryStore::default()),
+        );
+        state.update(cx, |s, cx| {
+            s.temporary = Some((profile, SecretString::from("k")));
+            s.toggle_favorite(id, "books", cx);
+        });
+        cx.run_until_parked();
+        state.read_with(cx, |s, _| {
+            assert_eq!(
+                s.temporary.as_ref().unwrap().0.favorite_collections,
+                ["books"]
+            );
+        });
+        assert!(!path.exists(), "nothing written");
     }
 }
