@@ -66,6 +66,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2.9.3
+      # Keeps the seed sets valid against both Typesense versions.
+      - run: cargo xtask seed --url http://localhost:8108 --key xyz
       - run: cargo test -p tessera-client --test live --locked -- --ignored
         env:
           TESSERA_IT_URL: http://localhost:8108
