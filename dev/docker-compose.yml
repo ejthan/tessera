@@ -1,0 +1,18 @@
+# Local Typesense for development and integration tests.
+#   docker compose -f dev/docker-compose.yml up -d
+# The fallback key `xyz` is for local development only. Never use it on a
+# server that is reachable from other machines.
+services:
+  typesense:
+    image: typesense/typesense:${TYPESENSE_VERSION:-30.2}
+    command: --data-dir /data --api-key=${TYPESENSE_API_KEY:-xyz} --enable-cors=false
+    ports:
+      # Set TYPESENSE_PORT if 8108 is taken on your machine.
+      - "${TYPESENSE_PORT:-8108}:8108"
+    volumes:
+      - typesense-data:/data
+    # No healthcheck: the image ships without curl or wget. The live tests
+    # poll /health themselves.
+
+volumes:
+  typesense-data:

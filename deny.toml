@@ -1,0 +1,47 @@
+# cargo-deny configuration. Every allowed license must be compatible with
+# GPL-3.0-or-later; check the FSF list before adding one.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+# Gate only Tessera's own direct dependencies on "unmaintained". The GPUI stack
+# pulls in several unmaintained crates (ttf-parser, rustybuzz, zvariant, …) that
+# we cannot replace; vulnerabilities still fail for every crate.
+unmaintained = "workspace"
+
+[licenses]
+version = 2
+# The list covers crates M1+ will add; do not warn about entries not used yet.
+unused-allowed-license = "allow"
+allow = [
+    "GPL-3.0-or-later",
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+]
+
+# Mozilla's CA certificate data, pulled in by reqwest's rustls platform verifier.
+# CDLA-Permissive-2.0 is a permissive data license (attribution only); it covers
+# certificate data, not code linked into Tessera.
+[[licenses.exceptions]]
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

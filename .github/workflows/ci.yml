@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Packages GPUI needs on Ubuntu 24.04 (from the GPUI Kit 0.9 installation guide).
+  LINUX_DEPS: >-
+    gcc g++ clang libfontconfig-dev libwayland-dev libwebkit2gtk-4.1-dev
+    libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev
+    vulkan-validationlayers libvulkan1
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: |
+          # shellcheck disable=SC2086 # the package list is meant to split into words
+          sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
+      - uses: Swatinem/rust-cache@v2.9.3
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - if: runner.os == 'Linux'
+        run: |
+          # shellcheck disable=SC2086 # the package list is meant to split into words
+          sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
+      - uses: Swatinem/rust-cache@v2.9.3
+      - run: cargo test --workspace --locked
+
+  integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        typesense: ["30.0", "30.2"]
+    runs-on: ubuntu-24.04
+    services:
+      typesense:
+        image: typesense/typesense:${{ matrix.typesense }}
+        # Service containers cannot take arguments, so pass them as env.
+        env:
+          TYPESENSE_DATA_DIR: /tmp
+          TYPESENSE_API_KEY: xyz
+        ports:
+          - 8108:8108
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.3
+      - run: cargo test -p tessera-client --locked -- --ignored
+        env:
+          TESSERA_IT_URL: http://localhost:8108
+          TESSERA_IT_KEY: xyz
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            name: macos-arm64
+          - os: macos-15-intel
+            name: macos-x64
+          - os: ubuntu-24.04
+            name: linux-x64
+          - os: windows-2025
+            name: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - if: runner.os == 'Linux'
+        run: |
+          # shellcheck disable=SC2086 # the package list is meant to split into words
+          sudo apt-get update && sudo apt-get install -y $LINUX_DEPS xvfb mesa-vulkan-drivers
+      - uses: Swatinem/rust-cache@v2.9.3
+      - run: cargo build --release --locked -p tessera-app
+      - name: Check binary size (NF5, < 40 MB)
+        shell: bash
+        run: |
+          bin=target/release/tessera
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          size=$(wc -c < "$bin")
+          echo "$bin: $size bytes"
+          test "$size" -lt 41943040
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: tessera-${{ matrix.name }}
+          path: |
+            target/release/tessera
+            target/release/tessera.exe
+          if-no-files-found: error
+      - name: Smoke start
+        shell: bash
+        env:
+          TESSERA_SMOKE: "1"
+        run: |
+          bin=target/release/tessera
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          run=(perl -e 'alarm 60; exec @ARGV' "$bin")
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a "${run[@]}"
+          else
+            "${run[@]}"
+          fi
