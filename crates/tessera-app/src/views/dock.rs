@@ -17,9 +17,12 @@ use rust_i18n::t;
 
 use super::connect_dialog::ConnectDialog;
 use super::import_dialog::ImportDialog;
+use super::overview::Overview;
 use super::sidebar::Sidebar;
-use super::{env_badge, overview, welcome};
+use super::{env_badge, welcome};
+use crate::actions::{OVERVIEW, Refresh, TogglePolling};
 use crate::connection::ConnectionState;
+use crate::poller::Poller;
 use crate::state::AppState;
 
 /// How long the Copy button says "Copied".
@@ -97,15 +100,23 @@ impl Render for SidebarPanel {
 /// A center tab with the overview of one connection.
 pub struct OverviewPanel {
     connection: Entity<ConnectionState>,
+    overview: Entity<Overview>,
     focus_handle: FocusHandle,
+    _poller: Entity<Poller>,
     _subscription: Subscription,
 }
 
 impl OverviewPanel {
-    /// The overview of `connection`, redrawn whenever it changes.
-    pub fn new(connection: Entity<ConnectionState>, cx: &mut Context<Self>) -> Self {
+    /// The overview of `connection`, redrawn whenever it changes. Polls while it is open.
+    pub fn new(
+        connection: Entity<ConnectionState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
+            _poller: Poller::start(connection.clone(), window, cx),
             _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
+            overview: cx.new(|cx| Overview::new(connection.clone(), window, cx)),
             connection,
             focus_handle: cx.focus_handle(),
         }
@@ -149,14 +160,19 @@ impl Render for OverviewPanel {
         let edge = env_badge::color(conn.profile.color, cx.theme());
         v_flex()
             .track_focus(&self.focus_handle)
+            .key_context(OVERVIEW)
+            .on_action(cx.listener(|this, _: &TogglePolling, _, cx| {
+                this.connection
+                    .update(cx, |c, cx| c.set_paused(!c.paused, cx));
+            }))
+            .on_action(cx.listener(|this, _: &Refresh, _, cx| {
+                this.connection
+                    .update(cx, |c, cx| c.refresh_collections(cx));
+            }))
             .size_full()
             .border_t_2()
             .border_color(edge)
-            .children(
-                conn.connected
-                    .as_ref()
-                    .map(|c| overview::render(&c.info, cx)),
-            )
+            .child(self.overview.clone())
     }
 }
 

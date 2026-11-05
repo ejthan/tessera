@@ -694,6 +694,7 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D14 | Request routing in cluster profiles | Active node with failover for idempotent methods; no round robin |
 | D15 | Keyboard shortcut for "Disconnect" in the sidebar (UX rule 5) | ⌘⇧D / Ctrl+Shift+D on the focused sidebar entry, shown in the context menu |
 | D16 | Connection switcher in the title bar? | No dropdown in M1: the title bar shows the selected connection. Switching happens in the sidebar (PR A) and in the tabs (PR B) |
+| D17 | What the overview shows while the active node is down | Its last figures and curves stay, dimmed, with "last sample N s ago" under the node cards; they are not cleared |
 
 ---
 

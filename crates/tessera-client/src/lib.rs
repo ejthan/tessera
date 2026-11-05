@@ -181,6 +181,11 @@ impl Client {
         }
     }
 
+    /// Whether this client's events are tagged as user actions or as polling.
+    pub fn origin(&self) -> Origin {
+        self.origin
+    }
+
     /// All nodes, normalized to end in `/`. A nearest node not among `nodes` comes first.
     pub fn nodes(&self) -> &[Url] {
         &self.nodes
@@ -406,6 +411,11 @@ pub struct NodeClient {
 }
 
 impl NodeClient {
+    /// This node's base URL, always ending in `/`.
+    pub fn url(&self) -> &Url {
+        &self.client.nodes[self.index]
+    }
+
     /// `GET /health` on this node. See [`Client::health`].
     pub async fn health(&self) -> Result<Health, Error> {
         self.client.health_on(Some(self.index)).await

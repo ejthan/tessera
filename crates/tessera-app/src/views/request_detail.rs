@@ -97,7 +97,7 @@ fn body_text(body: &Body) -> String {
     }
 }
 
-/// `512 B`, `2.0 KB` or `3.4 MB`.
+/// `512 B`, `2.0 KB`, `3.4 MB` or `1.5 GB`.
 pub fn size(bytes: u64) -> String {
     const KB: f64 = 1024.;
     let b = bytes as f64;
@@ -105,8 +105,10 @@ pub fn size(bytes: u64) -> String {
         t!("units.bytes", n = bytes).to_string()
     } else if b < KB * KB {
         t!("units.kb", n = format!("{:.1}", b / KB)).to_string()
-    } else {
+    } else if b < KB * KB * KB {
         t!("units.mb", n = format!("{:.1}", b / KB / KB)).to_string()
+    } else {
+        t!("units.gb", n = format!("{:.1}", b / KB / KB / KB)).to_string()
     }
 }
 
@@ -154,6 +156,7 @@ mod tests {
         assert_eq!(size(512), "512 B");
         assert_eq!(size(2048), "2.0 KB");
         assert_eq!(size(3_565_158), "3.4 MB");
+        assert_eq!(size(3 << 29), "1.5 GB");
     }
 
     #[test]

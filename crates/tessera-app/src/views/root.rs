@@ -190,7 +190,7 @@ impl RootView {
                     panel
                 }
                 None => {
-                    let panel = cx.new(|cx| OverviewPanel::new(conn, cx));
+                    let panel = cx.new(|cx| OverviewPanel::new(conn, window, cx));
                     area.add_panel_view(
                         panel_handle(panel.clone()),
                         DockPlacement::Center,

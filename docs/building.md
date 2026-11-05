@@ -58,10 +58,24 @@ cargo test --workspace
 Integration tests against the local server are ignored by default:
 
 ```bash
-cargo test -p tessera-client -- --ignored
+cargo test -p tessera-client --test live -- --ignored
 ```
 
 They use `http://localhost:18108` and key `xyz`; override with `TESSERA_IT_URL` and `TESSERA_IT_KEY`.
+
+### Cluster tests
+
+A 3-node Raft cluster (ts1 to ts3, API on ports 18111 to 18113, key `xyz`) lives behind the compose profile `cluster`, next to the single node. Plain `up -d` does not start it.
+
+```bash
+docker compose -f dev/docker-compose.yml --profile cluster up -d ts1 ts2 ts3
+cargo test -p tessera-client --test cluster -- --ignored --test-threads=1
+docker compose -f dev/docker-compose.yml --profile cluster stop ts1 ts2 ts3
+```
+
+The cluster uses the fixed subnet 172.30.111.0/24 (static peering IPs); if Docker reports "Pool overlaps", change it in `dev/docker-compose.yml` and `dev/cluster/nodes`.
+
+Run them single-threaded: two tests stop and restart ts3. `TESSERA_CLUSTER_URLS` (comma separated, in the order ts1, ts2, ts3) overrides the URLs. With the override set, the two stop/start tests skip (they print why), because they stop the local compose ts3, not a node of the other cluster. CI runs them nightly (`.github/workflows/nightly.yml`).
 
 ## Smoke start
 

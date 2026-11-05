@@ -6,6 +6,7 @@ pub mod cli;
 pub mod curl;
 pub mod import;
 pub mod log;
+pub mod metrics;
 pub mod profile;
 pub mod redact;
 pub mod secrets;
