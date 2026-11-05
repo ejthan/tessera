@@ -19,6 +19,8 @@ use tessera_app::state::AppState;
 use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::documents::table::DocRows;
 use tessera_client::Collection;
+use tessera_widgets::FilterInput;
+use tessera_widgets::filter_input::FACET_DELAY;
 
 use common::*;
 
@@ -109,6 +111,38 @@ impl Fixture {
     fn click(&self, cx: &mut TestAppContext, id: &str) {
         let id = id.to_string();
         self.act(cx, |window, cx| window.click(id, cx));
+    }
+
+    fn filter(&self, cx: &mut TestAppContext) -> Entity<FilterInput> {
+        let panel = self.panel(cx);
+        cx.update(|cx| panel.read(cx).documents().read(cx).filter().clone())
+    }
+
+    /// Puts the focus in the filter bar and types `text`.
+    fn type_filter(&self, cx: &mut TestAppContext, text: &str) {
+        let filter = self.filter(cx);
+        self.act(cx, |window, cx| {
+            filter.update(cx, |f, cx| f.focus(window, cx));
+            window.input(text, cx);
+        });
+    }
+
+    /// Types `text` into the filter bar and applies it.
+    fn submit_filter(&self, cx: &mut TestAppContext, text: &str) {
+        self.type_filter(cx, text);
+        self.act(cx, |window, cx| window.press("enter", cx));
+        self.settle(cx);
+    }
+
+    fn filter_text(&self, cx: &mut TestAppContext) -> String {
+        let filter = self.filter(cx);
+        cx.update(|cx| filter.read(cx).value(cx))
+    }
+
+    /// The `filter_by` of the last query.
+    fn last_filter(&self) -> Option<String> {
+        let pages = self.docs.pages.lock().unwrap();
+        pages.last().unwrap().filter_by.clone()
     }
 
     /// Keys of the columns drawn, left to right.
@@ -672,4 +706,152 @@ async fn failed_save_shows_inline(cx: &mut TestAppContext) {
     });
     // The change stays in effect.
     assert!(f.cell(cx, "documents.cell.0.title").is_none());
+}
+
+#[gpui_kit::test]
+async fn enter_applies_the_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    *f.docs.found.lock().unwrap() = 7;
+    f.submit_filter(cx, "price:>1");
+    assert_eq!(f.last_filter().as_deref(), Some("price:>1"));
+    let status = f.cell(cx, "documents.status").unwrap();
+    assert!(status.starts_with("7 of 7"), "{status}");
+}
+
+#[gpui_kit::test]
+async fn clearing_the_filter_reloads(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    *f.docs.found.lock().unwrap() = 7;
+    f.submit_filter(cx, "price:>1");
+    *f.docs.found.lock().unwrap() = 1_000;
+    f.click(cx, "documents.filter.clear");
+    f.settle(cx);
+    assert_eq!(f.last_filter(), None);
+    assert_eq!(f.filter_text(cx), "");
+    assert_eq!(
+        f.cell(cx, "documents.filter.clear"),
+        None,
+        "nothing to clear"
+    );
+    let status = f.cell(cx, "documents.status").unwrap();
+    assert!(status.starts_with("1,000 of 1,000"), "{status}");
+}
+
+#[gpui_kit::test]
+async fn clear_shortcut_works_inside_the_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    f.submit_filter(cx, "price:>1");
+    f.act(cx, |window, cx| window.press(CLEAR_FILTER, cx));
+    f.settle(cx);
+    assert_eq!(f.last_filter(), None);
+    assert_eq!(f.filter_text(cx), "");
+}
+
+#[gpui_kit::test]
+async fn an_empty_filter_means_no_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    f.submit_filter(cx, "   ");
+    assert_eq!(f.last_filter(), None);
+}
+
+#[gpui_kit::test]
+async fn bad_filter_shows_the_server_message_and_keeps_rows(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    let message = "Could not find a filter field named `nope` in the schema.";
+    *f.docs.fail.lock().unwrap() = Some((400, message.into()));
+    f.submit_filter(cx, "nope:1");
+    let shown = f.cell(cx, "documents.filter.error").unwrap();
+    assert!(shown.contains(message), "{shown}");
+    assert_eq!(f.cell(cx, "documents.cell.0.title").as_deref(), Some("t0"));
+    *f.docs.fail.lock().unwrap() = None;
+    f.click(cx, "documents.filter.clear");
+    f.settle(cx);
+    assert_eq!(f.cell(cx, "documents.filter.error"), None);
+}
+
+#[gpui_kit::test]
+async fn filter_without_matches_says_so_instead_of_empty_collection(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    *f.docs.found.lock().unwrap() = 0;
+    f.submit_filter(cx, "price:>1");
+    assert_eq!(
+        f.cell(cx, "documents.empty").as_deref(),
+        Some("No documents match this filter")
+    );
+    assert!(f.cell(cx, "documents.filter.clear").is_some());
+}
+
+#[gpui_kit::test]
+async fn focus_shortcut_moves_to_the_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    f.click(cx, "documents.cell.0.title");
+    f.act(cx, |window, cx| {
+        window.press(FIND, cx);
+        window.input("ab", cx);
+    });
+    assert_eq!(f.filter_text(cx), "ab");
+}
+
+#[gpui_kit::test]
+async fn facet_values_come_from_the_backend(cx: &mut TestAppContext) {
+    let schema = products(json!([{"name": "genre", "type": "string", "facet": true}]));
+    let f = open_found(cx, schema, 1_000).await;
+    *f.docs.facets.lock().unwrap() = vec!["crime".into()];
+    f.type_filter(cx, "genre:=cr");
+    cx.executor().advance_clock(FACET_DELAY);
+    f.settle(cx);
+    assert_eq!(
+        *f.docs.facet_calls.lock().unwrap(),
+        [("products".into(), "genre".into(), "cr".into())]
+    );
+    let filter = f.filter(cx);
+    let menu = cx.update(|cx| {
+        let state = filter.read(cx).state().read(cx);
+        let menu = state.completion_menu_state();
+        (menu.open, menu.items[0].label.clone())
+    });
+    assert_eq!(menu, (true, "crime".to_string()));
+}
+
+#[gpui_kit::test]
+async fn failed_facet_fetch_stays_quiet(cx: &mut TestAppContext) {
+    let schema = products(json!([{"name": "genre", "type": "string", "facet": true}]));
+    let f = open_found(cx, schema, 1_000).await;
+    *f.docs.fail.lock().unwrap() = Some((500, "boom".into()));
+    f.type_filter(cx, "genre:=cr");
+    cx.executor().advance_clock(FACET_DELAY);
+    f.settle(cx);
+    assert_eq!(f.cell(cx, "documents.filter.error"), None);
+    assert_eq!(f.cell(cx, "documents.error"), None);
+}
+
+#[gpui_kit::test]
+async fn schema_change_updates_the_fields_offered(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    f.change_schema(cx, products(json!([{"name": "brand", "type": "string"}])));
+    f.type_filter(cx, "b");
+    let filter = f.filter(cx);
+    let labels = cx.update(|cx| {
+        let state = filter.read(cx).state().read(cx);
+        let items = &state.completion_menu_state().items;
+        items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()
+    });
+    assert_eq!(labels, ["brand"]);
+}
+
+#[gpui_kit::test]
+async fn quick_filters_keep_only_the_last_answer(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    let release = f.docs.hold_next();
+    f.submit_filter(cx, "price:>1");
+    *f.docs.found.lock().unwrap() = 3;
+    f.act(cx, |window, cx| {
+        window.input("0", cx);
+        window.press("enter", cx);
+    });
+    release.send(()).ok();
+    f.settle(cx);
+    assert_eq!(f.last_filter().as_deref(), Some("price:>10"));
+    let status = f.cell(cx, "documents.status").unwrap();
+    assert!(status.starts_with("3 of 3"), "{status}");
 }

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Document browser logic: columns, pages and column preferences.
+//! Document browser logic: columns, pages, column preferences and filter completion.
 
 pub mod columns;
+pub mod filter;
 pub mod page;
 pub mod views;
 

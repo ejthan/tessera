@@ -44,7 +44,8 @@ gpui_kit::actions!(
         ToggleColumns,
         TogglePinColumn,
         NarrowerColumn,
-        WiderColumn
+        WiderColumn,
+        ClearFilter
     ]
 );
 
@@ -181,6 +182,10 @@ const NARROWER: &str = "ctrl-shift-left";
 const WIDER: &str = "cmd-shift-right";
 #[cfg(not(target_os = "macos"))]
 const WIDER: &str = "ctrl-shift-right";
+#[cfg(target_os = "macos")]
+const CLEAR_FILTER: &str = "cmd-shift-f";
+#[cfg(not(target_os = "macos"))]
+const CLEAR_FILTER: &str = "ctrl-shift-f";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -242,6 +247,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(PIN, TogglePinColumn, Some(DOCUMENTS)),
         KeyBinding::new(NARROWER, NarrowerColumn, Some(DOCUMENTS)),
         KeyBinding::new(WIDER, WiderColumn, Some(DOCUMENTS)),
+        KeyBinding::new(FIND, FocusSearch, Some(DOCUMENTS)),
+        KeyBinding::new(CLEAR_FILTER, ClearFilter, Some(DOCUMENTS)),
         // Schema actions must not fire from the documents view, where they are not shown.
         KeyBinding::new(EDIT, NoAction, Some(DOCUMENTS)),
         KeyBinding::new(CLONE, NoAction, Some(DOCUMENTS)),

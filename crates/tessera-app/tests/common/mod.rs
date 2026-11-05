@@ -407,6 +407,10 @@ pub struct FakeDocs {
     pub hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// Every document also carries this key, as a key outside the schema does.
     pub extra_key: Mutex<Option<String>>,
+    /// What `facet_values` answers; `fail` makes it fail too.
+    pub facets: Mutex<Vec<String>>,
+    /// Collection, field and prefix of every `facet_values` call.
+    pub facet_calls: Mutex<Vec<(String, String, String)>>,
 }
 
 impl FakeDocs {
@@ -478,6 +482,22 @@ impl DocumentsBackend for FakeDocsBackend {
             }
             answer
         })
+    }
+
+    fn facet_values(
+        &self,
+        _: Client,
+        collection: String,
+        field: String,
+        prefix: String,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<String>, Error>> {
+        let calls = &self.0.facet_calls;
+        calls.lock().unwrap().push((collection, field, prefix));
+        let answer = match self.0.fail.lock().unwrap().clone() {
+            Some(e) => Err(http_error(e)),
+            None => Ok(self.0.facets.lock().unwrap().clone()),
+        };
+        Box::pin(async move { answer })
     }
 }
 
@@ -567,6 +587,8 @@ pub const LOCK_AGAIN: &str = key("cmd-shift-l", "ctrl-shift-l");
 pub const SHOW_DOCUMENTS: &str = key("cmd-1", "ctrl-1");
 pub const SHOW_SCHEMA: &str = key("cmd-2", "ctrl-2");
 pub const SORT: &str = key("cmd-shift-s", "ctrl-shift-s");
+pub const FIND: &str = key("cmd-f", "ctrl-f");
+pub const CLEAR_FILTER: &str = key("cmd-shift-f", "ctrl-shift-f");
 pub const PIN: &str = key("cmd-shift-p", "ctrl-shift-p");
 pub const NARROWER: &str = key("cmd-shift-left", "ctrl-shift-left");
 pub const WIDER: &str = key("cmd-shift-right", "ctrl-shift-right");

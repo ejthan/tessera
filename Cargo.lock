@@ -7506,7 +7506,9 @@ dependencies = [
 name = "tessera-widgets"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "gpui-kit",
+ "lsp-types",
  "rust-i18n",
  "serde_json",
  "tessera-core",

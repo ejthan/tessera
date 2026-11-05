@@ -215,7 +215,8 @@ impl DocRows {
             }
             Err(e) => {
                 let text = error_text(&e, &self.target.connection.read(cx).profile).into();
-                if self.replacing {
+                // With nothing on screen yet there are no old rows for it to stand beside.
+                if self.replacing && self.answered {
                     self.query_error = Some(text);
                 } else {
                     self.error = Some(text);
@@ -355,7 +356,13 @@ impl TableDelegate for DocRows {
         if self.error.is_some() || self.query_error.is_some() {
             return div().into_any_element();
         }
-        let title = SharedString::from(t!("documents.empty").to_string());
+        let filtered = self.filter.is_some();
+        let key = if filtered {
+            "documents.no_match"
+        } else {
+            "documents.empty"
+        };
+        let title = SharedString::from(t!(key).to_string());
         v_flex()
             .id("documents.empty")
             .test_support()
@@ -365,12 +372,14 @@ impl TableDelegate for DocRows {
             .justify_center()
             .gap_1()
             .child(title)
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(t!("documents.empty_hint").to_string()),
-            )
+            .when(!filtered, |this| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(t!("documents.empty_hint").to_string()),
+                )
+            })
             .into_any_element()
     }
 
