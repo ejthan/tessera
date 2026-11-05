@@ -7496,6 +7496,7 @@ dependencies = [
  "gpui-kit",
  "rust-i18n",
  "serde_json",
+ "tessera-core",
 ]
 
 [[package]]
