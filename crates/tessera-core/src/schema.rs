@@ -169,12 +169,9 @@ impl std::fmt::Debug for FieldDraft {
     }
 }
 
-/// Dynamic fields (`string*`, `auto`, regex names) are optional by server default.
+/// Dynamic fields (`string*`, `auto`, names with `*`) are optional by server default.
 fn default_optional(name: &str, t: &FieldType) -> bool {
-    matches!(t, FieldType::StringStar | FieldType::Auto)
-        || name.contains([
-            '.', '*', '+', '?', '[', ']', '(', ')', '{', '}', '|', '^', '$', '\\',
-        ])
+    matches!(t, FieldType::StringStar | FieldType::Auto) || name.contains('*')
 }
 
 impl FieldDraft {
@@ -729,6 +726,31 @@ mod tests {
         assert_eq!(j["fields"][0], json!({"name":"a.*","type":"auto"}));
         assert_eq!(j["fields"][1]["optional"], false);
         assert_eq!(j["fields"][2]["optional"], true);
+    }
+
+    #[test]
+    fn nested_name_with_dot_is_not_dynamic() {
+        let d = SchemaDraft::from_json(
+            r#"{"name":"d","fields":[{"name":"address.city","type":"string"},
+              {"name":"address.zip","type":"string","optional":true},{"name":"num_.*","type":"int32"}]}"#,
+        )
+        .unwrap();
+        assert!(!d.fields[0].optional);
+        assert!(d.fields[2].optional);
+        let j = d.to_json();
+        assert_eq!(
+            j["fields"][0],
+            json!({"name":"address.city","type":"string"})
+        );
+        assert_eq!(j["fields"][1]["optional"], true);
+        assert!(j["fields"][2].get("optional").is_none());
+    }
+
+    #[test]
+    fn debug_hides_secrets_in_extra() {
+        let mut f = FieldDraft::new("a", FieldType::String);
+        f.extra.insert("api_key".into(), "sk-EXTRA".into());
+        assert!(!format!("{f:?}").contains("sk-EXTRA"));
     }
 
     #[test]
