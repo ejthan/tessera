@@ -42,6 +42,8 @@ pub const CONNECT_DIALOG: &str = "ConnectDialog";
 pub const OVERVIEW: &str = "Overview";
 /// Key context of a collections tab.
 pub const COLLECTIONS: &str = "Collections";
+/// Key context of a collection tab.
+pub const COLLECTION: &str = "Collection";
 /// Key context of the collections table; Enter opens the selected row only there, so a
 /// focused header keeps Enter for sorting.
 pub const COLLECTIONS_TABLE: &str = "Collections > DataTable";
@@ -134,6 +136,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("space", TogglePolling, Some("Overview && !Input")),
         KeyBinding::new(REFRESH, Refresh, Some(OVERVIEW)),
         KeyBinding::new(REFRESH, Refresh, Some(COLLECTIONS)),
+        KeyBinding::new(REFRESH, Refresh, Some(COLLECTION)),
         KeyBinding::new(TOGGLE_FAVORITE, ToggleFavorite, Some(COLLECTIONS)),
         KeyBinding::new(FIND, FocusSearch, Some(COLLECTIONS)),
         KeyBinding::new("enter", OpenCollectionRow, Some(COLLECTIONS_TABLE)),

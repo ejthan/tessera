@@ -15,12 +15,12 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use super::connect_dialog::ConnectDialog;
-use super::dock::{CollectionsPanel, OverviewPanel, SidebarPanel, WelcomePanel};
+use super::dock::{CollectionPanel, CollectionsPanel, OverviewPanel, SidebarPanel, WelcomePanel};
 use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
 use crate::actions::{CopyAsCurl, NewConnection, ToggleRequestLog};
 use crate::connection::ConnectionState;
-use crate::state::{AppState, OpenCollections, OpenOverview};
+use crate::state::{AppState, OpenCollection, OpenCollections, OpenOverview};
 
 /// Width of the left sidebar.
 const SIDEBAR_WIDTH: f32 = 240.;
@@ -87,6 +87,13 @@ impl RootView {
                 window,
                 |this, _, event: &OpenCollections, window, cx| {
                     this.open_tab(event.0, Kind::Collections, window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &state,
+                window,
+                |this, _, event: &OpenCollection, window, cx| {
+                    this.open_tab(event.0, Kind::Collection(event.1.clone()), window, cx);
                 },
             ),
             cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, window, cx| {
@@ -191,7 +198,7 @@ impl RootView {
         let existing = self
             .connection_tabs(cx)
             .into_iter()
-            .find(|(_, tab)| tab.kind() == kind && tab.connection(cx) == conn);
+            .find(|(_, tab)| tab.kind(cx) == kind && tab.connection(cx) == conn);
         let welcome = self.welcome.clone();
         let state = self.state.clone();
         let panel = self.dock.update(cx, |area, cx| {
@@ -212,6 +219,10 @@ impl RootView {
                             let panel = cx.new(|cx| CollectionsPanel::new(conn, state, window, cx));
                             (PanelId::from(panel.entity_id()), panel_handle(panel))
                         }
+                        Kind::Collection(name) => {
+                            let panel = cx.new(|cx| CollectionPanel::new(conn, name, window, cx));
+                            (PanelId::from(panel.entity_id()), panel_handle(panel))
+                        }
                     };
                     (id, Some(handle))
                 }
@@ -228,8 +239,10 @@ impl RootView {
         self.displayed = self.displayed_tabs(cx);
         self.set_active(Some(panel), cx);
         // Its shortcuts (search, favorite) work from the moment the tab is open.
-        if let Some(ConnectionTab::Collections(tab)) = connection_tab(self.dock.read(cx), panel) {
-            tab.focus_handle(cx).focus(window, cx);
+        match connection_tab(self.dock.read(cx), panel) {
+            Some(ConnectionTab::Collections(tab)) => tab.focus_handle(cx).focus(window, cx),
+            Some(ConnectionTab::Collection(tab)) => tab.focus_handle(cx).focus(window, cx),
+            _ => {}
         }
     }
 
@@ -250,6 +263,7 @@ impl RootView {
                 match tab {
                     ConnectionTab::Overview(panel) => area.remove_panel(panel, window, cx),
                     ConnectionTab::Collections(panel) => area.remove_panel(panel, window, cx),
+                    ConnectionTab::Collection(panel) => area.remove_panel(panel, window, cx),
                 }
             }
         });
@@ -291,23 +305,27 @@ const REGIONS: [DockPlacement; 4] = [
 ];
 
 /// The kinds of tab a connection has.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Kind {
     Overview,
     Collections,
+    /// The schema tab of the named collection.
+    Collection(String),
 }
 
 /// A tab of one connection.
 enum ConnectionTab {
     Overview(Entity<OverviewPanel>),
     Collections(Entity<CollectionsPanel>),
+    Collection(Entity<CollectionPanel>),
 }
 
 impl ConnectionTab {
-    fn kind(&self) -> Kind {
+    fn kind(&self, cx: &App) -> Kind {
         match self {
             Self::Overview(_) => Kind::Overview,
             Self::Collections(_) => Kind::Collections,
+            Self::Collection(panel) => Kind::Collection(panel.read(cx).name().to_owned()),
         }
     }
 
@@ -315,6 +333,7 @@ impl ConnectionTab {
         PanelId::from(match self {
             Self::Overview(panel) => panel.entity_id(),
             Self::Collections(panel) => panel.entity_id(),
+            Self::Collection(panel) => panel.entity_id(),
         })
     }
 
@@ -322,6 +341,7 @@ impl ConnectionTab {
         match self {
             Self::Overview(panel) => panel.read(cx).connection().clone(),
             Self::Collections(panel) => panel.read(cx).connection().clone(),
+            Self::Collection(panel) => panel.read(cx).connection().clone(),
         }
     }
 }
@@ -329,12 +349,16 @@ impl ConnectionTab {
 /// The connection tab `id`, if the dock holds one under that id.
 fn connection_tab(area: &DockArea, id: PanelId) -> Option<ConnectionTab> {
     let view = area.panel(id)?.view();
-    match view.clone().downcast::<OverviewPanel>() {
-        Ok(panel) => Some(ConnectionTab::Overview(panel)),
-        Err(_) => view
-            .downcast::<CollectionsPanel>()
+    let view = match view.clone().downcast::<OverviewPanel>() {
+        Ok(panel) => return Some(ConnectionTab::Overview(panel)),
+        Err(view) => view,
+    };
+    match view.downcast::<CollectionsPanel>() {
+        Ok(panel) => Some(ConnectionTab::Collections(panel)),
+        Err(view) => view
+            .downcast::<CollectionPanel>()
             .ok()
-            .map(ConnectionTab::Collections),
+            .map(ConnectionTab::Collection),
     }
 }
 

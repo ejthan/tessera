@@ -176,7 +176,7 @@ impl Col {
 }
 
 /// `created_at` in local time, or "–" when the server sent none.
-fn created_text(secs: i64) -> String {
+pub(super) fn created_text(secs: i64) -> String {
     let local = jiff::Timestamp::from_second(secs)
         .ok()
         .filter(|_| secs > 0)

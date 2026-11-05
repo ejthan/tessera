@@ -7439,6 +7439,7 @@ dependencies = [
  "jiff",
  "rust-i18n",
  "secrecy",
+ "serde_json",
  "sys-locale",
  "tempfile",
  "tessera-client",
