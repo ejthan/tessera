@@ -101,7 +101,7 @@ fn default_sort(t: &FieldType) -> bool {
 }
 
 /// One field of a [`SchemaDraft`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct FieldDraft {
     /// Field name or pattern.
     pub name: String,
@@ -139,14 +139,54 @@ pub struct FieldDraft {
     pub extra: Map<String, Value>,
 }
 
+impl std::fmt::Debug for FieldDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut embed = self.embed.clone();
+        if let Some(e) = &mut embed {
+            crate::redact::mask_value(e);
+        }
+        let mut extra = Value::Object(self.extra.clone());
+        crate::redact::mask_value(&mut extra);
+        f.debug_struct("FieldDraft")
+            .field("name", &self.name)
+            .field("type", &self.r#type)
+            .field("facet", &self.facet)
+            .field("optional", &self.optional)
+            .field("index", &self.index)
+            .field("sort", &self.sort)
+            .field("infix", &self.infix)
+            .field("stem", &self.stem)
+            .field("store", &self.store)
+            .field("range_index", &self.range_index)
+            .field("locale", &self.locale)
+            .field("reference", &self.reference)
+            .field("async_reference", &self.async_reference)
+            .field("num_dim", &self.num_dim)
+            .field("vec_dist", &self.vec_dist)
+            .field("embed", &embed)
+            .field("extra", &extra)
+            .finish()
+    }
+}
+
+/// Dynamic fields (`string*`, `auto`, regex names) are optional by server default.
+fn default_optional(name: &str, t: &FieldType) -> bool {
+    matches!(t, FieldType::StringStar | FieldType::Auto)
+        || name.contains([
+            '.', '*', '+', '?', '[', ']', '(', ')', '{', '}', '|', '^', '$', '\\',
+        ])
+}
+
 impl FieldDraft {
     /// A field with the server defaults.
     pub fn new(name: impl Into<String>, r#type: FieldType) -> Self {
+        let name = name.into();
+        let optional = default_optional(&name, &r#type);
         Self {
-            name: name.into(),
+            name,
             r#type,
             facet: false,
-            optional: false,
+            optional,
             index: true,
             sort: None,
             infix: false,
@@ -188,8 +228,9 @@ impl FieldDraft {
         if let Some(n) = self.num_dim {
             m.insert("num_dim".into(), n.into());
         }
-        if self.optional {
-            m.insert("optional".into(), true.into());
+        let dyn_default = default_optional(&self.name, &self.r#type);
+        if self.optional != dyn_default {
+            m.insert("optional".into(), self.optional.into());
         }
         if self.range_index {
             m.insert("range_index".into(), true.into());
@@ -228,11 +269,12 @@ impl FieldDraft {
             None | Some(Value::Null) => None,
             Some(v) => Some(
                 v.as_u64()
+                    .filter(|&n| n > 0)
                     .and_then(|n| u32::try_from(n).ok())
                     .ok_or_else(|| DraftError::msg("`num_dim` must be a positive integer"))?,
             ),
         };
-        f.optional = take_bool(&mut m, "optional")?.unwrap_or(false);
+        f.optional = take_bool(&mut m, "optional")?.unwrap_or(f.optional);
         f.range_index = take_bool(&mut m, "range_index")?.unwrap_or(false);
         f.reference = take_str(&mut m, "reference")?.unwrap_or_default();
         f.sort = take_bool(&mut m, "sort")?;
@@ -435,10 +477,17 @@ impl SchemaDraft {
                 m.insert("type".into(), f.r#type.clone().into());
                 // Cannot fail for well-typed server output; fall back to a bare field.
                 FieldDraft::from_map(m, true).unwrap_or_else(|_| {
-                    FieldDraft::new(f.name.clone(), FieldType::parse(&f.r#type))
+                    // Unexpected attribute types: keep everything the server sent.
+                    let mut d = FieldDraft::new(f.name.clone(), FieldType::parse(&f.r#type));
+                    d.extra = f.attributes.clone();
+                    d
                 })
             })
             .collect();
+        let mut extra = c.extra.clone();
+        if !c.curation_sets.is_empty() {
+            extra.insert("curation_sets".into(), c.curation_sets.clone().into());
+        }
         SchemaDraft {
             name: c.name.clone(),
             fields,
@@ -448,7 +497,7 @@ impl SchemaDraft {
             enable_nested_fields: c.enable_nested_fields,
             synonym_sets: c.synonym_sets.clone(),
             metadata: c.metadata.clone(),
-            extra: c.extra.clone(),
+            extra,
         }
     }
 
@@ -615,7 +664,7 @@ mod tests {
             json!({"name":"m2probe","fields":[
                 {"name":"title","type":"string"},
                 {"name":"n","type":"int32","facet":true},
-                {"name":".*","type":"auto","optional":true}],
+                {"name":".*","type":"auto"}],
               "default_sorting_field":"n"})
         );
     }
@@ -632,6 +681,77 @@ mod tests {
         let cfg = &j["fields"][0]["embed"]["model_config"];
         assert_eq!(cfg["api_key"], "");
         assert_eq!(cfg["model_name"], "openai/x");
+    }
+
+    #[test]
+    fn clone_keeps_curation_sets() {
+        let c = Collection {
+            name: "a".into(),
+            curation_sets: vec!["c1".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            SchemaDraft::from_collection(&c).to_json()["curation_sets"],
+            json!(["c1"])
+        );
+    }
+
+    #[test]
+    fn clone_keeps_attributes_of_odd_fields() {
+        let c: Collection = serde_json::from_value(json!({"name":"a","fields":[
+            {"name":"x","type":"string","facet":"yes","reference":"b.id","future":1}]}))
+        .unwrap();
+        let j = SchemaDraft::from_collection(&c).to_json();
+        assert_eq!(
+            j["fields"][0],
+            json!({"name":"x","type":"string","facet":"yes","reference":"b.id","future":1})
+        );
+    }
+
+    #[test]
+    fn debug_hides_embedding_secrets() {
+        let d = SchemaDraft::from_json(
+            r#"{"name":"e","fields":[{"name":"emb","type":"float[]","embed":{"from":["t"],
+              "model_config":{"api_key":"sk-SECRET"}}}]}"#,
+        )
+        .unwrap();
+        assert!(!format!("{d:?}").contains("sk-SECRET"));
+    }
+
+    #[test]
+    fn dynamic_fields_are_optional_by_default() {
+        let d = SchemaDraft::from_json(
+            r#"{"name":"d","fields":[{"name":"a.*","type":"auto"},
+              {"name":"b","type":"string*","optional":false},{"name":"c","type":"string","optional":true}]}"#,
+        )
+        .unwrap();
+        let j = d.to_json();
+        assert_eq!(j["fields"][0], json!({"name":"a.*","type":"auto"}));
+        assert_eq!(j["fields"][1]["optional"], false);
+        assert_eq!(j["fields"][2]["optional"], true);
+    }
+
+    #[test]
+    fn key_order_is_fixed() {
+        let d = SchemaDraft::from_json(
+            r#"{"zz":1,"token_separators":["-"],"default_sorting_field":"n","name":"k",
+              "fields":[{"future":1,"vec_dist":"ip","facet":true,"type":"float[]","name":"n","num_dim":2}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&d.to_json()).unwrap(),
+            r#"{"name":"k","fields":[{"name":"n","type":"float[]","facet":true,"num_dim":2,"vec_dist":"ip","future":1}],"default_sorting_field":"n","token_separators":["-"],"zz":1}"#
+        );
+    }
+
+    #[test]
+    fn zero_num_dim_is_rejected() {
+        assert!(
+            SchemaDraft::from_json(
+                r#"{"name":"a","fields":[{"name":"v","type":"float[]","num_dim":0}]}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
