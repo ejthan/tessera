@@ -94,6 +94,19 @@ mod tests {
     }
 
     #[test]
+    fn curl_masks_embedding_credentials() {
+        let mut e = entry(1, Method::POST, Origin::User, Some(201));
+        e.event.path = "/collections".into();
+        let json = r#"{"name":"c","fields":[{"name":"emb","type":"float[]","embed":{"from":["title"],"model_config":{"model_name":"openai/text-embedding-3-small","api_key":"sk-embed-1234","access_token":"at-5678","refresh_token":"rt-9012","client_secret":"cs-3456"}}}]}"#;
+        e.event.request_body = Some(body(json, json.len()));
+        let out = command(&e);
+        for s in ["sk-embed-1234", "at-5678", "rt-9012", "cs-3456"] {
+            assert!(!out.contains(s), "{out}");
+        }
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
     fn curl_escapes_single_quotes() {
         let mut e = entry(1, Method::GET, Origin::User, Some(200));
         e.event.query = Some("q=it's".into());
