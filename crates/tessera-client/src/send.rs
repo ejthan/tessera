@@ -2,11 +2,12 @@
 
 //! The one path every request takes.
 
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use reqwest::Method;
 use reqwest::header::HeaderValue;
 use secrecy::ExposeSecret;
+use serde_json::Value;
 
 use crate::event::{Body, RequestEvent, next_id};
 use crate::{Client, Error};
@@ -18,15 +19,17 @@ impl Client {
     /// A read-only client refuses every method but [`READ_METHODS`](crate::READ_METHODS)
     /// here, before anything is sent or reported, so no caller can get around it. A key that
     /// is no valid header value is [`Error::InvalidKey`], also before anything is reported.
+    /// `timeout` replaces the client's for this request.
     pub(crate) async fn send(
         &self,
         node: usize,
         method: Method,
         path: &str,
         query: Option<&str>,
-        body: Option<String>,
+        body: Option<&Value>,
+        timeout: Option<Duration>,
     ) -> Result<(u16, String), Error> {
-        if self.read_only && !crate::READ_METHODS.contains(&method) {
+        if self.is_read_only() && !crate::READ_METHODS.contains(&method) {
             return Err(Error::ReadOnly { method });
         }
         let base = &self.nodes[node];
@@ -41,6 +44,7 @@ impl Client {
         key_header.set_sensitive(true);
         let mut request_headers = Vec::new();
         // Event copies of the body are only made when someone listens.
+        let body = body.map(Value::to_string);
         let request_body = self
             .hook
             .as_ref()
@@ -49,7 +53,7 @@ impl Client {
             .http
             .request(method.clone(), url.clone())
             .header("X-TYPESENSE-API-KEY", key_header)
-            .timeout(self.timeout);
+            .timeout(timeout.unwrap_or(self.timeout));
         if let Some(body) = body {
             request_headers.push(("content-type".to_string(), "application/json".to_string()));
             request = request

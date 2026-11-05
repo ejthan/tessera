@@ -11,7 +11,7 @@ mod send;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 pub use collections::{Alias, Collection, Field, SchemaChange};
@@ -20,6 +20,7 @@ pub use event::{BODY_LIMIT, Body, Origin, RequestEvent, RequestHook};
 pub use models::{CollectionSummary, Debug, Health, KeyAccess, Metrics, RaftState, Stats};
 pub use reqwest::Method;
 use secrecy::SecretString;
+use serde_json::Value;
 use url::Url;
 
 /// The only methods a read-only client sends. Every other one, including PUT (an upsert in
@@ -31,6 +32,9 @@ pub const FAILOVER_METHODS: [Method; 4] = [Method::GET, Method::HEAD, Method::PU
 
 /// Default timeout for every request.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Timeout for schema changes, deletes and truncates, which answer only when the server is done.
+pub const LONG_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// How a [`Client`] talks to its nodes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +68,7 @@ impl Default for ClientOptions {
 
 /// A connection to a Typesense cluster of one or more nodes.
 ///
-/// Clones share the active node.
+/// Clones share the active node and the read-only flag.
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
@@ -73,7 +77,7 @@ pub struct Client {
     key: SecretString,
     timeout: Duration,
     retries: u32,
-    read_only: bool,
+    read_only: Arc<AtomicBool>,
     hook: Option<RequestHook>,
     origin: Origin,
 }
@@ -87,7 +91,7 @@ impl fmt::Debug for Client {
             .field("key", &"••••")
             .field("timeout", &self.timeout)
             .field("retries", &self.retries)
-            .field("read_only", &self.read_only)
+            .field("read_only", &self.is_read_only())
             .finish_non_exhaustive()
     }
 }
@@ -157,7 +161,7 @@ impl Client {
             key,
             timeout: options.timeout,
             retries: options.retries,
-            read_only: options.read_only,
+            read_only: Arc::new(AtomicBool::new(options.read_only)),
             hook: None,
             origin: Origin::User,
         })
@@ -173,6 +177,16 @@ impl Client {
     pub fn with_hook(mut self, hook: RequestHook) -> Self {
         self.hook = Some(hook);
         self
+    }
+
+    /// Locks or unlocks writes, for this client and all its clones.
+    pub fn set_read_only(&self, read_only: bool) {
+        self.read_only.store(read_only, Ordering::Relaxed);
+    }
+
+    /// Whether writes are refused.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only.load(Ordering::Relaxed)
     }
 
     /// The same client, with its events tagged [`Origin::Polling`].
@@ -270,6 +284,32 @@ impl Client {
         self.aliases_on(None).await
     }
 
+    /// `POST /collections` with `schema` as the body, sent as is.
+    pub async fn create_collection(&self, schema: &Value) -> Result<Collection, Error> {
+        self.create_collection_on(None, schema).await
+    }
+
+    /// `PATCH /collections/{name}` with `patch` as the body. Uses [`LONG_TIMEOUT`].
+    pub async fn update_collection(&self, name: &str, patch: &Value) -> Result<(), Error> {
+        self.update_collection_on(None, name, patch).await
+    }
+
+    /// `DELETE /collections/{name}`. Uses [`LONG_TIMEOUT`].
+    pub async fn delete_collection(&self, name: &str) -> Result<(), Error> {
+        self.delete_collection_on(None, name).await
+    }
+
+    /// `DELETE /collections/{name}/documents?truncate=true`: the number of documents deleted.
+    /// Uses [`LONG_TIMEOUT`].
+    pub async fn truncate_collection(&self, name: &str) -> Result<u64, Error> {
+        self.truncate_collection_on(None, name).await
+    }
+
+    /// `GET /operations/schema_changes`: schema changes in progress, empty when idle.
+    pub async fn schema_changes(&self) -> Result<Vec<SchemaChange>, Error> {
+        self.schema_changes_on(None).await
+    }
+
     /// `GET /keys`, to learn whether the key is an admin key. Only the status counts:
     /// `200` is [`KeyAccess::Admin`], `401` or `403` is [`KeyAccess::Restricted`].
     ///
@@ -283,7 +323,7 @@ impl Client {
     /// guard and failover only; not part of the supported API.
     #[doc(hidden)]
     pub async fn request(&self, method: Method, path: &str) -> Result<(u16, String), Error> {
-        self.call(None, method, path, None).await
+        self.call(None, method, path, None, None, None).await
     }
 
     // Endpoints are written once; `pin` is `Some` for a `NodeClient`, `None` for the cluster.
@@ -354,6 +394,58 @@ impl Client {
         Ok(list.aliases)
     }
 
+    async fn create_collection_on(
+        &self,
+        pin: Option<usize>,
+        schema: &Value,
+    ) -> Result<Collection, Error> {
+        let body = self
+            .write(pin, Method::POST, "collections", None, Some(schema), None)
+            .await?;
+        serde_json::from_str(&body).map_err(Error::Decode)
+    }
+
+    async fn update_collection_on(
+        &self,
+        pin: Option<usize>,
+        name: &str,
+        patch: &Value,
+    ) -> Result<(), Error> {
+        let path = collections::collection_path(name, "");
+        let long = Some(LONG_TIMEOUT);
+        self.write(pin, Method::PATCH, &path, None, Some(patch), long)
+            .await
+            .map(drop)
+    }
+
+    async fn delete_collection_on(&self, pin: Option<usize>, name: &str) -> Result<(), Error> {
+        let path = collections::collection_path(name, "");
+        let long = Some(LONG_TIMEOUT);
+        self.write(pin, Method::DELETE, &path, None, None, long)
+            .await
+            .map(drop)
+    }
+
+    async fn truncate_collection_on(&self, pin: Option<usize>, name: &str) -> Result<u64, Error> {
+        #[derive(serde::Deserialize)]
+        struct Deleted {
+            num_deleted: u64,
+        }
+        let path = collections::collection_path(name, "/documents");
+        let long = Some(LONG_TIMEOUT);
+        let query = Some("truncate=true");
+        let body = self
+            .write(pin, Method::DELETE, &path, query, None, long)
+            .await?;
+        let deleted: Deleted = serde_json::from_str(&body).map_err(Error::Decode)?;
+        Ok(deleted.num_deleted)
+    }
+
+    async fn schema_changes_on(&self, pin: Option<usize>) -> Result<Vec<SchemaChange>, Error> {
+        let body = self.get_ok(pin, "operations/schema_changes", None).await?;
+        serde_json::from_str(&body).map_err(Error::Decode)
+    }
+
     async fn keys_probe_on(&self, pin: Option<usize>) -> Result<KeyAccess, Error> {
         match self.get(pin, "keys", None).await? {
             (200, _) => Ok(KeyAccess::Admin),
@@ -368,7 +460,23 @@ impl Client {
         path: &str,
         query: Option<&str>,
     ) -> Result<(u16, String), Error> {
-        self.call(pin, Method::GET, path, query).await
+        self.call(pin, Method::GET, path, query, None, None).await
+    }
+
+    /// The body of a `2xx` answer to a request with an optional JSON body and timeout.
+    async fn write(
+        &self,
+        pin: Option<usize>,
+        method: Method,
+        path: &str,
+        query: Option<&str>,
+        body: Option<&Value>,
+        timeout: Option<Duration>,
+    ) -> Result<String, Error> {
+        match self.call(pin, method, path, query, body, timeout).await? {
+            (200..300, body) => Ok(body),
+            (status, body) => Err(Error::http(status, body)),
+        }
     }
 
     /// The body of a `2xx` answer; any other status is [`Error::Http`].
@@ -395,9 +503,11 @@ impl Client {
         method: Method,
         path: &str,
         query: Option<&str>,
+        body: Option<&Value>,
+        timeout: Option<Duration>,
     ) -> Result<(u16, String), Error> {
         if let Some(node) = pin {
-            return self.send(node, method, path, query, None).await;
+            return self.send(node, method, path, query, body, timeout).await;
         }
         let start = self.active_node();
         let retries = if FAILOVER_METHODS.contains(&method) {
@@ -409,7 +519,10 @@ impl Client {
         let mut attempt = 0;
         loop {
             let node = (start + attempt) % self.nodes.len();
-            match self.send(node, method.clone(), path, query, None).await {
+            match self
+                .send(node, method.clone(), path, query, body, timeout)
+                .await
+            {
                 Err(Error::Network(_) | Error::Timeout) if attempt + 1 < attempts => {
                     tokio::time::sleep(backoff(attempt)).await;
                     attempt += 1;
@@ -502,11 +615,47 @@ impl NodeClient {
         self.client.keys_probe_on(Some(self.index)).await
     }
 
+    /// `POST /collections` on this node. See [`Client::create_collection`].
+    pub async fn create_collection(&self, schema: &Value) -> Result<Collection, Error> {
+        self.client
+            .create_collection_on(Some(self.index), schema)
+            .await
+    }
+
+    /// `PATCH /collections/{name}` on this node. See [`Client::update_collection`].
+    pub async fn update_collection(&self, name: &str, patch: &Value) -> Result<(), Error> {
+        self.client
+            .update_collection_on(Some(self.index), name, patch)
+            .await
+    }
+
+    /// `DELETE /collections/{name}` on this node. See [`Client::delete_collection`].
+    pub async fn delete_collection(&self, name: &str) -> Result<(), Error> {
+        self.client
+            .delete_collection_on(Some(self.index), name)
+            .await
+    }
+
+    /// `DELETE /collections/{name}/documents?truncate=true` on this node.
+    /// See [`Client::truncate_collection`].
+    pub async fn truncate_collection(&self, name: &str) -> Result<u64, Error> {
+        self.client
+            .truncate_collection_on(Some(self.index), name)
+            .await
+    }
+
+    /// `GET /operations/schema_changes` on this node. See [`Client::schema_changes`].
+    pub async fn schema_changes(&self) -> Result<Vec<SchemaChange>, Error> {
+        self.client.schema_changes_on(Some(self.index)).await
+    }
+
     /// Sends `method` to `path` on this node only. For tests of the read-only guard only;
     /// not part of the supported API.
     #[doc(hidden)]
     pub async fn request(&self, method: Method, path: &str) -> Result<(u16, String), Error> {
-        self.client.call(Some(self.index), method, path, None).await
+        self.client
+            .call(Some(self.index), method, path, None, None, None)
+            .await
     }
 }
 
