@@ -10,19 +10,19 @@ pub mod table;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::base::{POPUP_PRIORITY, TestSupportExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
-use gpui_kit::component::menu::DropdownMenu as _;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu};
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{
     ActiveTheme as _, Selectable as _, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription, Task, Window, div,
-    prelude::*, px,
+    App, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _, IntoElement,
+    ParentElement as _, Pixels, Point, Render, SharedString, Styled as _, Subscription, Task,
+    Window, anchored, deferred, div, prelude::*, px,
 };
 use rust_i18n::t;
 use tessera_client::Collection;
@@ -104,6 +104,8 @@ pub struct DocumentsView {
     copied_reset: Option<Task<()>>,
     copy_task: Option<Task<()>>,
     copy_error: Option<SharedString>,
+    /// The open copy menu of a cell, where it was asked for, and its dismissal.
+    context_menu: Option<(Entity<PopupMenu>, Point<Pixels>, Subscription)>,
     connection: Entity<ConnectionState>,
     focus_handle: FocusHandle,
     _subscriptions: [Subscription; 6],
@@ -160,11 +162,19 @@ impl DocumentsView {
                 cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
                     match event {
                         TableEvent::ColumnWidthsChanged(widths) => this.widths_changed(widths, cx),
-                        TableEvent::SelectCell(row, _) => this.follow(*row, window, cx),
+                        TableEvent::SelectCell(row, _) => {
+                            this.copy_error = None;
+                            this.follow(*row, window, cx);
+                            cx.notify();
+                        }
                         TableEvent::DoubleClickedCell(row, _) => this.open_row(*row, window, cx),
-                        // The menu's copy actions work on the selected cell.
+                        TableEvent::RightClickedCell(row, col) => {
+                            this.open_context_menu(*row, *col, window, cx);
+                        }
+                        // The kit opens the menu here; its copy actions need this row.
                         TableEvent::RightClickedRow(Some(row)) => {
-                            this.table.update(cx, |t, cx| {
+                            let table = this.table.clone();
+                            table.update(cx, |t, cx| {
                                 let col = t.selected_cell().map_or(0, |(_, col)| col);
                                 t.set_selected_cell(*row, col, cx);
                             });
@@ -211,6 +221,7 @@ impl DocumentsView {
             copied_reset: None,
             copy_task: None,
             copy_error: None,
+            context_menu: None,
             connection,
             focus_handle: cx.focus_handle(),
         }
@@ -513,6 +524,33 @@ impl DocumentsView {
         cx.notify();
     }
 
+    /// Selects the cell and opens the copy menu at the pointer. The kit never shows the
+    /// table's context menu for a click on a cell. An unloaded row has nothing to copy.
+    fn open_context_menu(
+        &mut self,
+        row: usize,
+        col: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.table
+            .update(cx, |t, cx| t.set_selected_cell(row, col, cx));
+        if self.row_id(row, cx).is_none() {
+            return;
+        }
+        let target = self.table.read(cx).focus_handle(cx);
+        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+            copy::entries(menu.action_context(target))
+        });
+        menu.focus_handle(cx).focus(window, cx);
+        let closed = cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
+            this.context_menu = None;
+            cx.notify();
+        });
+        self.context_menu = Some((menu, window.mouse_position(), closed));
+        cx.notify();
+    }
+
     /// Puts the focus in the Go to ID input, which exists once the schema is known.
     fn focus_goto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.has_schema {
@@ -713,6 +751,24 @@ impl Render for DocumentsView {
         let bar = self.has_schema.then(|| self.filter_bar(window, cx));
         let actions = self.has_schema.then(|| self.actions(window, cx));
         let goto_error = self.goto_error.clone();
+        let context_menu = self.context_menu.as_ref().map(|(menu, position, _)| {
+            // As the kit's own context menu: the rows do not scroll under it.
+            deferred(
+                anchored().child(
+                    div()
+                        .w(window.bounds().size.width)
+                        .h(window.bounds().size.height)
+                        .on_scroll(|_, _, cx| cx.stop_propagation())
+                        .child(
+                            anchored()
+                                .position(*position)
+                                .snap_to_window_with_margin(px(8.))
+                                .child(menu.clone()),
+                        ),
+                ),
+            )
+            .with_priority(POPUP_PRIORITY)
+        });
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(DOCUMENTS)
@@ -814,6 +870,7 @@ impl Render for DocumentsView {
                         ),
                 ),
             )
+            .children(context_menu)
     }
 }
 

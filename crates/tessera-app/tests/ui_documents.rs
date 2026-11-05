@@ -10,7 +10,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::table::{TableEvent, TableState};
+use gpui_kit::component::table::TableState;
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, Focusable as _, TestAppContext, WindowHandle, base::Root};
 use serde_json::json;
@@ -195,6 +195,22 @@ impl Fixture {
             window.press("enter", cx);
         });
         self.settle(cx);
+    }
+
+    async fn wait_for_menu(&self, cx: &mut TestAppContext) {
+        cx.wait_for(
+            self.handle.into(),
+            Duration::from_millis(500),
+            |window, _| window.try_find("popup-menu").is_some(),
+        )
+        .await;
+    }
+
+    /// Right-clicks element `id` and waits for the menu.
+    async fn open_menu_on(&self, cx: &mut TestAppContext, id: &str) {
+        let id = id.to_string();
+        self.act(cx, |window, cx| window.right_click(id, cx));
+        self.wait_for_menu(cx).await;
     }
 
     fn clipboard(&self, cx: &mut TestAppContext) -> Option<String> {
@@ -1187,6 +1203,19 @@ async fn failed_copy_row_shows_above_the_table(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn moving_the_selection_clears_a_failed_copy(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.document_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.select_row(cx, 4);
+    f.act(cx, |window, cx| window.press(COPY_ROW, cx));
+    f.settle(cx);
+    f.select_row(cx, 5);
+    f.act(cx, |window, _| {
+        assert!(window.try_find("documents.error").is_none());
+    });
+}
+
+#[gpui_kit::test]
 async fn copy_on_unloaded_row_does_nothing(cx: &mut TestAppContext) {
     let f = open_found(cx, plain_schema(), 100_000).await;
     f.select_row(cx, 90_000);
@@ -1255,18 +1284,87 @@ async fn shortcuts_are_shown(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn right_clicked_row_is_what_the_menu_copies(cx: &mut TestAppContext) {
+async fn right_click_copies_the_clicked_cell(cx: &mut TestAppContext) {
     let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 0);
+    f.open_menu_on(cx, "documents.cell.2.title").await;
     let table = f.table(cx);
-    cx.update(|cx| {
-        table.update(cx, |t, cx| {
-            t.set_selected_cell(0, 1, cx);
-            cx.emit(TableEvent::RightClickedRow(Some(3)));
-        })
-    });
-    cx.run_until_parked();
     let selected = cx.update(|cx| table.read(cx).selected_cell());
-    assert_eq!(selected, Some((3, 1)));
+    assert_eq!(selected.map(|(row, _)| row), Some(2));
+    f.act(cx, |window, cx| {
+        let mut menu = window.within("popup-menu");
+        assert_eq!(menu.find(0).label(), Some("Copy cell"));
+        menu.click(0, cx);
+    });
+    assert_eq!(f.clipboard(cx).as_deref(), Some("t2"));
+    f.settle(cx);
+    f.act(cx, |window, _| {
+        assert!(window.try_find("popup-menu").is_none());
+    });
+    // The keyboard is back on the table.
+    f.act(cx, |window, cx| window.press(COPY_ROW, cx));
+    f.settle(cx);
+    assert!(f.clipboard(cx).unwrap().contains("\"id\": \"2\""));
+}
+
+#[gpui_kit::test]
+async fn right_click_copies_the_clicked_row(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 0);
+    f.open_menu_on(cx, "documents.cell.3.title").await;
+    f.act(cx, |window, cx| window.within("popup-menu").click(1, cx));
+    f.settle(cx);
+    assert!(f.clipboard(cx).unwrap().contains("\"id\": \"3\""));
+}
+
+#[gpui_kit::test]
+async fn right_click_menu_opens_at_the_pointer_and_escape_closes_it(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let cell = f.act(cx, |window, _| {
+        window.find("documents.cell.4.title").bounds()
+    });
+    f.open_menu_on(cx, "documents.cell.4.title").await;
+    f.act(cx, |window, cx| {
+        let menu = window.find("popup-menu").bounds();
+        assert!(cell.contains(&menu.origin), "{menu:?} not at {cell:?}");
+        window.press("escape", cx);
+    });
+    f.act(cx, |window, _| {
+        assert!(window.try_find("popup-menu").is_none());
+    });
+}
+
+#[gpui_kit::test]
+async fn second_right_click_moves_the_menu_to_its_cell(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    // A row above: the open menu covers the ones below its click.
+    f.open_menu_on(cx, "documents.cell.8.title").await;
+    f.open_menu_on(cx, "documents.cell.2.title").await;
+    f.settle(cx);
+    f.act(cx, |window, cx| window.within("popup-menu").click(0, cx));
+    assert_eq!(f.clipboard(cx).as_deref(), Some("t2"));
+}
+
+#[gpui_kit::test]
+async fn right_click_beside_the_last_column_copies_that_row(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 0);
+    let (cell, table) = f.act(cx, |window, _| {
+        (
+            window.find("documents.cell.5.title").bounds(),
+            window.find("documents.table").bounds(),
+        )
+    });
+    let beside = gpui_kit::point(table.right() - gpui_kit::px(10.), cell.center().y);
+    let mut visual = gpui_kit::VisualTestContext::from_window(f.handle.into(), cx);
+    visual.simulate_mouse_down(
+        beside,
+        gpui_kit::MouseButton::Right,
+        gpui_kit::Modifiers::none(),
+    );
+    f.wait_for_menu(cx).await;
+    f.act(cx, |window, cx| window.within("popup-menu").click(0, cx));
+    assert_eq!(f.clipboard(cx).as_deref(), Some("5"));
 }
 
 #[gpui_kit::test]

@@ -423,20 +423,16 @@ impl TableDelegate for DocRows {
             .into_any_element()
     }
 
-    // shortcut: the kit's cell handler stops a right click before the table's context menu sees
-    // it, so this opens only beside the last column; upgrade with our own menu on the cell event.
+    // Only for a click beside the last column: on a cell the kit stops the click before its
+    // context menu sees it, and `DocumentsView` opens the same list itself.
     fn context_menu(
         &mut self,
-        row_ix: usize,
+        _: usize,
         menu: PopupMenu,
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
-        if self.row(row_ix).is_some() {
-            copy::entries(menu)
-        } else {
-            menu
-        }
+        copy::entries(menu)
     }
 
     fn loading(&self, _: &App) -> bool {

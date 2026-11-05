@@ -369,7 +369,7 @@ An `h_resizable` split as in the request log (D22). ⌘I / Ctrl+I toggles. Enter
 | Selection as CSV | ⌥⌘S / Ctrl+Alt+S | same documents, visible columns |
 | Copy as curl | ⌥⌘U / Ctrl+Alt+U | `curl::request` for the selected row's GET, or for the current search when no row is selected, key as `$TYPESENSE_API_KEY` |
 
-The toolbar's Copy dropdown lists all five with their shortcuts, and the table's context menu lists them too. GPUI Kit 0.9.0 stops a right click on a cell before the table's context menu sees it, so that menu opens only beside the last column. ⌘⇧C stays the global "copy log entry as curl" from M1. Copying never masks document content: the user asked for their data. "Copy as curl" of a body goes through `redact` as everywhere else.
+The toolbar's Copy dropdown lists all five with their shortcuts, and the table's context menu lists them too. GPUI Kit 0.9.0 stops a right click on a cell before the table's context menu sees it, so `DocumentsView` takes `TableEvent::RightClickedCell`, selects that cell and opens the same list at the pointer with `PopupMenu::build`. Beside the last column the kit's menu opens and the row is selected first. Either way the copy acts on the row clicked. ⌘⇧C stays the global "copy log entry as curl" from M1. Copying never masks document content: the user asked for their data. "Copy as curl" of a body goes through `redact` as everywhere else.
 
 ### 7.7 Selection and delete (PR C)
 
