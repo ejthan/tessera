@@ -15,11 +15,11 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{Disableable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     App, Context, Entity, FocusHandle, FontWeight, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, div, prelude::*, rgb,
+    SharedString, Styled as _, Subscription, Task, Window, div, prelude::*, rgb,
 };
 use rust_i18n::t;
 
-/// Red of the PROD badge, as in the app's environment badge.
+/// Red of the PROD badge, as in the app's environment badge (widgets cannot depend on the app).
 const PROD_RED: u32 = 0xDC2626;
 
 /// What the dialog says and what the user has to type.
@@ -37,10 +37,12 @@ pub struct DangerOptions {
 }
 
 /// Opens the dialog. Focus starts in the text field. `on_confirm` runs only when the text
-/// matches and the action button is activated; Enter anywhere else does nothing.
+/// matches and the action button is activated (click, or Enter on the focused button);
+/// Enter anywhere else does nothing. The dialog stays open with the action busy until the
+/// task ends: `Ok` closes it, `Err` shows the text inline (`danger.error`) and re-enables it.
 pub fn open(
     opts: DangerOptions,
-    on_confirm: impl Fn(&mut Window, &mut App) + 'static,
+    on_confirm: impl Fn(&mut Window, &mut App) -> Task<Result<(), SharedString>> + 'static,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -53,13 +55,15 @@ pub fn open(
     } = opts;
     let input = cx.new(|cx| InputState::new(window, cx));
     let ok_focus = cx.focus_handle();
-    let on_confirm = Rc::new(on_confirm);
+    let on_confirm: Rc<OnConfirm> = Rc::new(on_confirm);
     let footer = cx.new(|cx| Footer {
         input: input.clone(),
         expected: expected.clone(),
         action_label,
         ok_focus: ok_focus.clone(),
         on_confirm: on_confirm.clone(),
+        busy: false,
+        error: None,
         _watch: cx.subscribe(&input, |_, _, _: &InputEvent, cx| cx.notify()),
     });
     let first_build = Cell::new(true);
@@ -67,12 +71,7 @@ pub fn open(
         if first_build.replace(false) {
             input.read(cx).focus_handle(cx).focus(window, cx);
         }
-        let (input_, expected_, ok_focus_, on_confirm_) = (
-            input.clone(),
-            expected.clone(),
-            ok_focus.clone(),
-            on_confirm.clone(),
-        );
+        let (ok_focus_, footer_) = (ok_focus.clone(), footer.clone());
         let label = t!("danger.input_label", name = expected).to_string();
         dialog
             .title(
@@ -83,10 +82,10 @@ pub fn open(
             )
             // Enter dispatches the dialog's Confirm: it only acts on the focused action button.
             .on_ok(move |_, window, cx| {
-                if ok_focus_.is_focused(window) && input_.read(cx).value() == expected_ {
-                    on_confirm_(window, cx);
-                    return true;
+                if ok_focus_.is_focused(window) {
+                    footer_.update(cx, |f, cx| f.confirm(window, cx));
                 }
+                // Only the task's result closes the dialog.
                 false
             })
             .child(
@@ -110,6 +109,9 @@ pub fn open(
 
 fn prod_badge() -> impl IntoElement {
     div()
+        .id("danger.prod")
+        .test_support()
+        .aria_label(t!("env.prod").to_string())
         .flex_none()
         .px_1()
         .rounded_sm()
@@ -117,10 +119,10 @@ fn prod_badge() -> impl IntoElement {
         .font_weight(FontWeight::SEMIBOLD)
         .bg(rgb(PROD_RED))
         .text_color(gpui_kit::white())
-        .child(t!("danger.prod").to_string())
+        .child(t!("env.prod").to_string())
 }
 
-type OnConfirm = dyn Fn(&mut Window, &mut App);
+type OnConfirm = dyn Fn(&mut Window, &mut App) -> Task<Result<(), SharedString>>;
 
 /// The button row; its own view so it re-renders when the text changes.
 struct Footer {
@@ -129,32 +131,70 @@ struct Footer {
     action_label: SharedString,
     ok_focus: FocusHandle,
     on_confirm: Rc<OnConfirm>,
+    busy: bool,
+    error: Option<SharedString>,
     _watch: Subscription,
+}
+
+impl Footer {
+    /// The one confirm path for click and Enter: needs an exact match and no run in flight.
+    fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy || self.input.read(cx).value() != self.expected {
+            return;
+        }
+        self.busy = true;
+        self.error = None;
+        let task = (self.on_confirm)(window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            this.update_in(cx, |this, window, cx| {
+                this.busy = false;
+                match result {
+                    Ok(()) => window.close_dialog(cx),
+                    Err(text) => this.error = Some(text),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
 }
 
 impl Render for Footer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let matches = self.input.read(cx).value() == self.expected;
-        let on_confirm = self.on_confirm.clone();
-        h_flex()
-            .justify_end()
+        v_flex()
             .gap_2()
+            .children(self.error.clone().map(|text| {
+                div()
+                    .id("danger.error")
+                    .test_support()
+                    .aria_label(text.clone())
+                    .text_sm()
+                    .text_color(rgb(PROD_RED))
+                    .child(text)
+            }))
             .child(
-                Button::new("danger.cancel")
-                    .label(t!("common.cancel").to_string())
-                    .children(Kbd::binding_for_action(&Cancel, Some("Dialog"), window))
-                    .on_click(|_, window, cx| window.close_dialog(cx)),
-            )
-            .child(
-                Button::new("danger.ok")
-                    .danger()
-                    .label(self.action_label.clone())
-                    .disabled(!matches)
-                    .track_focus(&self.ok_focus)
-                    .on_click(move |_, window, cx| {
-                        window.close_dialog(cx);
-                        on_confirm(window, cx);
-                    }),
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("danger.cancel")
+                            .label(t!("common.cancel").to_string())
+                            .children(Kbd::binding_for_action(&Cancel, Some("Dialog"), window))
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("danger.ok")
+                            .danger()
+                            .label(self.action_label.clone())
+                            .loading(self.busy)
+                            .disabled(!matches || self.busy)
+                            .track_focus(&self.ok_focus)
+                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                    ),
             )
     }
 }

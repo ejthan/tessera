@@ -18,7 +18,8 @@ pub struct FieldTypeChanged(pub FieldType);
 #[derive(Clone)]
 struct TypeItem(FieldType);
 
-fn description(ty: &FieldType) -> String {
+/// The one-line description of a type in `locale`; empty for types outside the list.
+pub fn field_type_description(ty: &FieldType, locale: &str) -> String {
     let key = match ty {
         FieldType::String => "string",
         FieldType::StringArray => "string_array",
@@ -40,7 +41,7 @@ fn description(ty: &FieldType) -> String {
         FieldType::Auto => "auto",
         FieldType::Other(_) => return String::new(),
     };
-    t!(format!("field_type.{key}")).to_string()
+    t!(format!("field_type.{key}"), locale = locale).to_string()
 }
 
 impl SearchableListItem for TypeItem {
@@ -58,7 +59,12 @@ impl SearchableListItem for TypeItem {
         h_flex()
             .gap_2()
             .child(div().w(gpui_kit::px(110.)).child(self.title()))
-            .child(div().text_xs().opacity(0.7).child(description(&self.0)))
+            .child(
+                div()
+                    .text_xs()
+                    .opacity(0.7)
+                    .child(field_type_description(&self.0, &rust_i18n::locale())),
+            )
     }
 
     fn value(&self) -> &FieldType {
