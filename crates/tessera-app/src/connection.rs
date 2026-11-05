@@ -391,6 +391,19 @@ pub fn error_text(err: &Error, profile: &Profile) -> String {
     node_error_text(err, &host, profile)
 }
 
+/// User-facing text for a failed schema change, truncate or delete of `profile`: these wait
+/// [`tessera_client::LONG_TIMEOUT`], and the server may still be working after it.
+pub fn long_error_text(err: &Error, profile: &Profile) -> String {
+    match err {
+        Error::Timeout => {
+            let host = profile.nodes.first().map(|n| n.label()).unwrap_or_default();
+            let minutes = tessera_client::LONG_TIMEOUT.as_secs() / 60;
+            t!("connect.error.long_timeout", host = host, minutes = minutes).to_string()
+        }
+        _ => error_text(err, profile),
+    }
+}
+
 /// User-facing text for a failed request to `host` (`host:port`) of `profile`.
 pub fn node_error_text(err: &Error, host: &str, profile: &Profile) -> String {
     match err {
@@ -534,6 +547,21 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("k-secret"), "{text}");
+    }
+
+    #[test]
+    fn long_operation_timeout_names_the_long_timeout() {
+        rust_i18n::set_locale("en");
+        let profile = Profile::new("t", vec![node("localhost", 8108)]);
+        assert_eq!(
+            long_error_text(&Error::Timeout, &profile),
+            "localhost:8108 did not finish within 30 minutes. The server may still be applying the change; reload to see its current state."
+        );
+        let other = Error::InvalidKey;
+        assert_eq!(
+            long_error_text(&other, &profile),
+            error_text(&other, &profile)
+        );
     }
 
     #[test]

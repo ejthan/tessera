@@ -9,7 +9,7 @@ use tessera_widgets::confirm_danger::{self, DangerOptions};
 
 use super::overview::grouped;
 use crate::collections::{CollectionsBackendGlobal, aliases_of};
-use crate::connection::{ConnectionState, error_text};
+use crate::connection::{ConnectionState, error_text, long_error_text};
 use crate::state::AppState;
 
 /// Which of the two actions.
@@ -219,7 +219,7 @@ fn open(
                         // It may have landed (a timeout) and the user may have stopped
                         // waiting: show what the server has now, keeping the old list meanwhile.
                         connection.update(cx, |c, cx| c.load_collection_list(cx));
-                        return Err(error_text(&e, &profile).into());
+                        return Err(long_error_text(&e, &profile).into());
                     }
                     Ok(()) => {}
                 }

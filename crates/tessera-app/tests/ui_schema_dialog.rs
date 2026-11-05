@@ -855,6 +855,27 @@ async fn server_error_returns_to_review_with_message(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn patch_timeout_says_the_server_may_still_be_working(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    *f.backend.update_error.lock().unwrap() = Some((TIMEOUT, String::new()));
+    f.review_library_change(cx);
+    f.apply(cx);
+    wait_for_element(cx, f.handle, "schema.server_error".into(), true).await;
+    f.query(cx, |w| {
+        let shown = w
+            .find("schema.server_error")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            shown.contains("did not finish within 30 minutes"),
+            "{shown}"
+        );
+        assert!(shown.contains("reload to see its current state"), "{shown}");
+    });
+}
+
+#[gpui_kit::test]
 async fn edit_on_read_only_asks_for_unlock(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, true).await;
     f.review_library_change(cx);

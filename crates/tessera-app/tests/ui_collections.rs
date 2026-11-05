@@ -776,3 +776,18 @@ async fn stop_waiting_on_a_failing_delete_still_reloads(cx: &mut TestAppContext)
     assert_eq!(*f.backend.lists.lock().unwrap(), lists + 1);
     assert!(!f.shown(cx, "danger.error"));
 }
+
+#[gpui_kit::test]
+async fn truncate_timeout_says_the_server_may_still_be_working(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    *f.backend.danger_error.lock().unwrap() = Some((TIMEOUT, String::new()));
+    f.row_shortcut(cx, "books", TRUNCATE).await;
+    f.confirm(cx, "books").await;
+    wait_for_element(cx, f.handle, "danger.error".into(), true).await;
+    act(cx, f.handle, |window, _| {
+        let text = label(window, "danger.error");
+        assert!(text.contains("did not finish within 30 minutes"), "{text}");
+        assert!(!text.contains("seconds"), "{text}");
+    });
+}

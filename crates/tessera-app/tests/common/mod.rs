@@ -218,8 +218,14 @@ impl FakeData {
     }
 }
 
-/// An HTTP error with `status` and a Typesense message.
+/// Status that the fake errors below turn into [`Error::Timeout`] instead of an HTTP error.
+pub const TIMEOUT: u16 = 0;
+
+/// An HTTP error with `status` and a Typesense message, or a timeout for [`TIMEOUT`].
 pub fn http_error((status, message): (u16, String)) -> Error {
+    if status == TIMEOUT {
+        return Error::Timeout;
+    }
     Error::Http {
         status,
         body: serde_json::json!({ "message": message }).to_string(),
@@ -233,11 +239,7 @@ pub struct FakeBackend(pub Arc<FakeData>);
 impl FakeBackend {
     fn danger_answer(&self) -> Result<(), Error> {
         match self.0.danger_error.lock().unwrap().clone() {
-            Some((status, message)) => Err(Error::Http {
-                status,
-                body: serde_json::json!({ "message": message }).to_string(),
-                message,
-            }),
+            Some(e) => Err(http_error(e)),
             None => Ok(()),
         }
     }
@@ -282,11 +284,7 @@ impl CollectionsBackend for FakeBackend {
     ) -> tessera_app::collections::BoxFuture<Result<Collection, Error>> {
         self.0.creates.lock().unwrap().push(schema.clone());
         let answer = match self.0.create_error.lock().unwrap().clone() {
-            Some((status, message)) => Err(Error::Http {
-                status,
-                body: serde_json::json!({ "message": message }).to_string(),
-                message,
-            }),
+            Some(e) => Err(http_error(e)),
             None => {
                 let created: Collection = serde_json::from_value(schema).unwrap();
                 if let Some((all, _)) = self.0.data.lock().unwrap().as_mut() {
@@ -306,11 +304,7 @@ impl CollectionsBackend for FakeBackend {
     ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
         self.0.updates.lock().unwrap().push((name, patch));
         let answer = match self.0.update_error.lock().unwrap().clone() {
-            Some((status, message)) => Err(Error::Http {
-                status,
-                body: serde_json::json!({ "message": message }).to_string(),
-                message,
-            }),
+            Some(e) => Err(http_error(e)),
             None => Ok(()),
         };
         let gate = self.0.update_gate.lock().unwrap().take();

@@ -28,7 +28,7 @@ use tessera_widgets::JsonEditor;
 use super::form::line;
 use super::{Mode, SchemaDialog, Step};
 use crate::collections::CollectionsBackendGlobal;
-use crate::connection::error_text;
+use crate::connection::long_error_text;
 use crate::views::overview::grouped;
 
 /// How often the progress asks for the schema change counts.
@@ -263,7 +263,7 @@ impl SchemaDialog {
                     Ok(()) => window.close_dialog(cx),
                     Err(e) => {
                         d.step = Step::Review;
-                        d.server_error = Some(error_text(&e, &profile).into());
+                        d.server_error = Some(long_error_text(&e, &profile).into());
                         d.safe_focus.focus(window, cx);
                     }
                 }
