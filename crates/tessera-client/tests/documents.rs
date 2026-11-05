@@ -327,7 +327,7 @@ async fn update_by_filter_sends_the_partial_and_reads_the_count() {
         .respond_with(
             ResponseTemplate::new(200)
                 .set_delay(Duration::from_millis(300))
-                .set_body_string(r#"{"num_updated":0}"#),
+                .set_body_string(r#"{"num_updated":7}"#),
         )
         .expect(1)
         .mount(&server)
@@ -337,7 +337,7 @@ async fn update_by_filter_sends_the_partial_and_reads_the_count() {
         .update_by_filter("c", "a:=1", &serde_json::json!({"x":2}))
         .await
         .unwrap();
-    assert_eq!(n, 0);
+    assert_eq!(n, 7);
 }
 
 #[tokio::test]
@@ -363,4 +363,27 @@ async fn read_only_client_refuses_bulk_writes() {
         Err(Error::ReadOnly { .. })
     ));
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_or_non_numeric_count_is_a_decode_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"num_updated":3}"#))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"num_updated":"x"}"#))
+        .mount(&server)
+        .await;
+    let c = client(&server.uri());
+    assert!(matches!(
+        c.delete_by_filter("c", "a:=1").await,
+        Err(Error::Decode(_))
+    ));
+    assert!(matches!(
+        c.update_by_filter("c", "a:=1", &serde_json::json!({}))
+            .await,
+        Err(Error::Decode(_))
+    ));
 }

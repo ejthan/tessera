@@ -235,7 +235,8 @@ impl Client {
             .write(None, method, &path, Some(&query), body, Some(LONG_TIMEOUT))
             .await?;
         let answer: Value = serde_json::from_str(&text).map_err(Error::Decode)?;
-        Ok(answer[count_key].as_u64().unwrap_or(0))
+        // A missing or non-numeric count is a decode error, not 0 (0 means a refused value).
+        serde_json::from_value(answer[count_key].clone()).map_err(Error::Decode)
     }
 
     /// `DELETE …/documents?filter_by=&batch_size=1000`: the number deleted. Uses [`LONG_TIMEOUT`].
