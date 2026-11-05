@@ -368,3 +368,6 @@ danger.delete.consequence: "Löscht %{name} mit seinen %{count} Dokumenten und s
 danger.delete.aliases: "Diese Aliase zeigen danach auf eine Collection, die nicht mehr existiert: %{aliases}."
 danger.unchecked: "Die Collection konnte nicht neu geladen werden; Dokumentanzahl und Aliase, die auf sie zeigen, sind womöglich nicht aktuell: %{detail}"
 danger.delete.action: "Löschen"
+collections.aliases_error: "Die Aliase konnten nicht geladen werden, darum ist die Spalte Aliase leer: %{detail}"
+schema.aliases_error: "konnten nicht geladen werden: %{detail}"
+danger.delete.aliases_unchecked: "Die Aliase konnten nicht geladen werden, darum fehlen hier Aliase, die auf %{name} zeigen: %{detail}"

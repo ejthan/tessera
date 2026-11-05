@@ -386,10 +386,14 @@ impl SchemaView {
             }
         };
         let sets = |s: &[String]| list(&s.iter().map(String::as_str).collect::<Vec<_>>());
+        let aliases = match &conn.collection_cache.aliases_error {
+            Some(detail) => t!("schema.aliases_error", detail = detail).to_string(),
+            None => list(&aliases),
+        };
         let facts = [
             ("documents", grouped(c.num_documents)),
             ("created", created_text(c.created_at)),
-            ("aliases", list(&aliases)),
+            ("aliases", aliases),
             ("synonym_sets", sets(&c.synonym_sets)),
             ("curation_sets", sets(&c.curation_sets)),
         ];

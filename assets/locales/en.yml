@@ -368,3 +368,6 @@ danger.delete.consequence: "Deletes %{name} with its %{count} documents and its 
 danger.delete.aliases: "These aliases will point to a collection that no longer exists: %{aliases}."
 danger.unchecked: "Could not reload the collection; the number of documents and the aliases pointing here may be out of date: %{detail}"
 danger.delete.action: "Delete"
+collections.aliases_error: "The aliases could not be loaded, so the Aliases column is empty: %{detail}"
+schema.aliases_error: "could not be loaded: %{detail}"
+danger.delete.aliases_unchecked: "The aliases could not be loaded, so aliases that point at %{name} are not listed: %{detail}"

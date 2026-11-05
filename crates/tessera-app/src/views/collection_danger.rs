@@ -71,7 +71,7 @@ fn prepare(
         c.ensure_writable(window, cx, move |window, cx| {
             let Some(client) = client(&connection, cx) else {
                 let detail = t!("status.not_connected").to_string();
-                let lines = lines(kind, &name, documents, &[], Some(detail));
+                let lines = lines(kind, &name, documents, Ok(&[]), Some(detail));
                 return open(kind, state, connection, name, lines, window, cx);
             };
             let list = cx.global::<CollectionsBackendGlobal>().0.list(client);
@@ -85,13 +85,22 @@ fn prepare(
                             Ok((all, aliases)) => {
                                 let count = all.iter().find(|c| c.name == name);
                                 let count = count.map_or(documents, |c| c.num_documents);
+                                let profile = &connection.read(cx).profile;
+                                let aliases = match aliases {
+                                    Ok(aliases) => Ok(aliases.as_slice()),
+                                    Err(e) => Err(error_text(e, profile)),
+                                };
                                 lines(kind, &name, count, aliases, None)
                             }
                             Err(e) => {
                                 // The cache may be stale; say so rather than hide it.
                                 let conn = connection.read(cx);
                                 let detail = error_text(e, &conn.profile);
-                                let aliases = &conn.collection_cache.aliases;
+                                let cache = &conn.collection_cache;
+                                let aliases = match &cache.aliases_error {
+                                    Some(e) => Err(e.to_string()),
+                                    None => Ok(cache.aliases.as_slice()),
+                                };
                                 lines(kind, &name, documents, aliases, Some(detail))
                             }
                         };
@@ -104,12 +113,13 @@ fn prepare(
     });
 }
 
-/// The consequence lines; `unchecked` is why the numbers could not be reloaded.
+/// The consequence lines; `aliases` is `Err` with why they failed to load, `unchecked` is why
+/// the numbers could not be reloaded.
 fn lines(
     kind: Kind,
     name: &str,
     documents: u64,
-    aliases: &[Alias],
+    aliases: Result<&[Alias], String>,
     unchecked: Option<String>,
 ) -> Vec<SharedString> {
     let count = grouped(documents);
@@ -126,10 +136,22 @@ fn lines(
                 .to_string()
                 .into(),
         );
-        let dangling: Vec<&str> = aliases_of(aliases, name).collect();
-        if !dangling.is_empty() {
-            let text = t!("danger.delete.aliases", aliases = dangling.join(", "));
-            lines.push(text.to_string().into());
+        match aliases {
+            Ok(aliases) => {
+                let dangling: Vec<&str> = aliases_of(aliases, name).collect();
+                if !dangling.is_empty() {
+                    let text = t!("danger.delete.aliases", aliases = dangling.join(", "));
+                    lines.push(text.to_string().into());
+                }
+            }
+            Err(detail) => {
+                let text = t!(
+                    "danger.delete.aliases_unchecked",
+                    name = name,
+                    detail = detail
+                );
+                lines.push(text.to_string().into());
+            }
         }
     }
     if let Some(detail) = unchecked {

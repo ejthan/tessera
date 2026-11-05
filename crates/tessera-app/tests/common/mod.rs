@@ -170,6 +170,8 @@ fn install_poll_fakes(cx: &mut gpui_kit::App) {
 #[derive(Default)]
 pub struct FakeData {
     pub data: Mutex<Option<(Vec<Collection>, Vec<Alias>)>>,
+    /// `list` fails to load the aliases with this status and Typesense message.
+    pub aliases_error: Mutex<Option<(u16, String)>>,
     /// Number of `list` calls.
     pub lists: Mutex<usize>,
     /// Names asked of `get`.
@@ -206,6 +208,15 @@ impl FakeData {
     }
 }
 
+/// An HTTP error with `status` and a Typesense message.
+pub fn http_error((status, message): (u16, String)) -> Error {
+    Error::Http {
+        status,
+        body: serde_json::json!({ "message": message }).to_string(),
+        message,
+    }
+}
+
 /// The installed backend; the test keeps the [`FakeData`] handle.
 pub struct FakeBackend(pub Arc<FakeData>);
 
@@ -226,9 +237,15 @@ impl CollectionsBackend for FakeBackend {
     fn list(
         &self,
         _: Client,
-    ) -> tessera_app::collections::BoxFuture<Result<(Vec<Collection>, Vec<Alias>), Error>> {
+    ) -> tessera_app::collections::BoxFuture<Result<tessera_app::collections::CollectionList, Error>>
+    {
         *self.0.lists.lock().unwrap() += 1;
+        let aliases_error = self.0.aliases_error.lock().unwrap().clone();
         let answer = self.0.data.lock().unwrap().clone().ok_or(Error::Timeout);
+        let answer = answer.map(|(all, aliases)| match aliases_error {
+            Some(e) => (all, Err(http_error(e))),
+            None => (all, Ok(aliases)),
+        });
         Box::pin(async move { answer })
     }
 

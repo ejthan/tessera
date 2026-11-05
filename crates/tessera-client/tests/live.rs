@@ -181,6 +181,32 @@ async fn live_keys_probe_restricted() {
 
 #[tokio::test]
 #[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_collections_only_key_cannot_read_aliases() {
+    wait_until_ready(&client()).await;
+    let body = r#"{"description":"tessera-it-collections","actions":["collections:*"],"collections":["*"]}"#;
+    let created = admin(reqwest::Method::POST, "keys", Some(body)).await;
+    let id = created["id"].as_u64().expect("key id");
+    let value = created["value"].as_str().expect("key value").to_string();
+    let scoped = client_with(&value);
+    let collections = scoped.collections().await;
+    let aliases = scoped.aliases().await;
+    // Delete before asserting, so a failed assertion leaves no key behind.
+    admin(reqwest::Method::DELETE, &format!("keys/{id}"), None).await;
+    collections.unwrap();
+    assert!(
+        matches!(
+            aliases,
+            Err(Error::Http {
+                status: 401 | 403,
+                ..
+            })
+        ),
+        "{aliases:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
 async fn live_collection_reads() {
     let client = client();
     wait_until_ready(&client).await;

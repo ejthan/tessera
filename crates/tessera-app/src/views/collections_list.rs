@@ -759,6 +759,9 @@ impl Render for CollectionsList {
         let (danger, muted) = (theme.danger, theme.muted_foreground);
         let cache = &self.connection.read(cx).collection_cache;
         let error = cache.error.clone();
+        let aliases_error = cache.aliases_error.as_ref().map(|detail| {
+            SharedString::from(t!("collections.aliases_error", detail = detail).to_string())
+        });
         let loaded = cache.collections.as_ref().map(Vec::len);
         let loading = cache.loading && loaded.is_none();
         let (shown, query) = {
@@ -810,6 +813,7 @@ impl Render for CollectionsList {
                     .map(|e| notice("collections.favorite_error", e, danger)),
             )
             .children(error.map(|e| notice("collections.error", e, danger)))
+            .children(aliases_error.map(|e| notice("collections.aliases_error", e, danger)))
             .child(body)
     }
 }

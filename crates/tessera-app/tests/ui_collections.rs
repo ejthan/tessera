@@ -681,3 +681,58 @@ async fn delete_on_read_only_asks_for_unlock_first(cx: &mut TestAppContext) {
     wait_for_element(cx, f.handle, "danger.input".into(), false).await;
     assert_eq!(*f.backend.deletes.lock().unwrap(), ["books"]);
 }
+
+const FORBIDDEN: &str = "Forbidden - a valid `x-typesense-api-key` header must be sent.";
+
+/// A connection whose key may read collections but not aliases.
+async fn aliases_forbidden(cx: &mut TestAppContext) -> Fixture {
+    let f = connected(cx, Some(data())).await;
+    *f.backend.aliases_error.lock().unwrap() = Some((401, FORBIDDEN.into()));
+    f
+}
+
+#[gpui_kit::test]
+async fn alias_failure_keeps_the_list_and_says_why(cx: &mut TestAppContext) {
+    let f = aliases_forbidden(cx).await;
+    f.open_collections(cx).await;
+    act(cx, f.handle, |window, _| {
+        assert!(window.try_find("collections.error").is_none());
+        assert!(label(window, "collections.row.books").contains("10,000"));
+        let note = label(window, "collections.aliases_error");
+        assert!(
+            note.contains("aliases") && note.contains(FORBIDDEN),
+            "{note}"
+        );
+    });
+}
+
+#[gpui_kit::test]
+async fn alias_failure_shows_in_the_schema_header(cx: &mut TestAppContext) {
+    let f = aliases_forbidden(cx).await;
+    let (id, state) = (f.profile.id, f.state.clone());
+    cx.update(|cx| state.update(cx, |s, cx| s.open_collection(id, "books".into(), cx)));
+    wait_for_element(cx, f.handle, format!("tab.{id}.collection.books"), true).await;
+    wait_for_label(cx, f.handle, "schema.documents".into(), "10,000").await;
+    act(cx, f.handle, |window, _| {
+        let aliases = label(window, "schema.aliases");
+        assert!(aliases.contains(FORBIDDEN), "{aliases}");
+    });
+}
+
+#[gpui_kit::test]
+async fn alias_failure_is_a_warning_in_the_delete_dialog(cx: &mut TestAppContext) {
+    let f = aliases_forbidden(cx).await;
+    f.open_collections(cx).await;
+    f.row_shortcut(cx, "books", DELETE).await;
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+    act(cx, f.handle, |window, _| {
+        // The fresh count, not the "may be out of date" fallback.
+        assert!(label(window, "danger.consequence.0").contains("10,000"));
+        let warning = label(window, "danger.consequence.1");
+        assert!(
+            warning.contains("aliases") && warning.contains(FORBIDDEN),
+            "{warning}"
+        );
+        assert!(window.try_find("danger.consequence.2").is_none());
+    });
+}

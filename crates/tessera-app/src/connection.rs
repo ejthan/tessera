@@ -300,7 +300,12 @@ impl ConnectionState {
                 match result {
                     Ok((collections, aliases)) => {
                         cache.collections = Some(collections);
-                        cache.aliases = aliases;
+                        let profile = &state.profile;
+                        cache.aliases_error = aliases
+                            .as_ref()
+                            .err()
+                            .map(|e| error_text(e, profile).into());
+                        cache.aliases = aliases.unwrap_or_default();
                         cache.loaded_at = Some(Instant::now());
                         cache.error = None;
                     }
