@@ -28,7 +28,8 @@ gpui_kit::actions!(
         ToggleFavorite,
         FocusSearch,
         OpenCollectionRow,
-        OpenLink
+        OpenLink,
+        LockAgain
     ]
 );
 
@@ -109,6 +110,10 @@ const FIND: &str = "cmd-f";
 #[cfg(not(target_os = "macos"))]
 const FIND: &str = "ctrl-f";
 #[cfg(target_os = "macos")]
+const LOCK_AGAIN: &str = "cmd-shift-l";
+#[cfg(not(target_os = "macos"))]
+const LOCK_AGAIN: &str = "ctrl-shift-l";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
@@ -137,6 +142,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(REFRESH, Refresh, Some(OVERVIEW)),
         KeyBinding::new(REFRESH, Refresh, Some(COLLECTIONS)),
         KeyBinding::new(REFRESH, Refresh, Some(COLLECTION)),
+        KeyBinding::new(LOCK_AGAIN, LockAgain, Some(OVERVIEW)),
+        KeyBinding::new(LOCK_AGAIN, LockAgain, Some(COLLECTIONS)),
+        KeyBinding::new(LOCK_AGAIN, LockAgain, Some(COLLECTION)),
         KeyBinding::new(TOGGLE_FAVORITE, ToggleFavorite, Some(COLLECTIONS)),
         KeyBinding::new(FIND, FocusSearch, Some(COLLECTIONS)),
         KeyBinding::new("enter", OpenCollectionRow, Some(COLLECTIONS_TABLE)),

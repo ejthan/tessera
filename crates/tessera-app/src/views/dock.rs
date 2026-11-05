@@ -21,10 +21,10 @@ use super::import_dialog::ImportDialog;
 use super::overview::Overview;
 use super::schema_view::SchemaView;
 use super::sidebar::Sidebar;
-use super::{env_badge, welcome};
+use super::{env_badge, unlock, welcome};
 use crate::actions::{
-    COLLECTION, COLLECTIONS, FocusSearch, OVERVIEW, OpenCollectionRow, Refresh, ToggleFavorite,
-    TogglePolling,
+    COLLECTION, COLLECTIONS, FocusSearch, LockAgain, OVERVIEW, OpenCollectionRow, Refresh,
+    ToggleFavorite, TogglePolling,
 };
 use crate::connection::ConnectionState;
 use crate::poller::Poller;
@@ -144,10 +144,12 @@ impl BasePanel for OverviewPanel {
 impl Panel for OverviewPanel {
     /// Color dot, name and environment badge (UX rule 1).
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let profile = &self.connection.read(cx).profile;
+        let conn = self.connection.read(cx);
+        let (profile, unlocked) = (&conn.profile, conn.writes_unlocked);
+        let tab_id = format!("tab.{}.overview", profile.id);
         let name = SharedString::from(profile.name.clone());
         h_flex()
-            .id(SharedString::from(format!("tab.{}.overview", profile.id)))
+            .id(SharedString::from(tab_id.clone()))
             .test_support()
             .aria_label(name.clone())
             .gap_2()
@@ -155,17 +157,23 @@ impl Panel for OverviewPanel {
             .child(env_badge::dot(profile.color, cx))
             .child(name)
             .child(env_badge::render(&profile.environment, cx))
+            .when(profile.read_only, |el| {
+                el.child(env_badge::lock(&tab_id, unlocked, cx))
+            })
     }
 }
 
 impl Render for OverviewPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let conn = self.connection.read(cx);
         // The tab chrome cannot be styled per panel, so the profile color edges the content.
         let edge = env_badge::color(conn.profile.color, cx.theme());
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(OVERVIEW)
+            .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
+                this.connection.update(cx, |c, cx| c.lock(cx));
+            }))
             .on_action(cx.listener(|this, _: &TogglePolling, _, cx| {
                 this.connection
                     .update(cx, |c, cx| c.set_paused(!c.paused, cx));
@@ -177,6 +185,7 @@ impl Render for OverviewPanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
+            .children(unlock::banner(&self.connection, OVERVIEW, window, cx))
             .child(self.overview.clone())
     }
 }
@@ -222,13 +231,12 @@ impl BasePanel for CollectionsPanel {
 impl Panel for CollectionsPanel {
     /// Color dot, "Collections" and environment badge (UX rule 1).
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let profile = &self.connection.read(cx).profile;
+        let conn = self.connection.read(cx);
+        let (profile, unlocked) = (&conn.profile, conn.writes_unlocked);
+        let tab_id = format!("tab.{}.collections", profile.id);
         let name = SharedString::from(t!("sidebar.collections").to_string());
         h_flex()
-            .id(SharedString::from(format!(
-                "tab.{}.collections",
-                profile.id
-            )))
+            .id(SharedString::from(tab_id.clone()))
             .test_support()
             .aria_label(name.clone())
             .gap_2()
@@ -236,15 +244,21 @@ impl Panel for CollectionsPanel {
             .child(env_badge::dot(profile.color, cx))
             .child(name)
             .child(env_badge::render(&profile.environment, cx))
+            .when(profile.read_only, |el| {
+                el.child(env_badge::lock(&tab_id, unlocked, cx))
+            })
     }
 }
 
 impl Render for CollectionsPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let edge = env_badge::color(self.connection.read(cx).profile.color, cx.theme());
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(COLLECTIONS)
+            .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
+                this.connection.update(cx, |c, cx| c.lock(cx));
+            }))
             .on_action(cx.listener(|this, _: &Refresh, _, cx| {
                 this.list.update(cx, |l, cx| l.reload(cx));
             }))
@@ -260,6 +274,7 @@ impl Render for CollectionsPanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
+            .children(unlock::banner(&self.connection, COLLECTIONS, window, cx))
             .child(self.list.clone())
     }
 }
@@ -317,13 +332,12 @@ impl BasePanel for CollectionPanel {
 impl Panel for CollectionPanel {
     /// Color dot, collection name and environment badge (UX rule 1).
     fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let profile = &self.connection.read(cx).profile;
+        let conn = self.connection.read(cx);
+        let (profile, unlocked) = (&conn.profile, conn.writes_unlocked);
+        let tab_id = format!("tab.{}.collection.{}", profile.id, self.name);
         let name = SharedString::from(self.name.clone());
         h_flex()
-            .id(SharedString::from(format!(
-                "tab.{}.collection.{}",
-                profile.id, self.name
-            )))
+            .id(SharedString::from(tab_id.clone()))
             .test_support()
             .aria_label(name.clone())
             .gap_2()
@@ -331,21 +345,28 @@ impl Panel for CollectionPanel {
             .child(env_badge::dot(profile.color, cx))
             .child(name)
             .child(env_badge::render(&profile.environment, cx))
+            .when(profile.read_only, |el| {
+                el.child(env_badge::lock(&tab_id, unlocked, cx))
+            })
     }
 }
 
 impl Render for CollectionPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let edge = env_badge::color(self.connection.read(cx).profile.color, cx.theme());
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(COLLECTION)
+            .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
+                this.connection.update(cx, |c, cx| c.lock(cx));
+            }))
             .on_action(cx.listener(|this, _: &Refresh, window, cx| {
                 this.schema.update(cx, |s, cx| s.reload(true, window, cx));
             }))
             .size_full()
             .border_t_2()
             .border_color(edge)
+            .children(unlock::banner(&self.connection, COLLECTION, window, cx))
             .child(self.schema.clone())
     }
 }

@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{Context, Global, SharedString, Task};
+use gpui_kit::{App, Context, Global, SharedString, Task, Window};
 use rust_i18n::t;
 use secrecy::SecretString;
 use tessera_client::{
@@ -22,6 +22,7 @@ use url::Url;
 use crate::collections::{CollectionsBackendGlobal, CollectionsCache};
 use crate::poller::{CollectionsFetcherGlobal, DEFAULT_INTERVAL, HISTORY_WINDOW, NodeStatus};
 use crate::runtime::AbortOnDrop;
+use crate::views::unlock;
 
 /// What Tessera learned about a server while connecting.
 #[derive(Debug, Clone)]
@@ -163,6 +164,8 @@ pub struct ConnectionState {
     pub collections: Option<Vec<CollectionSummary>>,
     /// Full text of the last failed collections load.
     pub collections_error: Option<SharedString>,
+    /// Writes are unlocked for this session on a read-only profile. Never saved.
+    pub writes_unlocked: bool,
     /// Polling is paused by the user.
     pub paused: bool,
     /// Time between two polls of a node, kept for the session.
@@ -189,6 +192,7 @@ impl ConnectionState {
             stats: None,
             collections: None,
             collections_error: None,
+            writes_unlocked: false,
             paused: false,
             interval: DEFAULT_INTERVAL,
             collections_task: None,
@@ -196,6 +200,43 @@ impl ConnectionState {
             cache_task: None,
             profile,
         }
+    }
+
+    /// Runs `then` at once on a writable connection; on a read-only one it first opens the
+    /// unlock dialog and runs `then` after the unlock, once the dialog has closed. `then` must
+    /// not update this connection when it runs at once (the caller is inside an update).
+    pub fn ensure_writable(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Window, &mut App) + 'static,
+    ) {
+        if self.profile.read_only && !self.writes_unlocked {
+            unlock::open(cx.entity(), &self.profile, then, window, cx);
+        } else {
+            then(window, cx);
+        }
+    }
+
+    /// Allows writes until [`Self::lock`] or disconnect. Nothing is written to disk.
+    pub fn unlock(&mut self, cx: &mut Context<Self>) {
+        self.set_locked(false, cx);
+    }
+
+    /// Restores the profile's read-only guard.
+    pub fn lock(&mut self, cx: &mut Context<Self>) {
+        self.set_locked(true, cx);
+    }
+
+    fn set_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        if !self.profile.read_only {
+            return;
+        }
+        self.writes_unlocked = !locked;
+        if let Some(c) = &self.connected {
+            c.client.set_read_only(locked);
+        }
+        cx.notify();
     }
 
     /// Pauses or resumes polling. Resuming polls right away.

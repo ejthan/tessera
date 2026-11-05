@@ -295,6 +295,7 @@ pub const TOGGLE_LOG: &str = key("cmd-j", "ctrl-j");
 pub const CLOSE_TAB: &str = key("cmd-w", "ctrl-w");
 pub const COPY_CURL: &str = key("cmd-shift-c", "ctrl-shift-c");
 pub const REFRESH: &str = key("cmd-r", "ctrl-r");
+pub const LOCK_AGAIN: &str = key("cmd-shift-l", "ctrl-shift-l");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 pub fn fake_connector(

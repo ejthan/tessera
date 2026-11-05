@@ -17,4 +17,5 @@ pub mod schema_view;
 pub mod sidebar;
 pub mod stats_table;
 pub mod status_bar;
+pub mod unlock;
 pub mod welcome;

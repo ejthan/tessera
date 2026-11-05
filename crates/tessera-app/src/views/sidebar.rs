@@ -10,7 +10,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, Context, Entity, FocusHandle, FontWeight, IntoElement, ParentElement as _, Render,
     SharedString, Styled as _, Subscription, Task, Window, div, prelude::*, transparent_black,
@@ -58,6 +58,7 @@ struct Entry {
     selected: bool,
     connecting: bool,
     connected: bool,
+    unlocked: bool,
     error: Option<SharedString>,
     missing_key: bool,
 }
@@ -160,6 +161,7 @@ impl Sidebar {
                     selected: state.selected == Some(profile.id),
                     connecting: conn.is_some_and(|c| c.connecting),
                     connected: conn.is_some_and(|c| c.connected.is_some()),
+                    unlocked: conn.is_some_and(|c| c.writes_unlocked),
                     error: conn.and_then(|c| c.error.clone()),
                     missing_key: conn.is_some_and(|c| c.missing_key),
                     profile,
@@ -324,18 +326,7 @@ impl Sidebar {
             })
             .when(entry.connecting, |el| el.child(Spinner::new().small()))
             .when(entry.profile.read_only, |el| {
-                let label = SharedString::from(t!("sidebar.read_only").to_string());
-                el.child(
-                    div()
-                        .id(SharedString::from(format!("{element_id}.readonly")))
-                        .test_support()
-                        .aria_label(label)
-                        .child(
-                            Icon::new(gpui_kit::assets::IconName::Lock)
-                                .small()
-                                .text_color(theme.muted_foreground),
-                        ),
-                )
+                el.child(env_badge::lock(&element_id, entry.unlocked, cx))
             })
             .child(
                 div()

@@ -521,6 +521,9 @@ impl AppState {
 
     /// Closes the connection of profile `id`. Dropping it cancels a running attempt.
     pub fn disconnect(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connection(id, cx) {
+            conn.update(cx, |c, cx| c.lock(cx));
+        }
         self.connections.retain(|c| c.read(cx).profile.id != id);
         if self.selected == Some(id) {
             self.selected = self.connections.last().map(|c| c.read(cx).profile.id);
@@ -538,6 +541,7 @@ fn observe_connection(conn: &Entity<ConnectionState>, cx: &mut Context<AppState>
         let now = Some((
             c.connecting,
             c.missing_key,
+            c.writes_unlocked,
             c.error.clone(),
             status_bar::summary(c),
         ));
