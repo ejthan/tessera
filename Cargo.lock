@@ -7447,6 +7447,7 @@ dependencies = [
 name = "tessera-client"
 version = "0.1.0"
 dependencies = [
+ "percent-encoding",
  "reqwest",
  "rustls",
  "secrecy",

@@ -178,3 +178,35 @@ async fn live_keys_probe_restricted() {
     admin(reqwest::Method::DELETE, &format!("keys/{id}"), None).await;
     assert_eq!(probe.unwrap(), KeyAccess::Restricted);
 }
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_collection_reads() {
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_reads";
+    let _ = admin_request(reqwest::Method::DELETE, &format!("collections/{name}"))
+        .send()
+        .await;
+    let schema = format!(
+        r#"{{"name":"{name}","fields":[{{"name":"title","type":"string"}},{{"name":"n","type":"int32"}}],"default_sorting_field":"n"}}"#
+    );
+    admin(reqwest::Method::POST, "collections", Some(&schema)).await;
+    let one = client.collection(name).await;
+    let all = client.collections().await;
+    let aliases = client.aliases().await;
+    // Clean up before asserting, so a failed assertion leaves no collection behind.
+    admin(
+        reqwest::Method::DELETE,
+        &format!("collections/{name}"),
+        None,
+    )
+    .await;
+    let one = one.unwrap();
+    assert_eq!(one.name, name);
+    assert_eq!(one.fields.len(), 2);
+    assert_eq!(one.default_sorting_field, "n");
+    assert!(one.fields[0].flag("index"));
+    assert!(all.unwrap().iter().any(|c| c.name == name));
+    aliases.unwrap();
+}
