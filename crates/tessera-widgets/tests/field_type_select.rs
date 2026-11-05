@@ -40,6 +40,13 @@ async fn shows_the_selected_type(cx: &mut TestAppContext) {
 }
 
 fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<FieldTypeSelect>) {
+    open_with(cx, FieldType::Int32Array)
+}
+
+fn open_with(
+    cx: &mut TestAppContext,
+    selected: FieldType,
+) -> (WindowHandle<Root>, Entity<FieldTypeSelect>) {
     let mut select = None;
     let handle = cx.update(|cx| {
         gpui_kit::init(cx);
@@ -55,7 +62,7 @@ fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<FieldTypeSelect>
             },
             cx,
             |window, cx| {
-                let s = cx.new(|cx| FieldTypeSelect::new(&FieldType::Int32Array, window, cx));
+                let s = cx.new(|cx| FieldTypeSelect::new(&selected, window, cx));
                 select = Some(s.clone());
                 cx.new(|_| Wrapper(s))
             },
@@ -111,4 +118,21 @@ async fn every_type_has_a_description(cx: &mut TestAppContext) {
             }
         }
     });
+}
+
+#[gpui_kit::test]
+async fn unknown_type_shows_a_translated_placeholder_with_its_name(cx: &mut TestAppContext) {
+    rust_i18n::set_locale("en");
+    let (handle, _) = open_with(cx, FieldType::Other("int8[]".into()));
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let shown = window
+            .find("field_type")
+            .value()
+            .unwrap_or_default()
+            .to_string();
+        assert!(!shown.contains("Please select"), "{shown}");
+        assert_eq!(shown, "int8[] (not in this list)");
+    })
+    .unwrap();
 }

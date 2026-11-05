@@ -377,3 +377,5 @@ connect.error.long_timeout: "%{host} ist nicht innerhalb von %{minutes} Minuten 
 collections.edit_error: "%{name} konnte nicht geladen werden, um das Schema zu ändern: %{detail}"
 collections.favorite_unsaved: "%{path} konnte nicht gelesen werden, darum schreibt Tessera die Datei nicht, und der Favorit gilt nur bis zum Beenden. %{error}"
 danger.delete.favorite_error: "%{name} wurde gelöscht, konnte aber nicht aus den Favoriten entfernt werden: %{detail}"
+field_type.placeholder: "Typ wählen"
+field_type.other: "%{name} (nicht in dieser Liste)"

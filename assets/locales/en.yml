@@ -377,3 +377,5 @@ connect.error.long_timeout: "%{host} did not finish within %{minutes} minutes. T
 collections.edit_error: "Could not load %{name} to edit its schema: %{detail}"
 collections.favorite_unsaved: "%{path} could not be read, so Tessera does not write it and the favorite lasts until you quit. %{error}"
 danger.delete.favorite_error: "Deleted %{name}, but could not remove it from the favorites: %{detail}"
+field_type.placeholder: "Choose a type"
+field_type.other: "%{name} (not in this list)"
