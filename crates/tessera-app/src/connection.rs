@@ -166,6 +166,8 @@ pub struct ConnectionState {
     pub collections_error: Option<SharedString>,
     /// Writes are unlocked for this session on a read-only profile. Never saved.
     pub writes_unlocked: bool,
+    /// The connection was closed by the user; a dialog still open for it does nothing.
+    pub closed: bool,
     /// Polling is paused by the user.
     pub paused: bool,
     /// Time between two polls of a node, kept for the session.
@@ -193,6 +195,7 @@ impl ConnectionState {
             collections: None,
             collections_error: None,
             writes_unlocked: false,
+            closed: false,
             paused: false,
             interval: DEFAULT_INTERVAL,
             collections_task: None,
@@ -202,9 +205,9 @@ impl ConnectionState {
         }
     }
 
-    /// Runs `then` at once on a writable connection; on a read-only one it first opens the
-    /// unlock dialog and runs `then` after the unlock, once the dialog has closed. `then` must
-    /// not update this connection when it runs at once (the caller is inside an update).
+    /// Runs `then` after this update on a writable connection (deferred, so `then` may read
+    /// or update the connection); on a read-only one it first opens the unlock dialog and runs
+    /// `then` after the unlock, once the dialog has closed.
     pub fn ensure_writable(
         &mut self,
         window: &mut Window,
@@ -212,9 +215,9 @@ impl ConnectionState {
         then: impl FnOnce(&mut Window, &mut App) + 'static,
     ) {
         if self.profile.read_only && !self.writes_unlocked {
-            unlock::open(cx.entity(), &self.profile, then, window, cx);
+            unlock::open(cx.entity().downgrade(), &self.profile, then, window, cx);
         } else {
-            then(window, cx);
+            window.defer(cx, then);
         }
     }
 
@@ -229,7 +232,8 @@ impl ConnectionState {
     }
 
     fn set_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
-        if !self.profile.read_only {
+        // Unlocking needs the client whose guard it lifts.
+        if !self.profile.read_only || (!locked && self.connected.is_none()) {
             return;
         }
         self.writes_unlocked = !locked;

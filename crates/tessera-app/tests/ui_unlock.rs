@@ -97,6 +97,20 @@ impl Fixture {
         wait_for_element(cx, self.handle, "danger.input".into(), false).await;
     }
 
+    /// Like the confirm above, but does not wait for the dialog to go away.
+    async fn type_name_and_confirm_keep(&self, cx: &mut TestAppContext) {
+        wait_for_element(cx, self.handle, "danger.input".into(), true).await;
+        let name = self.prod.name.clone();
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            window.click("danger.input".to_string(), cx);
+            window.input(&name, cx);
+            window.render_frame(cx);
+            window.click("danger.ok".to_string(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
     fn shown(&self, cx: &mut TestAppContext, id: String) -> bool {
         cx.update_window(self.handle.into(), |_, window, cx| {
             window.render_frame(cx);
@@ -182,7 +196,7 @@ async fn lock_again_restores_the_guard(cx: &mut TestAppContext) {
     f.write(cx);
     f.type_name_and_confirm(cx).await;
     assert_eq!(f.writes(), 1);
-    // Focus is in the tab, so the shortcut of its key context is dispatched.
+    // The banner button locks again.
     cx.update_window(f.handle.into(), |_, window, cx| {
         window.render_frame(cx);
         window.click("unlocked.lock".to_string(), cx);
@@ -249,4 +263,87 @@ async fn unlock_is_never_saved(cx: &mut TestAppContext) {
     // Let any save that was queued finish.
     cx.run_until_parked();
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[gpui_kit::test]
+async fn then_on_a_writable_connection_may_use_the_connection(cx: &mut TestAppContext) {
+    fake_connector(cx, |p| Ok(server_for(p)));
+    let (staging, prod, secrets) = two_profiles();
+    let rt = tokio(cx);
+    let file = ConnectionsFile {
+        profiles: vec![staging.clone(), prod],
+        ..Default::default()
+    };
+    let (handle, state) = open_state_at(cx, Ok(file), None, secrets);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(entry(&staging), cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "status.text".into(), "staging-eu").await;
+    let conn = cx.update(|cx| state.read(cx).connection(staging.id, cx).unwrap());
+    let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = ran.clone();
+    let inner = conn.clone();
+    cx.update_window(handle.into(), |_, window, cx| {
+        conn.update(cx, |c, cx| {
+            c.ensure_writable(window, cx, move |_, cx| {
+                inner.update(cx, |c, _| assert!(c.connected.is_some()));
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+    drop(rt);
+}
+
+#[gpui_kit::test]
+async fn disconnect_before_confirm_neither_unlocks_nor_continues(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.write(cx);
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+    let id = f.prod.id;
+    cx.update(|cx| f.state.update(cx, |s, cx| s.disconnect(id, cx)));
+    cx.run_until_parked();
+    let name = f.prod.name.clone();
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        window.click("danger.input".to_string(), cx);
+        window.input(&name, cx);
+        window.render_frame(cx);
+        window.click("danger.ok".to_string(), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(f.writes(), 0);
+    cx.update(|cx| assert!(!f.conn.read(cx).writes_unlocked));
+}
+
+#[gpui_kit::test]
+async fn dialog_opened_from_then_stays_open(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    let conn = f.conn.clone();
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        conn.update(cx, |c, cx| {
+            c.ensure_writable(window, cx, |window, cx| {
+                tessera_widgets::confirm_danger::open(
+                    tessera_widgets::confirm_danger::DangerOptions {
+                        title: "Follow-up".into(),
+                        consequences: vec![],
+                        expected: "x".into(),
+                        action_label: "Go".into(),
+                        prod: false,
+                    },
+                    |_, _| gpui_kit::Task::ready(Ok(())),
+                    window,
+                    cx,
+                );
+            });
+        });
+    })
+    .unwrap();
+    f.type_name_and_confirm_keep(cx).await;
+    cx.run_until_parked();
+    assert!(f.shown(cx, "danger.input".into()));
 }

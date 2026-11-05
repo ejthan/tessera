@@ -11,7 +11,7 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex};
 use gpui_kit::{
     App, Entity, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _, Task,
-    Window, div, prelude::*, rgb,
+    WeakEntity, Window, div, prelude::*, rgb,
 };
 use rust_i18n::t;
 use tessera_core::profile::Profile;
@@ -21,10 +21,11 @@ use super::env_badge;
 use crate::actions::LockAgain;
 use crate::connection::ConnectionState;
 
-/// Opens the unlock dialog for `profile`, the profile of `conn` (which may be mid-update); `then` runs after the unlock, once the dialog has closed, so a
-/// dialog that `then` opens is not closed by this one.
+/// Opens the unlock dialog for `profile`, the profile of `conn` (which may be mid-update).
+/// `then` runs after the unlock, once the dialog has closed, so a dialog that `then` opens
+/// is not closed by this one. If `conn` is gone or disconnected by then, nothing happens.
 pub fn open(
-    conn: Entity<ConnectionState>,
+    conn: WeakEntity<ConnectionState>,
     profile: &Profile,
     then: impl FnOnce(&mut Window, &mut App) + 'static,
     window: &mut Window,
@@ -47,7 +48,17 @@ pub fn open(
             prod,
         },
         move |window, cx| {
-            conn.update(cx, |c, cx| c.unlock(cx));
+            let live = conn
+                .update(cx, |c, cx| {
+                    !c.closed && c.connected.is_some() && {
+                        c.unlock(cx);
+                        true
+                    }
+                })
+                .unwrap_or(false);
+            if !live {
+                return Task::ready(Ok(()));
+            }
             if let Some(then) = then.borrow_mut().take() {
                 // The dialog closes when its task is polled, which was queued before this one.
                 window

@@ -460,7 +460,11 @@ impl AppState {
                     c.connecting = false;
                     c.missing_key = missing_key;
                     match result {
-                        Ok(connected) => c.connected = Some(connected),
+                        Ok(connected) => {
+                            // A new client starts with the profile's guard.
+                            c.writes_unlocked = false;
+                            c.connected = Some(connected);
+                        }
                         Err(text) => c.error = Some(text.into()),
                     }
                     cx.notify();
@@ -496,6 +500,7 @@ impl AppState {
         let id = profile.id;
         self.disconnect(id, cx);
         let mut state = ConnectionState::new(profile);
+        state.writes_unlocked = false;
         state.connected = Some(connected);
         let conn = cx.new(|_| state);
         observe_connection(&conn, cx);
@@ -522,7 +527,10 @@ impl AppState {
     /// Closes the connection of profile `id`. Dropping it cancels a running attempt.
     pub fn disconnect(&mut self, id: Uuid, cx: &mut Context<Self>) {
         if let Some(conn) = self.connection(id, cx) {
-            conn.update(cx, |c, cx| c.lock(cx));
+            conn.update(cx, |c, cx| {
+                c.closed = true;
+                c.lock(cx);
+            });
         }
         self.connections.retain(|c| c.read(cx).profile.id != id);
         if self.selected == Some(id) {
