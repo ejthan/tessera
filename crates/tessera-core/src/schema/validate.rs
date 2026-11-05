@@ -232,6 +232,25 @@ mod tests {
             draft(vec![x]),
             vec![(Field(0), "schema.issue.embed_from", Error)],
         ));
+        for e in [json!({"from":[]}), json!({"from":null})] {
+            let mut x = f("e", FieldType::FloatArray);
+            x.embed = Some(e);
+            rows.push((
+                "embed from empty",
+                draft(vec![x]),
+                vec![(Field(0), "schema.issue.embed_from", Error)],
+            ));
+        }
+        let mut x = f("a", FieldType::String);
+        x.num_dim = Some(3);
+        rows.push((
+            "several",
+            draft(vec![f("a", FieldType::String), x]),
+            vec![
+                (Field(1), "schema.issue.field_name_twice", Error),
+                (Field(1), "schema.issue.vector_type", Error),
+            ],
+        ));
         rows.push((
             "id type",
             draft(vec![f("id", FieldType::Int32)]),
