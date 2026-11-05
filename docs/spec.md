@@ -698,6 +698,7 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D18 | Collections in the sidebar | Favorites only, under "Collections"; the full list is the collections tab |
 | D19 | Schema inference from a file: M2 or M5? | M5, with import, which shares the file readers |
 | D20 | Clone shortcut | ⌘⇧D / Ctrl+Shift+D in the collection views; ⌥⌘D is taken by macOS |
+| D21 | Truncate/delete dialog when the fresh reload of the collection and aliases fails | Opens with the cached data and says it may be out of date |
 
 ---
 

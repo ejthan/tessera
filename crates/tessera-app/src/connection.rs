@@ -174,6 +174,8 @@ pub struct ConnectionState {
     pub interval: Duration,
     /// Collections with schemas and aliases, shared by the collection views.
     pub collection_cache: CollectionsCache,
+    /// A truncate or delete dialog is loading its numbers.
+    pub danger_loading: bool,
     collections_task: Option<Task<()>>,
     cache_task: Option<Task<()>>,
 }
@@ -205,6 +207,7 @@ impl ConnectionState {
             interval: DEFAULT_INTERVAL,
             collections_task: None,
             collection_cache: CollectionsCache::default(),
+            danger_loading: false,
             cache_task: None,
             profile,
         }

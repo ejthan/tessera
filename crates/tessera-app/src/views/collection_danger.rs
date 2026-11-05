@@ -19,7 +19,8 @@ enum Kind {
     Delete,
 }
 
-/// Asks for unlock if needed, then for the name, then empties `name`, which holds `documents`.
+/// Asks for unlock if needed, reloads the collection, asks for the name, then empties `name`.
+/// `documents` is the count to show if the reload fails.
 pub fn truncate(
     state: Entity<AppState>,
     connection: Entity<ConnectionState>,
@@ -28,25 +29,19 @@ pub fn truncate(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let conn = connection.clone();
-    conn.update(cx, |c, cx| {
-        c.ensure_writable(window, cx, move |window, cx| {
-            let lines = vec![
-                t!(
-                    "danger.truncate.consequence",
-                    count = grouped(documents),
-                    name = name
-                )
-                .to_string()
-                .into(),
-            ];
-            open(Kind::Truncate, state, connection, name, lines, window, cx);
-        })
-    });
+    prepare(
+        Kind::Truncate,
+        state,
+        connection,
+        name,
+        documents,
+        window,
+        cx,
+    );
 }
 
-/// Asks for unlock if needed, reloads the aliases, asks for the name, then deletes `name`,
-/// which holds `documents` (as of the fresh list when it has the collection).
+/// Asks for unlock if needed, reloads the collection and aliases, asks for the name, then
+/// deletes `name`. `documents` is the count to show if the reload fails.
 pub fn delete(
     state: Entity<AppState>,
     connection: Entity<ConnectionState>,
@@ -55,62 +50,93 @@ pub fn delete(
     window: &mut Window,
     cx: &mut App,
 ) {
+    prepare(Kind::Delete, state, connection, name, documents, window, cx);
+}
+
+fn prepare(
+    kind: Kind,
+    state: Entity<AppState>,
+    connection: Entity<ConnectionState>,
+    name: String,
+    documents: u64,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    // A second keypress while the first dialog is on its way must not open another.
+    if connection.read(cx).danger_loading {
+        return;
+    }
     let conn = connection.clone();
     conn.update(cx, |c, cx| {
         c.ensure_writable(window, cx, move |window, cx| {
             let Some(client) = client(&connection, cx) else {
-                return;
+                let detail = t!("status.not_connected").to_string();
+                let lines = lines(kind, &name, documents, &[], Some(detail));
+                return open(kind, state, connection, name, lines, window, cx);
             };
             let list = cx.global::<CollectionsBackendGlobal>().0.list(client);
+            connection.update(cx, |c, _| c.danger_loading = true);
             window
                 .spawn(cx, async move |cx| {
                     let fresh = list.await;
                     cx.update(|window, cx| {
-                        let cached;
-                        let (count, aliases, unchecked): (u64, &[Alias], Option<String>) =
-                            match &fresh {
-                                Ok((all, aliases)) => {
-                                    let count = all.iter().find(|c| c.name == name);
-                                    (count.map_or(documents, |c| c.num_documents), aliases, None)
-                                }
-                                Err(e) => {
-                                    // The cache may be stale; say so rather than hide the aliases.
-                                    cached = connection.read(cx).collection_cache.aliases.clone();
-                                    let profile = &connection.read(cx).profile;
-                                    (documents, &cached, Some(error_text(e, profile)))
-                                }
-                            };
-                        let mut lines: Vec<SharedString> = vec![
-                            t!(
-                                "danger.delete.consequence",
-                                name = name,
-                                count = grouped(count)
-                            )
-                            .to_string()
-                            .into(),
-                        ];
-                        let dangling: Vec<&str> = aliases_of(aliases, &name).collect();
-                        if !dangling.is_empty() {
-                            lines.push(
-                                t!("danger.delete.aliases", aliases = dangling.join(", "))
-                                    .to_string()
-                                    .into(),
-                            );
-                        }
-                        if let Some(detail) = unchecked {
-                            lines.push(
-                                t!("danger.delete.aliases_unchecked", detail = detail)
-                                    .to_string()
-                                    .into(),
-                            );
-                        }
-                        open(Kind::Delete, state, connection, name, lines, window, cx);
+                        connection.update(cx, |c, _| c.danger_loading = false);
+                        let lines = match &fresh {
+                            Ok((all, aliases)) => {
+                                let count = all.iter().find(|c| c.name == name);
+                                let count = count.map_or(documents, |c| c.num_documents);
+                                lines(kind, &name, count, aliases, None)
+                            }
+                            Err(e) => {
+                                // The cache may be stale; say so rather than hide it.
+                                let conn = connection.read(cx);
+                                let detail = error_text(e, &conn.profile);
+                                let aliases = &conn.collection_cache.aliases;
+                                lines(kind, &name, documents, aliases, Some(detail))
+                            }
+                        };
+                        open(kind, state, connection, name, lines, window, cx);
                     })
                     .ok();
                 })
                 .detach();
         })
     });
+}
+
+/// The consequence lines; `unchecked` is why the numbers could not be reloaded.
+fn lines(
+    kind: Kind,
+    name: &str,
+    documents: u64,
+    aliases: &[Alias],
+    unchecked: Option<String>,
+) -> Vec<SharedString> {
+    let count = grouped(documents);
+    let mut lines: Vec<SharedString> = Vec::new();
+    if kind == Kind::Truncate {
+        lines.push(
+            t!("danger.truncate.consequence", count = count, name = name)
+                .to_string()
+                .into(),
+        );
+    } else {
+        lines.push(
+            t!("danger.delete.consequence", name = name, count = count)
+                .to_string()
+                .into(),
+        );
+        let dangling: Vec<&str> = aliases_of(aliases, name).collect();
+        if !dangling.is_empty() {
+            let text = t!("danger.delete.aliases", aliases = dangling.join(", "));
+            lines.push(text.to_string().into());
+        }
+    }
+    if let Some(detail) = unchecked {
+        let text = t!("danger.unchecked", detail = detail);
+        lines.push(text.to_string().into());
+    }
+    lines
 }
 
 fn client(connection: &Entity<ConnectionState>, cx: &App) -> Option<Client> {

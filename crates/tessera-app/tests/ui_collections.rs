@@ -503,6 +503,51 @@ async fn truncate_needs_exact_name_and_states_count(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn truncate_dialog_states_the_fresh_count(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    f.backend.data.lock().unwrap().as_mut().unwrap().0[0].num_documents = 12_345;
+    f.row_shortcut(cx, "books", TRUNCATE).await;
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+    act(cx, f.handle, |window, _| {
+        let text = label(window, "danger.consequence.0");
+        assert!(text.contains("12,345 documents"), "{text}");
+    });
+}
+
+#[gpui_kit::test]
+async fn truncate_failure_shows_inline_in_dialog(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    *f.backend.danger_error.lock().unwrap() = Some((500, "truncate broke, see the logs".into()));
+    f.row_shortcut(cx, "books", TRUNCATE).await;
+    f.confirm(cx, "books").await;
+    wait_for_element(cx, f.handle, "danger.error".into(), true).await;
+    act(cx, f.handle, |window, _| {
+        assert!(label(window, "danger.error").contains("truncate broke, see the logs"));
+        assert!(window.try_find("danger.input").is_some());
+    });
+    assert_eq!(
+        f.backend.data.lock().unwrap().as_ref().unwrap().0[0].num_documents,
+        10_000
+    );
+}
+
+#[gpui_kit::test]
+async fn reload_failure_opens_with_cached_data_and_a_warning(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    *f.backend.data.lock().unwrap() = None;
+    f.row_shortcut(cx, "books", DELETE).await;
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+    act(cx, f.handle, |window, _| {
+        assert!(label(window, "danger.consequence.0").contains("10,000"));
+        assert!(label(window, "danger.consequence.1").contains("books_current"));
+        assert!(label(window, "danger.consequence.2").contains("out of date"));
+    });
+}
+
+#[gpui_kit::test]
 async fn truncate_sets_count_to_zero(cx: &mut TestAppContext) {
     let f = connected(cx, Some(data())).await;
     f.open_collections(cx).await;
@@ -613,7 +658,11 @@ async fn prod_dialog_carries_badge(cx: &mut TestAppContext) {
     wait_for_element(cx, f.handle, "danger.prod".into(), true).await;
     f.confirm(cx, &f.profile.name.clone()).await;
     wait_for_label(cx, f.handle, "danger.consequence.0".into(), "Deletes books").await;
-    assert!(f.shown(cx, "danger.prod"));
+    // Only the delete dialog is left, and it carries the badge.
+    act(cx, f.handle, |window, _| {
+        assert!(label(window, "danger.consequence.0").starts_with("Deletes books"));
+        assert!(window.try_find("danger.prod").is_some());
+    });
 }
 
 #[gpui_kit::test]
