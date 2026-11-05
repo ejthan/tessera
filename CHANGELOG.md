@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Favorite collections, kept per connection.
 - `cargo xtask seed --url <url> [--key <key>] [--reset]` fills a dev server with five reproducible sample collections, an alias and a synonym set (see `docs/building.md`).
 - `tessera-widgets` crate for reusable GPUI widgets.
+- Create collections from a form or from JSON, kept in sync, with live validation and server errors shown inline (New collection ⌘⇧N / Ctrl+Shift+N). Clone a collection (⌘⇧D / Ctrl+Shift+D) from the list or the schema view; the clone blanks embedding credentials.
+- Unlock writes on a read-only connection by typing the profile name. A "Writes unlocked" banner offers "Lock again" (⌘⇧L / Ctrl+Shift+L); writes lock again on disconnect and the unlock is never saved.
 
 ### Fixed
 

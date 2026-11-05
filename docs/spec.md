@@ -267,7 +267,7 @@ Each module lists acceptance criteria (AC).
 - **API key** only in the OS keychain (`keyring`, service `tessera`, account = profile UUID). The profile itself holds no key.
 - **Connection test** before saving: `/health`, `/debug`, and a permission probe with `GET /collections` and `GET /keys`. The result is shown as "admin key" or "restricted key".
 - **Cluster profiles:** several nodes in one profile. Per-node view (leader/follower) in §7.2.
-- **Read-only mode** per profile, **on** by default for tag `prod`: all write actions are disabled. Unlocking is a temporary session grant, confirmed by typing the profile name. The unlock arrives in M2 with the first write action (D10).
+- **Read-only mode** per profile, **on** by default for tag `prod`: all write actions are disabled. Unlocking is a temporary session grant, confirmed by typing the profile name. The unlock is delivered in M2 with the first write action (D10).
 - **Import:** `config.json` from bfritscher's dashboard (fields `apiKey`, `node`, `history[]`, `clusterTag`), environment variables (`TYPESENSE_HOST` …), command line (`tessera --host … --port …`, key via stdin).
 - **Export** of profiles as JSON, without keys.
 - The most recently used connection can optionally open at startup.
