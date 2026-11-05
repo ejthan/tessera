@@ -55,7 +55,7 @@ cargo run -p tessera-app -- --host localhost --port 18108 --api-key-stdin <<< xy
 cargo xtask seed --url http://localhost:18108 [--key xyz] [--reset]
 ```
 
-Fills the server with `books` (10,000 documents, with the alias `books_current` and the synonym set `books_synonyms`), `authors` (500), `books_ref` (2,000, references `authors`), `places` (1,000, geopoints) and `articles_vec` (1,000, 8-dimensional vectors). The documents are generated from a fixed seed, so every run gives the same data. There is no default URL; without `--url` the command prints its usage and exits with 2. The key defaults to `xyz`. If one of these collections exists, the command stops and names it; `--reset` drops those collections, the alias and the synonym set first, and nothing else.
+Fills the server with `books` (10,000 documents, with the alias `books_current` and the synonym set `books_synonyms`), `authors` (500), `books_ref` (2,000, references `authors`), `places` (1,000, geopoints), `articles_vec` (1,000, 8-dimensional vectors) and `products` (200,000, with a nested `dimensions` object, about 10 s to load). The documents are generated from a fixed seed, so every run gives the same data. There is no default URL; without `--url` the command prints its usage and exits with 2. The key defaults to `xyz`. Documents are streamed in batches of 1,000. If one of these collections exists, the command stops and names it; `--reset` drops those collections, the alias and the synonym set first, and nothing else.
 
 ## Tests
 

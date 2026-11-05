@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! `cargo xtask seed`: fills a Typesense server with the five dev sets.
+//! `cargo xtask seed`: fills a Typesense server with the six dev sets.
 //!
 //! There is no default URL on purpose: a seed must never write to a server
 //! nobody named.
@@ -9,10 +9,18 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 /// Seed collections in drop order (referencing ones first).
-const COLLECTIONS: [&str; 5] = ["books_ref", "books", "authors", "places", "articles_vec"];
+const COLLECTIONS: [&str; 6] = [
+    "books_ref",
+    "books",
+    "authors",
+    "places",
+    "articles_vec",
+    "products",
+];
 const ALIAS: &str = "books_current";
 const SYNONYMS: &str = "books_synonyms";
 const AUTHORS: usize = 500;
+const PRODUCTS: usize = 200_000;
 
 /// Parsed command line of `seed`.
 pub struct Options {
@@ -134,6 +142,32 @@ fn articles_vec(n: usize) -> impl Iterator<Item = Value> {
     })
 }
 
+fn products(n: usize) -> impl Iterator<Item = Value> {
+    let mut rng = Rng(0xC2B2_AE3D_27D4_EB4F);
+    let words = move |rng: &mut Rng, k: usize| {
+        (0..k)
+            .map(|_| rng.pick(&WORDS))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    (0..n).map(move |i| {
+        json!({
+            "id": i.to_string(),
+            "title": words(&mut rng, 3),
+            "description": words(&mut rng, 25),
+            "brand": format!("brand{:03}", rng.below(200)),
+            "category": rng.pick(&WORDS),
+            "tags": [rng.pick(&WORDS), rng.pick(&WORDS), rng.pick(&WORDS)],
+            "price": rng.below(50_000) as f64 / 100.0,
+            "stock": rng.below(1000),
+            "rating": rng.below(50) as f64 / 10.0,
+            "active": rng.below(5) != 0,
+            "created_at": 1_700_000_000u64 + i as u64,
+            "dimensions": {"w": rng.below(100), "h": rng.below(100)},
+        })
+    })
+}
+
 fn schemas() -> Vec<Value> {
     vec![
         json!({
@@ -168,6 +202,24 @@ fn schemas() -> Vec<Value> {
             "fields": [
                 {"name": "title", "type": "string"},
                 {"name": "embedding", "type": "float[]", "num_dim": 8},
+            ],
+        }),
+        json!({
+            "name": "products",
+            "enable_nested_fields": true,
+            "default_sorting_field": "created_at",
+            "fields": [
+                {"name": "title", "type": "string"},
+                {"name": "description", "type": "string"},
+                {"name": "brand", "type": "string", "facet": true},
+                {"name": "category", "type": "string", "facet": true},
+                {"name": "tags", "type": "string[]", "facet": true},
+                {"name": "price", "type": "float", "sort": true},
+                {"name": "stock", "type": "int32"},
+                {"name": "rating", "type": "float", "sort": true},
+                {"name": "active", "type": "bool", "facet": true},
+                {"name": "created_at", "type": "int64"},
+                {"name": "dimensions", "type": "object"},
             ],
         }),
     ]
@@ -219,11 +271,14 @@ impl Server {
         Ok(())
     }
 
-    async fn import(&self, collection: &str, docs: Vec<Value>) -> Result<()> {
-        for batch in docs.chunks(1000) {
-            let body = batch
-                .iter()
-                .map(Value::to_string)
+    /// Imports in batches of 1,000 without collecting the iterator.
+    async fn import(&self, collection: &str, docs: impl Iterator<Item = Value>) -> Result<()> {
+        let mut docs = docs.peekable();
+        while docs.peek().is_some() {
+            let body = docs
+                .by_ref()
+                .take(1000)
+                .map(|d| d.to_string())
                 .collect::<Vec<_>>()
                 .join("\n");
             let url = format!(
@@ -236,6 +291,29 @@ impl Server {
                 bail!("import into {collection} failed: {bad}");
             }
         }
+        Ok(())
+    }
+}
+
+impl Server {
+    /// Imports `docs` and checks that the collection holds `expected` documents.
+    async fn load(
+        &self,
+        name: &str,
+        expected: usize,
+        docs: impl Iterator<Item = Value>,
+    ) -> Result<()> {
+        self.import(name, docs).await?;
+        let info: Value = serde_json::from_str(
+            &self
+                .ok(self.http.get(format!("{}/collections/{name}", self.url)))
+                .await?,
+        )?;
+        let got = info["num_documents"].as_u64().unwrap_or(0);
+        if got != expected as u64 {
+            bail!("{name}: expected {expected} documents, found {got}");
+        }
+        println!("{name}: {got} documents");
         Ok(())
     }
 }
@@ -270,13 +348,6 @@ pub async fn run(opts: &Options) -> Result<()> {
         .json(&synonyms))
         .await?;
 
-    let mut sets: Vec<(&str, Vec<Value>)> = vec![
-        ("authors", authors(AUTHORS).collect()),
-        ("books", books(10_000).collect()),
-        ("books_ref", books_ref(2_000, AUTHORS).collect()),
-        ("places", places(1_000).collect()),
-        ("articles_vec", articles_vec(1_000).collect()),
-    ];
     for schema in schemas() {
         s.ok(s
             .http
@@ -284,19 +355,13 @@ pub async fn run(opts: &Options) -> Result<()> {
             .json(&schema))
             .await?;
     }
-    for (name, docs) in sets.drain(..) {
-        let expected = docs.len();
-        s.import(name, docs).await?;
-        let info: Value = serde_json::from_str(
-            &s.ok(s.http.get(format!("{}/collections/{name}", opts.url)))
-                .await?,
-        )?;
-        let got = info["num_documents"].as_u64().unwrap_or(0);
-        if got != expected as u64 {
-            bail!("{name}: expected {expected} documents, found {got}");
-        }
-        println!("{name}: {got} documents");
-    }
+    s.load("authors", AUTHORS, authors(AUTHORS)).await?;
+    s.load("books", 10_000, books(10_000)).await?;
+    s.load("books_ref", 2_000, books_ref(2_000, AUTHORS))
+        .await?;
+    s.load("places", 1_000, places(1_000)).await?;
+    s.load("articles_vec", 1_000, articles_vec(1_000)).await?;
+    s.load("products", PRODUCTS, products(PRODUCTS)).await?;
     s.ok(s
         .http
         .put(format!("{}/aliases/{ALIAS}", opts.url))
@@ -315,6 +380,29 @@ mod tests {
         assert!(books(50).eq(books(50)));
         assert!(places(50).eq(places(50)));
         assert!(articles_vec(50).eq(articles_vec(50)));
+    }
+
+    #[test]
+    fn products_are_reproducible() {
+        assert!(products(50).eq(products(50)));
+    }
+
+    #[test]
+    fn product_ids_are_unique_and_prices_positive() {
+        let mut ids = std::collections::HashSet::new();
+        for p in products(2_000) {
+            assert!(ids.insert(p["id"].as_str().unwrap_or_default().to_string()));
+            assert!(p["price"].as_f64().unwrap_or(-1.0) > 0.0);
+        }
+    }
+
+    #[test]
+    fn schemas_has_products() {
+        let all = schemas();
+        let p = all.iter().find(|s| s["name"] == "products");
+        let p = p.expect("products schema");
+        assert_eq!(p["enable_nested_fields"], true);
+        assert_eq!(p["default_sorting_field"], "created_at");
     }
 
     #[test]
