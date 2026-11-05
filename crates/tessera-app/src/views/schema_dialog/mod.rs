@@ -288,13 +288,15 @@ impl SchemaDialog {
             return;
         };
         let conn = self.connection.read(cx);
-        let (Some(connected), profile) = (&conn.connected, conn.profile.clone()) else {
-            return;
+        let profile = conn.profile.clone();
+        let Some(client) = conn.connected.as_ref().map(|c| c.client.clone()) else {
+            self.server_error = Some(t!("status.not_connected").to_string().into());
+            return cx.notify();
         };
         let create = cx
             .global::<CollectionsBackendGlobal>()
             .0
-            .create(connected.client.clone(), draft.to_json());
+            .create(client, draft.to_json());
         self.busy = true;
         self.server_error = None;
         cx.notify();

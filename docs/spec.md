@@ -697,6 +697,7 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D17 | What the overview shows while the active node is down | Its last figures and curves stay, dimmed, with "last sample N s ago" under the node cards; they are not cleared |
 | D18 | Collections in the sidebar | Favorites only, under "Collections"; the full list is the collections tab |
 | D19 | Schema inference from a file: M2 or M5? | M5, with import, which shares the file readers |
+| D20 | Clone shortcut | ⌘⇧D / Ctrl+Shift+D in the collection views; ⌥⌘D is taken by macOS |
 
 ---
 

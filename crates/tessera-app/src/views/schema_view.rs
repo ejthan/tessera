@@ -158,6 +158,8 @@ impl TableDelegate for Fields {
 struct Loaded {
     collection: Collection,
     json: String,
+    /// As the server sent it, never rendered: clone starts from it, so masking never travels.
+    raw: Collection,
 }
 
 fn mask(collection: &Collection) -> Result<Loaded, serde_json::Error> {
@@ -166,6 +168,7 @@ fn mask(collection: &Collection) -> Result<Loaded, serde_json::Error> {
     Ok(Loaded {
         json: serde_json::to_string_pretty(&value)?,
         collection: serde_json::from_value(value)?,
+        raw: collection.clone(),
     })
 }
 
@@ -293,10 +296,11 @@ impl SchemaView {
         self.editor.read(cx).text(cx)
     }
 
-    /// Opens the clone dialog for the collection as shown (embedding secrets are blanked).
+    /// Opens the clone dialog for the loaded collection, unmasked; the dialog blanks the
+    /// embedding credentials.
     pub fn clone_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(loaded) = &self.loaded {
-            let source = loaded.collection.clone();
+            let source = loaded.raw.clone();
             SchemaDialog::open_clone(
                 self.state.clone(),
                 self.connection.clone(),
@@ -349,7 +353,7 @@ impl SchemaView {
             .items_center()
             .child(
                 div()
-                    .id("schema.name")
+                    .id("schema.title")
                     .test_support()
                     .aria_label(SharedString::from(c.name.clone()))
                     .text_lg()

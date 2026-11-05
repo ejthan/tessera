@@ -27,7 +27,7 @@ const SUBMIT: &str = key("cmd-enter", "ctrl-enter");
 const SHOW_JSON: &str = key("cmd-2", "ctrl-2");
 const SHOW_FORM: &str = key("cmd-1", "ctrl-1");
 const NEW_COLLECTION: &str = key("cmd-shift-n", "ctrl-shift-n");
-const CLONE: &str = key("alt-cmd-d", "ctrl-alt-d");
+const CLONE: &str = key("cmd-shift-d", "ctrl-shift-d");
 
 struct Fixture {
     handle: WindowHandle<Root>,
@@ -168,6 +168,7 @@ fn books() -> Collection {
                 .unwrap(),
             },
         ],
+        metadata: json!({"value": "x"}).as_object().cloned(),
         ..Default::default()
     }
 }
@@ -420,7 +421,7 @@ async fn shortcuts_open_switch_and_add(cx: &mut TestAppContext) {
     f.query(cx, |w| assert!(w.try_find("schema.field.1.name").is_some()));
     f.act(cx, |window, cx| window.press("escape", cx));
     wait_for_element(cx, f.handle, "schema.submit".into(), false).await;
-    // Clone with ⌥⌘D on the selected row.
+    // Clone with ⌘⇧D on the selected row.
     f.act(cx, |window, cx| {
         window.click("collections.row.books", cx);
         window.press(CLONE, cx);
@@ -442,4 +443,38 @@ async fn shortcuts_open_switch_and_add(cx: &mut TestAppContext) {
         assert!(w.try_find("schema.submit").is_some());
         assert_eq!(w.find("schema.field.0.name").value(), Some("title"));
     });
+}
+
+#[gpui_kit::test]
+async fn schema_view_clone_sends_unmasked_values(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let id = f.profile.id;
+    cx.update(|cx| {
+        f.state
+            .update(cx, |s, cx| s.open_collection(id, "books".into(), cx))
+    });
+    wait_for_element(cx, f.handle, "schema.clone".into(), true).await;
+    f.act(cx, |window, cx| window.click("schema.clone", cx));
+    f.act(cx, |window, cx| window.click("schema.submit", cx));
+    let sent = f.creates();
+    // The view masks `value`; the clone must not send the mask.
+    assert_eq!(sent[0]["metadata"], json!({"value": "x"}));
+    assert_eq!(sent[0]["fields"][1]["embed"]["model_config"]["api_key"], "");
+}
+
+#[gpui_kit::test]
+async fn create_without_connection_says_so(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = f.create(cx);
+    f.set_json(
+        cx,
+        &dialog,
+        r#"{"name": "b", "fields": [{"name": "t", "type": "string"}]}"#,
+    );
+    cx.update(|cx| f.conn.update(cx, |c, _| c.connected = None));
+    f.act(cx, |window, cx| window.click("schema.submit", cx));
+    f.query(cx, |w| {
+        assert_eq!(w.find("schema.server_error").label(), Some("Not connected"))
+    });
+    assert!(f.creates().is_empty());
 }

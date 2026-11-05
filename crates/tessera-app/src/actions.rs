@@ -126,10 +126,12 @@ const LOCK_AGAIN: &str = "ctrl-shift-l";
 const NEW_COLLECTION: &str = "cmd-shift-n";
 #[cfg(not(target_os = "macos"))]
 const NEW_COLLECTION: &str = "ctrl-shift-n";
+// D20: ⌥⌘D hides the Dock on macOS. The same chord as Disconnect, which is bound only in
+// SIDEBAR_ENTRY, so the two never meet.
 #[cfg(target_os = "macos")]
-const CLONE: &str = "alt-cmd-d";
+const CLONE: &str = "cmd-shift-d";
 #[cfg(not(target_os = "macos"))]
-const CLONE: &str = "ctrl-alt-d";
+const CLONE: &str = "ctrl-shift-d";
 #[cfg(target_os = "macos")]
 const SHOW_FORM: &str = "cmd-1";
 #[cfg(not(target_os = "macos"))]

@@ -220,7 +220,7 @@ The crate the product spec reserves for reusable GPUI Kit compositions without a
 - **Columns:** favorite star, name, documents, fields, created (local date and time), aliases (names), synonym sets, curation sets. Counts are right-aligned and grouped by thousands per locale.
 - **Search** above the table filters by name and alias, as you type. ⌘F / Ctrl+F focuses it.
 - **Sort** by clicking a header or Enter on a focused header, as in M1's stats table. Favorites always come first.
-- **Row actions,** in the context menu and as shortcuts on the focused row, each shown in the menu: Open (Enter), Toggle favorite (⌘D / Ctrl+D), Clone… (⌥⌘D / Ctrl+Alt+D; ⌘⇧D is M1's Disconnect, D15), Edit schema… (⌘E / Ctrl+E), Truncate… (⌘⇧⌫ / Ctrl+Shift+Backspace), Delete… (⌘⌫ / Ctrl+Backspace).
+- **Row actions,** in the context menu and as shortcuts on the focused row, each shown in the menu: Open (Enter), Toggle favorite (⌘D / Ctrl+D), Clone… (⌘⇧D / Ctrl+Shift+D, D20; M1's Disconnect uses the same chord only on a sidebar entry, D15), Edit schema… (⌘E / Ctrl+E), Truncate… (⌘⇧⌫ / Ctrl+Shift+Backspace), Delete… (⌘⌫ / Ctrl+Backspace).
 - **Header:** "New collection" (⌘⇧N / Ctrl+Shift+N) and Refresh (⌘R / Ctrl+R), both with the shortcut shown.
 - **Empty list:** one sentence on what a collection is, the docs link, "New collection", and the `cargo xtask seed` hint for local connections.
 - **Read-only connection:** the write actions show the lock and open the unlock dialog (§7.5) instead of being hidden, so the user learns why they are unavailable.
