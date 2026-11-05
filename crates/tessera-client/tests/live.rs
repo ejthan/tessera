@@ -210,3 +210,77 @@ async fn live_collection_reads() {
     assert!(all.unwrap().iter().any(|c| c.name == name));
     aliases.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_collection_lifecycle() {
+    use serde_json::json;
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_lifecycle";
+    let _ = client.delete_collection(name).await;
+    let schema =
+        json!({"name":name,"fields":[{"name":"n","type":"int32"},{"name":"t","type":"string"}]});
+    let created = client.create_collection(&schema).await;
+    let duplicate = client.create_collection(&schema).await;
+    let invalid = client
+        .create_collection(&json!({"name":"x","fields":[]}))
+        .await;
+    admin(
+        reqwest::Method::POST,
+        &format!("collections/{name}/documents"),
+        Some(r#"{"n":1,"t":"a"}"#),
+    )
+    .await;
+    // Add, drop and change a type (drop + add in one request).
+    let patch = client
+        .update_collection(
+            name,
+            &json!({"fields":[
+                {"name":"extra","type":"string","optional":true},
+                {"name":"t","drop":true},
+                {"name":"n","drop":true},{"name":"n","type":"int64"}
+            ]}),
+        )
+        .await;
+    let changed = client.collection(name).await;
+    let without_drop = client
+        .update_collection(name, &json!({"fields":[{"name":"n","type":"int32"}]}))
+        .await;
+    let changes = client.schema_changes().await;
+    let truncated = client.truncate_collection(name).await;
+    let deleted = client.delete_collection(name).await;
+    let gone = client.collection(name).await;
+    // Everything ran; now assert.
+    assert_eq!(created.unwrap().name, name);
+    match duplicate {
+        Err(e @ Error::Http { status: 409, .. }) => assert!(e.typesense_message().is_some()),
+        other => panic!("duplicate: {other:?}"),
+    }
+    match invalid {
+        Err(e @ Error::Http { status: 400, .. }) => assert!(e.typesense_message().is_some()),
+        other => panic!("invalid: {other:?}"),
+    }
+    patch.unwrap();
+    let fields = changed.unwrap().fields;
+    assert!(fields.iter().any(|f| f.name == "extra"));
+    assert!(!fields.iter().any(|f| f.name == "t"));
+    assert_eq!(
+        fields.iter().find(|f| f.name == "n").unwrap().r#type,
+        "int64"
+    );
+    match without_drop {
+        Err(e @ Error::Http { status: 400, .. }) => {
+            assert!(
+                e.typesense_message()
+                    .unwrap()
+                    .contains("already part of the schema")
+            );
+        }
+        other => panic!("change without drop: {other:?}"),
+    }
+    assert!(changes.unwrap().is_empty());
+    assert_eq!(truncated.unwrap(), 1);
+    deleted.unwrap();
+    assert!(matches!(gone, Err(Error::Http { status: 404, .. })));
+}

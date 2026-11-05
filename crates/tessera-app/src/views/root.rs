@@ -6,7 +6,7 @@ use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::dock::{
     DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, PaneRef, PanelId, panel_handle,
 };
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Theme, TitleBar, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Theme, TitleBar, h_flex, v_flex};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, prelude::*,
@@ -220,7 +220,8 @@ impl RootView {
                             (PanelId::from(panel.entity_id()), panel_handle(panel))
                         }
                         Kind::Collection(name) => {
-                            let panel = cx.new(|cx| CollectionPanel::new(conn, name, window, cx));
+                            let panel =
+                                cx.new(|cx| CollectionPanel::new(conn, state, name, window, cx));
                             (PanelId::from(panel.entity_id()), panel_handle(panel))
                         }
                     };
@@ -368,6 +369,7 @@ impl Render for RootView {
         let active = self.active_connection(cx);
         let active = active.as_ref().map(|c| c.read(cx));
         let profile = active.map(|c| &c.profile);
+        let unlocked = active.is_some_and(|c| c.writes_unlocked);
         let prod = profile.is_some_and(|p| p.environment.is_prod());
         let log_open = self.dock.read(cx).is_dock_open(DockPlacement::Bottom);
         let title = SharedString::from(
@@ -397,17 +399,7 @@ impl Render for RootView {
                         .child(env_badge::render(&p.environment, cx)),
                 )
                 .when(p.read_only, |el| {
-                    el.child(
-                        div()
-                            .id("titlebar.readonly")
-                            .test_support()
-                            .aria_label(SharedString::from(t!("sidebar.read_only").to_string()))
-                            .child(
-                                Icon::new(gpui_kit::assets::IconName::Lock)
-                                    .small()
-                                    .text_color(theme.muted_foreground),
-                            ),
-                    )
+                    el.child(env_badge::lock("titlebar", unlocked, cx))
                 })
             });
         let red = rgb(env_badge::PROD_RED);

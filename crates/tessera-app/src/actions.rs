@@ -28,7 +28,13 @@ gpui_kit::actions!(
         ToggleFavorite,
         FocusSearch,
         OpenCollectionRow,
-        OpenLink
+        OpenLink,
+        LockAgain,
+        CloneCollection,
+        ShowForm,
+        ShowJson,
+        AddField,
+        SubmitSchema
     ]
 );
 
@@ -51,6 +57,10 @@ pub const COLLECTIONS_TABLE: &str = "Collections > DataTable";
 pub const COLLECTIONS_HEADER: &str = "CollectionsHeader";
 /// Key context of the Collections and favorite rows under a sidebar entry.
 pub const SIDEBAR_LINK: &str = "SidebarLink";
+/// Key context of the create and clone dialog.
+pub const SCHEMA_DIALOG: &str = "SchemaDialog";
+/// Key context of the dialog's last field row, where ⌘↩ / Ctrl+↩ adds the next field.
+pub const SCHEMA_LAST_FIELD: &str = "SchemaLastField";
 
 #[cfg(target_os = "macos")]
 const NEW_CONNECTION: &str = "cmd-n";
@@ -109,6 +119,28 @@ const FIND: &str = "cmd-f";
 #[cfg(not(target_os = "macos"))]
 const FIND: &str = "ctrl-f";
 #[cfg(target_os = "macos")]
+const LOCK_AGAIN: &str = "cmd-shift-l";
+#[cfg(not(target_os = "macos"))]
+const LOCK_AGAIN: &str = "ctrl-shift-l";
+#[cfg(target_os = "macos")]
+const NEW_COLLECTION: &str = "cmd-shift-n";
+#[cfg(not(target_os = "macos"))]
+const NEW_COLLECTION: &str = "ctrl-shift-n";
+// D20: ⌥⌘D hides the Dock on macOS. The same chord as Disconnect, which is bound only in
+// SIDEBAR_ENTRY, so the two never meet.
+#[cfg(target_os = "macos")]
+const CLONE: &str = "cmd-shift-d";
+#[cfg(not(target_os = "macos"))]
+const CLONE: &str = "ctrl-shift-d";
+#[cfg(target_os = "macos")]
+const SHOW_FORM: &str = "cmd-1";
+#[cfg(not(target_os = "macos"))]
+const SHOW_FORM: &str = "ctrl-1";
+#[cfg(target_os = "macos")]
+const SHOW_JSON: &str = "cmd-2";
+#[cfg(not(target_os = "macos"))]
+const SHOW_JSON: &str = "ctrl-2";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
@@ -137,12 +169,23 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(REFRESH, Refresh, Some(OVERVIEW)),
         KeyBinding::new(REFRESH, Refresh, Some(COLLECTIONS)),
         KeyBinding::new(REFRESH, Refresh, Some(COLLECTION)),
+        KeyBinding::new(LOCK_AGAIN, LockAgain, Some(OVERVIEW)),
+        KeyBinding::new(LOCK_AGAIN, LockAgain, Some(COLLECTIONS)),
+        KeyBinding::new(LOCK_AGAIN, LockAgain, Some(COLLECTION)),
         KeyBinding::new(TOGGLE_FAVORITE, ToggleFavorite, Some(COLLECTIONS)),
         KeyBinding::new(FIND, FocusSearch, Some(COLLECTIONS)),
         KeyBinding::new("enter", OpenCollectionRow, Some(COLLECTIONS_TABLE)),
         // Unbinds Enter under the table's binding, so the header handles it as a click.
         KeyBinding::new("enter", NoAction, Some(COLLECTIONS_HEADER)),
         KeyBinding::new("enter", OpenLink, Some(SIDEBAR_LINK)),
+        KeyBinding::new(NEW_COLLECTION, NewCollection, Some(COLLECTIONS)),
+        KeyBinding::new(CLONE, CloneCollection, Some(COLLECTIONS)),
+        KeyBinding::new(CLONE, CloneCollection, Some(COLLECTION)),
+        KeyBinding::new(SHOW_FORM, ShowForm, Some(SCHEMA_DIALOG)),
+        KeyBinding::new(SHOW_JSON, ShowJson, Some(SCHEMA_DIALOG)),
+        KeyBinding::new(SAVE, SubmitSchema, Some(SCHEMA_DIALOG)),
+        // Deeper than the dialog, so in the last row ⌘↩ adds a field instead of creating.
+        KeyBinding::new(SAVE, AddField, Some(SCHEMA_LAST_FIELD)),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }

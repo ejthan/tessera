@@ -2,8 +2,12 @@
 
 //! Environment badge and profile colors.
 
-use gpui_kit::component::{ActiveTheme as _, Theme};
-use gpui_kit::{App, FontWeight, Hsla, IntoElement, ParentElement as _, Styled as _, div, rgb};
+use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Theme};
+use gpui_kit::{
+    App, FontWeight, Hsla, IntoElement, ParentElement as _, SharedString, Styled as _, div,
+    prelude::*, rgb,
+};
 use rust_i18n::t;
 use tessera_core::profile::{Environment, ProfileColor};
 
@@ -68,4 +72,31 @@ pub fn dot(color: ProfileColor, cx: &App) -> impl IntoElement {
         .size_2()
         .rounded_full()
         .bg(self::color(color, cx.theme()))
+}
+
+/// The lock of a read-only connection: closed, or open while writes are unlocked. `id` is the
+/// element id of the surrounding view; the lock adds `.readonly` or `.unlocked`.
+pub fn lock(id: &str, unlocked: bool, cx: &App) -> impl IntoElement {
+    let (suffix, text, icon) = if unlocked {
+        (
+            "unlocked",
+            t!("unlock.unlocked"),
+            gpui_kit::assets::IconName::LockOpen,
+        )
+    } else {
+        (
+            "readonly",
+            t!("sidebar.read_only"),
+            gpui_kit::assets::IconName::Lock,
+        )
+    };
+    div()
+        .id(SharedString::from(format!("{id}.{suffix}")))
+        .test_support()
+        .aria_label(SharedString::from(text.to_string()))
+        .child(
+            Icon::new(icon)
+                .small()
+                .text_color(cx.theme().muted_foreground),
+        )
 }

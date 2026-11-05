@@ -281,7 +281,7 @@
 
 **Files:**
 - Create: `crates/tessera-app/src/views/schema_dialog/mod.rs` (dialog, mode Create | Clone | Edit), `form.rs` (field rows, options), `sync.rs` (form ↔ JSON)
-- Modify: `collections.rs` (backend `create`), `views/collections_list.rs` and `schema_view.rs` (New collection ⌘⇧N, Clone ⌥⌘D), `actions.rs` (`NewCollection`, `CloneCollection`, `ShowForm` ⌘1, `ShowJson` ⌘2, `AddField`, `SubmitSchema` ⌘↩; key context `SCHEMA_DIALOG`), locales
+- Modify: `collections.rs` (backend `create`), `views/collections_list.rs` and `schema_view.rs` (New collection ⌘⇧N, Clone ⌘⇧D), `actions.rs` (`NewCollection`, `CloneCollection`, `ShowForm` ⌘1, `ShowJson` ⌘2, `AddField`, `SubmitSchema` ⌘↩; key context `SCHEMA_DIALOG`), locales
 - Test: `crates/tessera-app/tests/ui_schema_dialog.rs`
 
 **Interfaces:**

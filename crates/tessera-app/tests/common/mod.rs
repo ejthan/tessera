@@ -174,6 +174,11 @@ pub struct FakeData {
     pub lists: Mutex<usize>,
     /// Names asked of `get`.
     pub gets: Mutex<Vec<String>>,
+    /// Bodies sent to `create`.
+    pub creates: Mutex<Vec<serde_json::Value>>,
+    /// `create` fails with this status and Typesense message; `None` creates the collection
+    /// (and adds it to `data`).
+    pub create_error: Mutex<Option<(u16, String)>>,
 }
 
 /// The installed backend; the test keeps the [`FakeData`] handle.
@@ -203,6 +208,29 @@ impl CollectionsBackend for FakeBackend {
             .as_ref()
             .and_then(|(c, _)| c.iter().find(|c| c.name == name).cloned());
         Box::pin(async move { found.ok_or(Error::Timeout) })
+    }
+
+    fn create(
+        &self,
+        _: Client,
+        schema: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<Collection, Error>> {
+        self.0.creates.lock().unwrap().push(schema.clone());
+        let answer = match self.0.create_error.lock().unwrap().clone() {
+            Some((status, message)) => Err(Error::Http {
+                status,
+                body: serde_json::json!({ "message": message }).to_string(),
+                message,
+            }),
+            None => {
+                let created: Collection = serde_json::from_value(schema).unwrap();
+                if let Some((all, _)) = self.0.data.lock().unwrap().as_mut() {
+                    all.push(created.clone());
+                }
+                Ok(created)
+            }
+        };
+        Box::pin(async move { answer })
     }
 }
 
@@ -295,6 +323,7 @@ pub const TOGGLE_LOG: &str = key("cmd-j", "ctrl-j");
 pub const CLOSE_TAB: &str = key("cmd-w", "ctrl-w");
 pub const COPY_CURL: &str = key("cmd-shift-c", "ctrl-shift-c");
 pub const REFRESH: &str = key("cmd-r", "ctrl-r");
+pub const LOCK_AGAIN: &str = key("cmd-shift-l", "ctrl-shift-l");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 pub fn fake_connector(
