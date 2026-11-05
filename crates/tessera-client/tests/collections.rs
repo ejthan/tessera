@@ -31,6 +31,7 @@ async fn collections_decodes_full_schemas() {
     assert_eq!(all[0].num_documents, 0);
     assert_eq!(all[0].fields.len(), 1);
     assert_eq!(all[0].synonym_sets, ["m2probe_syn"]);
+    assert_eq!(all[0].metadata, json!({"owner":"me"}).as_object().cloned());
     assert!(all[0].extra.is_empty(), "{:?}", all[0].extra);
     assert!(all[0].fields[0].flag("index"));
     assert!(!all[0].fields[0].flag("facet"));
@@ -48,6 +49,7 @@ async fn unknown_attributes_survive() {
         .unwrap();
     assert_eq!(c.extra["future_option"], json!(1));
     assert_eq!(c.fields[0].attr("future_flag"), Some(&json!(true)));
+    assert!(serde_json::to_value(&c).unwrap().get("metadata").is_none());
     assert!(c.fields[0].flag("index") && c.fields[0].flag("store"));
 }
 

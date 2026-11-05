@@ -39,14 +39,14 @@ pub struct Collection {
     #[serde(default)]
     pub token_separators: Vec<String>,
     /// Free-form metadata.
-    #[serde(default)]
-    pub metadata: Map<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Map<String, Value>>,
     /// Number of documents (read only).
     #[serde(default)]
     pub num_documents: u64,
     /// Creation time, Unix seconds (read only).
     #[serde(default)]
-    pub created_at: u64,
+    pub created_at: i64,
     /// Synonym sets used by this collection.
     #[serde(default)]
     pub synonym_sets: Vec<String>,
