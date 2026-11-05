@@ -152,7 +152,7 @@ pub fn validate_document(c: &Collection, doc: &Value) -> Vec<DocIssue> {
             }
         }
     }
-    if !c.fields.iter().any(|f| f.name.contains('*'))
+    if !c.fields.iter().any(|f| f.name == ".*")
         && let Some(map) = doc.as_object()
     {
         for key in map.keys().filter(|k| *k != "id") {
@@ -325,6 +325,12 @@ mod tests {
         let mut wild = f.as_array().unwrap().clone();
         wild.push(json!({"name":".*","type":"auto"}));
         assert!(check(json!(wild), json!({"author":{"age":1},"extra":1})).is_empty());
+        // Only `.*` is a catch-all; a narrower pattern still leaves other keys unknown.
+        let narrow = json!([{"name":"a","type":"string"},{"name":"num_.*","type":"int32"}]);
+        assert_eq!(
+            check(narrow, json!({"a":"x","extra":1})),
+            [("extra".into(), "document.not_in_schema", Info)]
+        );
     }
 
     #[test]

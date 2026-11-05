@@ -8,51 +8,31 @@ use serde_json::{Map, Value};
 /// value, removed keys carry `null`, nested objects only carry what changed, arrays and
 /// scalars are replaced whole. `id` is never included.
 pub fn merge_patch(old: &Map<String, Value>, new: &Map<String, Value>) -> Map<String, Value> {
-    let mut patch = Map::new();
-    for key in old.keys().filter(|k| *k != "id" && !new.contains_key(*k)) {
-        patch.insert(key.clone(), Value::Null);
-    }
-    for (key, value) in new.iter().filter(|(k, _)| *k != "id") {
-        match old.get(key) {
-            Some(Value::Object(before)) if value.is_object() => {
-                let nested = merge_patch_nested(before, value);
-                if !nested.is_empty() {
-                    patch.insert(key.clone(), Value::Object(nested));
-                }
-            }
-            Some(before) if before == value => {}
-            _ => {
-                patch.insert(key.clone(), value.clone());
-            }
-        }
-    }
-    patch
+    patch(old, new, true)
 }
 
-// The same walk below the top level, where `id` is an ordinary key.
-fn merge_patch_nested(old: &Map<String, Value>, new: &Value) -> Map<String, Value> {
-    let Value::Object(new) = new else {
-        return Map::new();
-    };
-    let mut patch = Map::new();
-    for key in old.keys().filter(|k| !new.contains_key(*k)) {
-        patch.insert(key.clone(), Value::Null);
+// `top` marks the document level, the only place `id` is special.
+fn patch(old: &Map<String, Value>, new: &Map<String, Value>, top: bool) -> Map<String, Value> {
+    let keep = |k: &&String| !(top && *k == "id");
+    let mut out = Map::new();
+    for key in old.keys().filter(keep).filter(|k| !new.contains_key(*k)) {
+        out.insert(key.clone(), Value::Null);
     }
-    for (key, value) in new {
-        match old.get(key) {
-            Some(Value::Object(before)) if value.is_object() => {
-                let nested = merge_patch_nested(before, value);
+    for (key, value) in new.iter().filter(|(k, _)| keep(k)) {
+        match (old.get(key), value) {
+            (Some(Value::Object(before)), Value::Object(after)) => {
+                let nested = patch(before, after, false);
                 if !nested.is_empty() {
-                    patch.insert(key.clone(), Value::Object(nested));
+                    out.insert(key.clone(), Value::Object(nested));
                 }
             }
-            Some(before) if before == value => {}
+            (Some(before), _) if before == value => {}
             _ => {
-                patch.insert(key.clone(), value.clone());
+                out.insert(key.clone(), value.clone());
             }
         }
     }
-    patch
+    out
 }
 
 /// One changed leaf between two documents.
