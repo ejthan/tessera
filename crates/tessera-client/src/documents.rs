@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Document read endpoints.
+//! Document endpoints.
 
 use percent_encoding::utf8_percent_encode;
 use serde::Deserialize;
@@ -165,6 +165,60 @@ impl Client {
         let path = collection_path(collection, &format!("/documents/{}", segment(id)));
         let body = self.get_ok(None, &path, None).await?;
         serde_json::from_str(&body).map_err(Error::Decode)
+    }
+
+    async fn write_document(
+        &self,
+        method: crate::Method,
+        path: &str,
+        query: Option<&str>,
+        body: Option<&Value>,
+    ) -> Result<Value, Error> {
+        let body = self.write(None, method, path, query, body, None).await?;
+        serde_json::from_str(&body).map_err(Error::Decode)
+    }
+
+    /// `POST /collections/{c}/documents`: creates a document (409 when the id exists).
+    pub async fn create_document(
+        &self,
+        collection: &str,
+        document: &Value,
+    ) -> Result<Value, Error> {
+        let path = collection_path(collection, "/documents");
+        self.write_document(crate::Method::POST, &path, None, Some(document))
+            .await
+    }
+
+    /// `POST …/documents?action=upsert`: creates or replaces a document.
+    pub async fn upsert_document(
+        &self,
+        collection: &str,
+        document: &Value,
+    ) -> Result<Value, Error> {
+        let path = collection_path(collection, "/documents");
+        let query = encode_query(&[("action", "upsert")]);
+        self.write_document(crate::Method::POST, &path, Some(&query), Some(document))
+            .await
+    }
+
+    /// `PATCH /collections/{c}/documents/{id}`: a deep merge, `null` removes a key.
+    pub async fn patch_document(
+        &self,
+        collection: &str,
+        id: &str,
+        patch: &Value,
+    ) -> Result<Value, Error> {
+        let path = collection_path(collection, &format!("/documents/{}", segment(id)));
+        self.write_document(crate::Method::PATCH, &path, None, Some(patch))
+            .await
+    }
+
+    /// `DELETE /collections/{c}/documents/{id}`.
+    pub async fn delete_document(&self, collection: &str, id: &str) -> Result<(), Error> {
+        let path = collection_path(collection, &format!("/documents/{}", segment(id)));
+        self.write(None, crate::Method::DELETE, &path, None, None, None)
+            .await
+            .map(drop)
     }
 
     /// `GET /collections/{c}/documents/export?filter_by=`: the raw JSONL. Uses [`LONG_TIMEOUT`].

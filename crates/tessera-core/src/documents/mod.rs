@@ -3,8 +3,11 @@
 //! Document browser logic: columns, pages, column preferences and filter completion.
 
 pub mod columns;
+pub mod edit;
 pub mod filter;
 pub mod page;
+pub mod template;
+pub mod validate;
 pub mod views;
 
 /// Documents per page request (the server's maximum).

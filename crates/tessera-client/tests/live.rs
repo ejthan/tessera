@@ -422,3 +422,61 @@ async fn live_document_reads() {
         other => panic!("bad filter: {other:?}"),
     }
 }
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_document_writes() {
+    use serde_json::json;
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_doc_writes";
+    let _ = client.delete_collection(name).await;
+    client
+        .create_collection(&json!({"name":name,"enable_nested_fields":true,"fields":[
+            {"name":"title","type":"string"},
+            {"name":"author","type":"object","optional":true},
+            {"name":"author.name","type":"string","optional":true},
+            {"name":"author.age","type":"int32","optional":true}
+        ]}))
+        .await
+        .unwrap();
+    let doc = json!({"id":"d","title":"t","author":{"name":"n","age":3}});
+    let created = client.create_document(name, &doc).await;
+    let duplicate = client.create_document(name, &doc).await;
+    let merged = client
+        .patch_document(name, "d", &json!({"author":{"age":4}}))
+        .await;
+    let after_merge = client.document(name, "d").await;
+    let removed = client
+        .patch_document(name, "d", &json!({"author":{"age":null}}))
+        .await;
+    let after_remove = client.document(name, "d").await;
+    let required = client
+        .patch_document(name, "d", &json!({"title":null}))
+        .await;
+    let upserted = client
+        .upsert_document(name, &json!({"id":"d","title":"new"}))
+        .await;
+    let after_upsert = client.document(name, "d").await;
+    let missing_required = client.upsert_document(name, &json!({"id":"d"})).await;
+    let deleted = client.delete_document(name, "d").await;
+    let again = client.delete_document(name, "d").await;
+    let _ = client.delete_collection(name).await;
+    assert_eq!(created.unwrap()["id"], "d");
+    assert!(matches!(duplicate, Err(Error::Http { status: 409, .. })));
+    merged.unwrap();
+    assert_eq!(after_merge.unwrap()["author"], json!({"name":"n","age":4}));
+    removed.unwrap();
+    assert_eq!(after_remove.unwrap()["author"], json!({"name":"n"}));
+    assert!(matches!(required, Err(Error::Http { status: 400, .. })));
+    upserted.unwrap();
+    let replaced = after_upsert.unwrap();
+    assert_eq!(replaced["title"], "new");
+    assert!(replaced.get("author").is_none());
+    assert!(matches!(
+        missing_required,
+        Err(Error::Http { status: 400, .. })
+    ));
+    deleted.unwrap();
+    assert!(matches!(again, Err(Error::Http { status: 404, .. })));
+}
