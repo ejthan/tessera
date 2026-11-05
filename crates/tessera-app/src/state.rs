@@ -291,29 +291,45 @@ impl AppState {
     }
 
     /// Stars or unstars `collection` of profile `profile` and saves. A temporary connection
-    /// keeps the favorite in memory only.
-    pub fn toggle_favorite(&mut self, profile: Uuid, collection: &str, cx: &mut Context<Self>) {
-        fn toggle(p: &mut Profile, collection: &str) {
-            match p.favorite_collections.iter().position(|c| c == collection) {
-                Some(i) => {
-                    p.favorite_collections.remove(i);
-                }
-                None => p.favorite_collections.push(collection.to_owned()),
+    /// keeps the favorite in memory only. The task reports the save; callers must show an
+    /// error inline (the favorite stays set in memory).
+    pub fn toggle_favorite(
+        &mut self,
+        profile: Uuid,
+        collection: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        let saved = self.profiles.iter_mut().find(|p| p.id == profile);
+        let temporary = self
+            .temporary
+            .as_mut()
+            .map(|(p, _)| p)
+            .filter(|p| p.id == profile);
+        let (Some(p), saved) = (match saved {
+            Some(p) => (Some(p), true),
+            None => (temporary, false),
+        }) else {
+            return Task::ready(Ok(()));
+        };
+        match p.favorite_collections.iter().position(|c| c == collection) {
+            Some(i) => {
+                p.favorite_collections.remove(i);
             }
+            None => p.favorite_collections.push(collection.to_owned()),
         }
-        if let Some(p) = self.profiles.iter_mut().find(|p| p.id == profile) {
-            toggle(p, collection);
-            self.save(cx).detach();
-        } else if let Some((p, _)) = self.temporary.as_mut().filter(|(p, _)| p.id == profile) {
-            toggle(p, collection);
-        }
+        let favorites = p.favorite_collections.clone();
         if let Some(conn) = self.connection(profile, cx) {
             conn.update(cx, |c, cx| {
-                toggle(&mut c.profile, collection);
+                c.profile.favorite_collections = favorites;
                 cx.notify();
             });
         }
         cx.notify();
+        if saved {
+            self.save(cx)
+        } else {
+            Task::ready(Ok(()))
+        }
     }
 
     /// Removes a profile, its connection and its stored key, and saves.
@@ -1033,13 +1049,12 @@ mod tests {
             Some(path.clone()),
             Arc::new(MemoryStore::default()),
         );
-        state.update(cx, |s, cx| s.toggle_favorite(id, "books", cx));
-        let save = state.update(cx, |s, cx| s.save(cx));
+        let save = state.update(cx, |s, cx| s.toggle_favorite(id, "books", cx));
         save.await.unwrap();
         let saved = store::load(&path).unwrap();
         assert_eq!(saved.profiles[0].favorite_collections, ["books"]);
-        state.update(cx, |s, cx| s.toggle_favorite(id, "books", cx));
-        state.update(cx, |s, cx| s.save(cx)).await.unwrap();
+        let save = state.update(cx, |s, cx| s.toggle_favorite(id, "books", cx));
+        save.await.unwrap();
         assert!(
             store::load(&path).unwrap().profiles[0]
                 .favorite_collections
@@ -1062,7 +1077,7 @@ mod tests {
         );
         state.update(cx, |s, cx| {
             s.temporary = Some((profile, SecretString::from("k")));
-            s.toggle_favorite(id, "books", cx);
+            s.toggle_favorite(id, "books", cx).detach();
         });
         cx.run_until_parked();
         state.read_with(cx, |s, _| {
@@ -1072,5 +1087,24 @@ mod tests {
             );
         });
         assert!(!path.exists(), "nothing written");
+    }
+
+    #[gpui_kit::test]
+    async fn failed_favorite_save_is_reported(cx: &mut TestAppContext) {
+        let _rt = tokio(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, "").unwrap();
+        // The parent of the store path is a file, so the write fails.
+        let path = blocker.join("connections.json");
+        let profile = Profile::new("saved", vec![node()]);
+        let id = profile.id;
+        let file = ConnectionsFile {
+            profiles: vec![profile],
+            ..Default::default()
+        };
+        let state = new_state(cx, Ok(file), Some(path), Arc::new(MemoryStore::default()));
+        let save = state.update(cx, |s, cx| s.toggle_favorite(id, "books", cx));
+        assert!(save.await.is_err());
     }
 }

@@ -66,7 +66,11 @@ fn cache_error_is_kept_inline(cx: &mut TestAppContext) {
     state.read_with(cx, |s, _| {
         let cache = &s.collection_cache;
         assert!(!cache.loading);
-        assert!(cache.error.is_some(), "the failure is shown inline");
+        let error = cache.error.as_ref().expect("the failure is shown inline");
+        assert!(
+            error.contains("localhost"),
+            "full text names the host: {error}"
+        );
         assert!(cache.collections.is_some(), "the old list stays");
     });
 }
