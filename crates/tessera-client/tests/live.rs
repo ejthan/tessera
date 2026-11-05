@@ -480,3 +480,53 @@ async fn live_document_writes() {
     deleted.unwrap();
     assert!(matches!(again, Err(Error::Http { status: 404, .. })));
 }
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_bulk_by_filter() {
+    use serde_json::json;
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_bulk";
+    let _ = client.delete_collection(name).await;
+    client
+        .create_collection(&json!({"name":name,"fields":[
+            {"name":"n","type":"int32"},{"name":"tag","type":"string"}
+        ]}))
+        .await
+        .unwrap();
+    let docs: String = (0..2500)
+        .map(|i| json!({"id":format!("doc-{i:05}"),"n":i,"tag":"t"}).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let imported = admin_request(
+        reqwest::Method::POST,
+        &format!("/collections/{name}/documents/import?action=create"),
+    )
+    .body(docs)
+    .send()
+    .await
+    .expect("import");
+    assert!(imported.status().is_success());
+    let updated = client
+        .update_by_filter(name, "n:<10", &json!({"tag":"u"}))
+        .await;
+    let wrong_type = client
+        .update_by_filter(name, "n:<10", &json!({"n":"text"}))
+        .await;
+    let unknown = client.delete_by_filter(name, "nope:=1").await;
+    let deleted = client.delete_by_filter(name, "n:<5").await;
+    // 2,000 ids: the filter is well over 4,000 bytes, which GET search refuses.
+    let ids: Vec<String> = (10..2010).map(|i| format!("`doc-{i:05}`")).collect();
+    let filter = format!("id:=[{}]", ids.join(","));
+    assert!(filter.len() > 4000);
+    let many = client.delete_by_filter(name, &filter).await;
+    let left = client.count_documents(name, None).await;
+    let _ = client.delete_collection(name).await;
+    assert_eq!(updated.unwrap(), 10);
+    assert_eq!(wrong_type.unwrap(), 0);
+    assert!(matches!(unknown, Err(Error::Http { status: 400, .. })));
+    assert_eq!(deleted.unwrap(), 5);
+    assert_eq!(many.unwrap(), 2000);
+    assert_eq!(left.unwrap(), 2500 - 5 - 2000);
+}

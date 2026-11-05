@@ -221,6 +221,55 @@ impl Client {
             .map(drop)
     }
 
+    async fn by_filter(
+        &self,
+        method: crate::Method,
+        collection: &str,
+        pairs: &[(&str, &str)],
+        body: Option<&Value>,
+        count_key: &str,
+    ) -> Result<u64, Error> {
+        let path = collection_path(collection, "/documents");
+        let query = encode_query(pairs);
+        let text = self
+            .write(None, method, &path, Some(&query), body, Some(LONG_TIMEOUT))
+            .await?;
+        let answer: Value = serde_json::from_str(&text).map_err(Error::Decode)?;
+        Ok(answer[count_key].as_u64().unwrap_or(0))
+    }
+
+    /// `DELETE …/documents?filter_by=&batch_size=1000`: the number deleted. Uses [`LONG_TIMEOUT`].
+    pub async fn delete_by_filter(&self, collection: &str, filter_by: &str) -> Result<u64, Error> {
+        let pairs = [("filter_by", filter_by), ("batch_size", "1000")];
+        self.by_filter(
+            crate::Method::DELETE,
+            collection,
+            &pairs,
+            None,
+            "num_deleted",
+        )
+        .await
+    }
+
+    /// `PATCH …/documents?filter_by=`: the number updated; a value of the wrong type answers 0.
+    /// Uses [`LONG_TIMEOUT`].
+    pub async fn update_by_filter(
+        &self,
+        collection: &str,
+        filter_by: &str,
+        partial: &Value,
+    ) -> Result<u64, Error> {
+        let pairs = [("filter_by", filter_by)];
+        self.by_filter(
+            crate::Method::PATCH,
+            collection,
+            &pairs,
+            Some(partial),
+            "num_updated",
+        )
+        .await
+    }
+
     /// `GET /collections/{c}/documents/export?filter_by=`: the raw JSONL. Uses [`LONG_TIMEOUT`].
     pub async fn export_documents(
         &self,

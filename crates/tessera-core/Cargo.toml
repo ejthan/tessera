@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 directories.workspace = true
 keyring.workspace = true
+percent-encoding.workspace = true
 secrecy.workspace = true
 semver.workspace = true
 serde.workspace = true

@@ -7490,6 +7490,7 @@ dependencies = [
  "directories",
  "insta",
  "keyring",
+ "percent-encoding",
  "secrecy",
  "semver",
  "serde",

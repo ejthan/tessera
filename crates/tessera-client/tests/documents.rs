@@ -293,3 +293,74 @@ async fn read_only_client_refuses_document_writes() {
     ));
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn delete_by_filter_sends_the_filter_and_reads_the_count() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/collections/c/documents"))
+        .and(query_param("filter_by", "a:=1 && b:=2"))
+        .and(query_param("batch_size", "1000"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(300))
+                .set_body_string(r#"{"num_deleted":42}"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    // The delay exceeds the profile timeout: the long timeout applies.
+    let client = client(&server.uri()).with_timeout(Duration::from_millis(100));
+    assert_eq!(
+        client.delete_by_filter("c", "a:=1 && b:=2").await.unwrap(),
+        42
+    );
+}
+
+#[tokio::test]
+async fn update_by_filter_sends_the_partial_and_reads_the_count() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/collections/c/documents"))
+        .and(query_param("filter_by", "a:=1"))
+        .and(wiremock::matchers::body_json(serde_json::json!({"x":2})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(300))
+                .set_body_string(r#"{"num_updated":0}"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client(&server.uri()).with_timeout(Duration::from_millis(100));
+    let n = client
+        .update_by_filter("c", "a:=1", &serde_json::json!({"x":2}))
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn read_only_client_refuses_bulk_writes() {
+    let server = MockServer::start().await;
+    let locked = Client::new(
+        &[&server.uri()],
+        SecretString::from("k"),
+        ClientOptions {
+            read_only: true,
+            ..ClientOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        locked.delete_by_filter("c", "a:=1").await,
+        Err(Error::ReadOnly { .. })
+    ));
+    assert!(matches!(
+        locked
+            .update_by_filter("c", "a:=1", &serde_json::json!({}))
+            .await,
+        Err(Error::ReadOnly { .. })
+    ));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
