@@ -20,10 +20,13 @@ use tessera_client::{Collection, Field};
 use tessera_core::redact::mask_value;
 use tessera_widgets::JsonEditor;
 
+use super::collection_danger;
 use super::collections_list::created_text;
 use super::overview::grouped;
 use super::schema_dialog::SchemaDialog;
-use crate::actions::{COLLECTION, CloneCollection, EditSchema, Refresh};
+use crate::actions::{
+    COLLECTION, CloneCollection, DeleteCollection, EditSchema, Refresh, TruncateCollection,
+};
 use crate::collections::{CollectionsBackendGlobal, aliases_of};
 use crate::connection::{CollectionChanged, ConnectionState, error_text};
 use crate::state::AppState;
@@ -336,6 +339,24 @@ impl SchemaView {
         }
     }
 
+    /// Asks for the name, then empties the collection.
+    pub fn truncate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(loaded) = &self.loaded {
+            let (state, conn) = (self.state.clone(), self.connection.clone());
+            let (name, documents) = (self.name.clone(), loaded.raw.num_documents);
+            collection_danger::truncate(state, conn, name, documents, window, cx);
+        }
+    }
+
+    /// Asks for the name, then deletes the collection.
+    pub fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(loaded) = &self.loaded {
+            let (state, conn) = (self.state.clone(), self.connection.clone());
+            let (name, documents) = (self.name.clone(), loaded.raw.num_documents);
+            collection_danger::delete(state, conn, name, documents, window, cx);
+        }
+    }
+
     /// Puts the masked JSON on the clipboard and says "Copied" for a moment.
     fn copy_json(&mut self, cx: &mut Context<Self>) {
         let Some(loaded) = &self.loaded else {
@@ -418,6 +439,32 @@ impl SchemaView {
                         window,
                     ))
                     .on_click(cx.listener(|this, _, window, cx| this.clone_collection(window, cx))),
+            )
+            .child(
+                Button::new("schema.truncate")
+                    .outline()
+                    .danger()
+                    .small()
+                    .label(t!("collections.truncate").to_string())
+                    .children(Kbd::binding_for_action(
+                        &TruncateCollection,
+                        Some(COLLECTION),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.truncate(window, cx))),
+            )
+            .child(
+                Button::new("schema.delete")
+                    .outline()
+                    .danger()
+                    .small()
+                    .label(t!("collections.delete").to_string())
+                    .children(Kbd::binding_for_action(
+                        &DeleteCollection,
+                        Some(COLLECTION),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.delete(window, cx))),
             )
             .child(
                 Button::new("schema.reload")

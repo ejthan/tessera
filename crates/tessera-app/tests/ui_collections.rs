@@ -84,9 +84,19 @@ async fn connected(
     cx: &mut TestAppContext,
     data: Option<(Vec<Collection>, Vec<Alias>)>,
 ) -> Fixture {
+    connected_as(cx, data, false).await
+}
+
+/// Like [`connected`]; `prod` connects the read-only prod profile instead.
+async fn connected_as(
+    cx: &mut TestAppContext,
+    data: Option<(Vec<Collection>, Vec<Alias>)>,
+    prod: bool,
+) -> Fixture {
     let backend = fake_backend(cx, data);
     fake_connector(cx, |p| Ok(server_for(p)));
-    let (staging, _prod, secrets) = two_profiles();
+    let (staging, prod_profile, secrets) = two_profiles();
+    let staging = if prod { prod_profile } else { staging };
     let (handle, state, rt) = open_app(cx, vec![staging.clone()], secrets);
     let opened = Arc::new(Mutex::new(Vec::new()));
     let record = opened.clone();
@@ -435,4 +445,190 @@ async fn schema_reload_asks_again_and_load_error_shows_in_full(cx: &mut TestAppC
         // The old schema stays on screen.
         assert!(window.try_find("schema.field.title").is_some());
     });
+}
+
+const TRUNCATE: &str = key("cmd-shift-backspace", "ctrl-shift-backspace");
+const DELETE: &str = key("cmd-backspace", "ctrl-backspace");
+
+impl Fixture {
+    /// Selects `name` in the list and presses `shortcut`.
+    async fn row_shortcut(&self, cx: &mut TestAppContext, name: &str, shortcut: &'static str) {
+        let row = format!("collections.row.{name}");
+        act(cx, self.handle, |window, cx| window.click(row, cx));
+        act(cx, self.handle, |window, cx| window.press(shortcut, cx));
+    }
+
+    /// Types `text` into the open danger dialog and presses its action button.
+    async fn confirm(&self, cx: &mut TestAppContext, text: &str) {
+        wait_for_element(cx, self.handle, "danger.input".into(), true).await;
+        act(cx, self.handle, |window, cx| {
+            fill(window, "danger.input", text, cx);
+        });
+        act(cx, self.handle, |window, cx| {
+            window.click("danger.ok".to_string(), cx);
+        });
+    }
+
+    fn shown(&self, cx: &mut TestAppContext, id: &str) -> bool {
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find(id.to_string()).is_some()
+        })
+        .unwrap()
+    }
+}
+
+#[gpui_kit::test]
+async fn truncate_needs_exact_name_and_states_count(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    f.row_shortcut(cx, "books", TRUNCATE).await;
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+    act(cx, f.handle, |window, _| {
+        let text = label(window, "danger.consequence.0");
+        assert!(text.contains("all 10,000 documents of books"), "{text}");
+        assert!(
+            text.contains("schema, aliases and synonym sets stay"),
+            "{text}"
+        );
+        assert!(window.try_find("danger.prod").is_none());
+    });
+    for wrong in ["Books", "books ", " books", ""] {
+        f.confirm(cx, wrong).await;
+        assert!(f.backend.truncates.lock().unwrap().is_empty(), "{wrong:?}");
+    }
+    f.confirm(cx, "books").await;
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    assert_eq!(*f.backend.truncates.lock().unwrap(), ["books"]);
+}
+
+#[gpui_kit::test]
+async fn truncate_sets_count_to_zero(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    f.row_shortcut(cx, "books", TRUNCATE).await;
+    f.confirm(cx, "books").await;
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    cx.run_until_parked();
+    act(cx, f.handle, |window, _| {
+        let books = label(window, "collections.row.books");
+        assert!(!books.contains("10,000"), "{books}");
+        assert!(books.contains("books · 0 ·"), "{books}");
+    });
+}
+
+#[gpui_kit::test]
+async fn delete_lists_aliases_that_will_dangle(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    // Created after the list loaded: only a fresh load can know it.
+    f.backend
+        .data
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .1
+        .push(Alias {
+            name: "books_next".into(),
+            collection_name: "books".into(),
+        });
+    f.row_shortcut(cx, "books", DELETE).await;
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+    assert_eq!(*f.backend.lists.lock().unwrap(), 2);
+    act(cx, f.handle, |window, _| {
+        let first = label(window, "danger.consequence.0");
+        assert!(
+            first.contains("books with its 10,000 documents and its schema"),
+            "{first}"
+        );
+        let aliases = label(window, "danger.consequence.1");
+        assert!(aliases.contains("books_current, books_next"), "{aliases}");
+    });
+}
+
+#[gpui_kit::test]
+async fn delete_without_aliases_has_one_consequence(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    f.row_shortcut(cx, "authors", DELETE).await;
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+    assert!(!f.shown(cx, "danger.consequence.1"));
+}
+
+#[gpui_kit::test]
+async fn delete_closes_the_collection_tab_and_updates_list(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    f.row_shortcut(cx, "books", "enter").await;
+    let tab = format!("tab.{}.collection.books", f.profile.id);
+    wait_for_element(cx, f.handle, tab.clone(), true).await;
+    cx.run_until_parked();
+    act(cx, f.handle, |window, cx| window.press(DELETE, cx));
+    f.confirm(cx, "books").await;
+    wait_for_element(cx, f.handle, tab, false).await;
+    assert_eq!(*f.backend.deletes.lock().unwrap(), ["books"]);
+    f.click(cx, f.sidebar("collections")).await;
+    wait_for_element(cx, f.handle, f.tab(), true).await;
+    cx.run_until_parked();
+    act(cx, f.handle, |window, _| {
+        assert!(window.try_find("collections.row.books").is_none());
+        assert!(window.try_find("collections.row.authors").is_some());
+    });
+}
+
+#[gpui_kit::test]
+async fn already_deleted_counts_as_success(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    *f.backend.danger_error.lock().unwrap() = Some((404, "Not Found".into()));
+    f.row_shortcut(cx, "authors", DELETE).await;
+    f.confirm(cx, "authors").await;
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    assert_eq!(*f.backend.deletes.lock().unwrap(), ["authors"]);
+}
+
+#[gpui_kit::test]
+async fn failure_shows_inline_in_dialog(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    *f.backend.danger_error.lock().unwrap() = Some((500, "disk on fire, see the logs".into()));
+    f.row_shortcut(cx, "books", DELETE).await;
+    f.confirm(cx, "books").await;
+    wait_for_element(cx, f.handle, "danger.error".into(), true).await;
+    act(cx, f.handle, |window, _| {
+        assert!(label(window, "danger.error").contains("disk on fire, see the logs"));
+        assert!(window.try_find("danger.input").is_some());
+    });
+    // The dialog can be retried: nothing was removed.
+    assert_eq!(f.backend.data.lock().unwrap().as_ref().unwrap().0.len(), 2);
+}
+
+#[gpui_kit::test]
+async fn prod_dialog_carries_badge(cx: &mut TestAppContext) {
+    let f = connected_as(cx, Some(data()), true).await;
+    f.open_collections(cx).await;
+    f.row_shortcut(cx, "books", DELETE).await;
+    // The unlock dialog first, then the delete dialog; both carry the badge.
+    wait_for_element(cx, f.handle, "danger.prod".into(), true).await;
+    f.confirm(cx, &f.profile.name.clone()).await;
+    wait_for_label(cx, f.handle, "danger.consequence.0".into(), "Deletes books").await;
+    assert!(f.shown(cx, "danger.prod"));
+}
+
+#[gpui_kit::test]
+async fn delete_on_read_only_asks_for_unlock_first(cx: &mut TestAppContext) {
+    let f = connected_as(cx, Some(data()), true).await;
+    f.open_collections(cx).await;
+    f.row_shortcut(cx, "books", DELETE).await;
+    wait_for_label(cx, f.handle, "danger.consequence.0".into(), "Writes to").await;
+    // Nothing was loaded for or sent to the delete yet.
+    assert!(f.backend.deletes.lock().unwrap().is_empty());
+    assert_eq!(*f.backend.lists.lock().unwrap(), 1);
+    f.confirm(cx, &f.profile.name.clone()).await;
+    wait_for_label(cx, f.handle, "danger.consequence.0".into(), "Deletes books").await;
+    assert!(f.backend.deletes.lock().unwrap().is_empty());
+    f.confirm(cx, "books").await;
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    assert_eq!(*f.backend.deletes.lock().unwrap(), ["books"]);
 }

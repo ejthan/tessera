@@ -20,11 +20,12 @@ use rust_i18n::t;
 use tessera_client::{Alias, Collection};
 use tessera_core::profile::Node;
 
+use super::collection_danger;
 use super::overview::grouped;
 use super::schema_dialog::SchemaDialog;
 use crate::actions::{
-    COLLECTIONS, COLLECTIONS_HEADER, CloneCollection, EditSchema, FocusSearch, NewCollection,
-    OpenCollectionRow, Refresh, ToggleFavorite,
+    COLLECTIONS, COLLECTIONS_HEADER, CloneCollection, DeleteCollection, EditSchema, FocusSearch,
+    NewCollection, OpenCollectionRow, Refresh, ToggleFavorite, TruncateCollection,
 };
 use crate::collections::aliases_of;
 use crate::connection::ConnectionState;
@@ -400,6 +401,14 @@ impl TableDelegate for Rows {
             t!("collections.clone").to_string(),
             Box::new(CloneCollection),
         )
+        .menu(
+            t!("collections.truncate").to_string(),
+            Box::new(TruncateCollection),
+        )
+        .menu(
+            t!("collections.delete").to_string(),
+            Box::new(DeleteCollection),
+        )
     }
 }
 
@@ -619,6 +628,22 @@ impl CollectionsList {
                 window,
                 cx,
             );
+        }
+    }
+
+    /// Asks for the name of the selected collection, then empties it.
+    pub fn truncate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(c) = self.selected_collection(cx) {
+            let (state, conn) = (self.state.clone(), self.connection.clone());
+            collection_danger::truncate(state, conn, c.name, c.num_documents, window, cx);
+        }
+    }
+
+    /// Asks for the name of the selected collection, then deletes it.
+    pub fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(c) = self.selected_collection(cx) {
+            let (state, conn) = (self.state.clone(), self.connection.clone());
+            collection_danger::delete(state, conn, c.name, c.num_documents, window, cx);
         }
     }
 

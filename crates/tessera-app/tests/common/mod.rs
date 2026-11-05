@@ -185,6 +185,12 @@ pub struct FakeData {
     pub update_error: Mutex<Option<(u16, String)>>,
     /// When set, the next `update` answers only once the sender fires or is dropped.
     pub update_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Names sent to `truncate`; it sets the document count to 0 in `data`.
+    pub truncates: Mutex<Vec<String>>,
+    /// Names sent to `delete`; it removes the collection from `data`.
+    pub deletes: Mutex<Vec<String>>,
+    /// `truncate` and `delete` fail with this status and Typesense message.
+    pub danger_error: Mutex<Option<(u16, String)>>,
     /// What `schema_changes` answers.
     pub schema_changes: Mutex<Vec<SchemaChange>>,
     /// Number of `schema_changes` calls.
@@ -202,6 +208,19 @@ impl FakeData {
 
 /// The installed backend; the test keeps the [`FakeData`] handle.
 pub struct FakeBackend(pub Arc<FakeData>);
+
+impl FakeBackend {
+    fn danger_answer(&self) -> Result<(), Error> {
+        match self.0.danger_error.lock().unwrap().clone() {
+            Some((status, message)) => Err(Error::Http {
+                status,
+                body: serde_json::json!({ "message": message }).to_string(),
+                message,
+            }),
+            None => Ok(()),
+        }
+    }
+}
 
 impl CollectionsBackend for FakeBackend {
     fn list(
@@ -274,6 +293,36 @@ impl CollectionsBackend for FakeBackend {
             }
             answer
         })
+    }
+
+    fn truncate(
+        &self,
+        _: Client,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<u64, Error>> {
+        self.0.truncates.lock().unwrap().push(name.clone());
+        let answer = self.danger_answer().map(|()| {
+            let mut data = self.0.data.lock().unwrap();
+            let found = data
+                .as_mut()
+                .and_then(|(all, _)| all.iter_mut().find(|c| c.name == name));
+            found.map_or(0, |c| std::mem::take(&mut c.num_documents))
+        });
+        Box::pin(async move { answer })
+    }
+
+    fn delete(
+        &self,
+        _: Client,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0.deletes.lock().unwrap().push(name.clone());
+        let answer = self.danger_answer().inspect(|()| {
+            if let Some((all, _)) = self.0.data.lock().unwrap().as_mut() {
+                all.retain(|c| c.name != name);
+            }
+        });
+        Box::pin(async move { answer })
     }
 
     fn schema_changes(

@@ -46,6 +46,9 @@ pub struct OpenCollections(pub Uuid);
 /// Asks the window to show the tab of one collection of a profile.
 pub struct OpenCollection(pub Uuid, pub String);
 
+/// Asks the window to close the tab of one collection of a profile, which no longer exists.
+pub struct CloseCollection(pub Uuid, pub String);
+
 /// Profiles, keys and open connections of the app.
 pub struct AppState {
     /// Saved profiles, in sidebar order.
@@ -524,6 +527,11 @@ impl AppState {
         cx.notify();
     }
 
+    /// Asks for the tab of collection `name` of profile `id` to close.
+    pub fn close_collection(&mut self, id: Uuid, name: String, cx: &mut Context<Self>) {
+        cx.emit(CloseCollection(id, name));
+    }
+
     /// Closes the connection of profile `id`. Dropping it cancels a running attempt.
     pub fn disconnect(&mut self, id: Uuid, cx: &mut Context<Self>) {
         if let Some(conn) = self.connection(id, cx) {
@@ -564,6 +572,7 @@ fn observe_connection(conn: &Entity<ConnectionState>, cx: &mut Context<AppState>
 impl EventEmitter<OpenOverview> for AppState {}
 impl EventEmitter<OpenCollections> for AppState {}
 impl EventEmitter<OpenCollection> for AppState {}
+impl EventEmitter<CloseCollection> for AppState {}
 
 /// Runs a blocking secret-store or file call on tokio's blocking pool.
 fn blocking<T: Send + 'static>(cx: &App, f: impl FnOnce() -> T + Send + 'static) -> JoinHandle<T> {

@@ -20,7 +20,7 @@ use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
 use crate::actions::{CopyAsCurl, NewConnection, ToggleRequestLog};
 use crate::connection::ConnectionState;
-use crate::state::{AppState, OpenCollection, OpenCollections, OpenOverview};
+use crate::state::{AppState, CloseCollection, OpenCollection, OpenCollections, OpenOverview};
 
 /// Width of the left sidebar.
 const SIDEBAR_WIDTH: f32 = 240.;
@@ -94,6 +94,13 @@ impl RootView {
                 window,
                 |this, _, event: &OpenCollection, window, cx| {
                     this.open_tab(event.0, Kind::Collection(event.1.clone()), window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &state,
+                window,
+                |this, _, event: &CloseCollection, window, cx| {
+                    this.close_collection_tab(event.0, &event.1, window, cx);
                 },
             ),
             cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, window, cx| {
@@ -244,6 +251,30 @@ impl RootView {
             Some(ConnectionTab::Collections(tab)) => tab.focus_handle(cx).focus(window, cx),
             Some(ConnectionTab::Collection(tab)) => tab.focus_handle(cx).focus(window, cx),
             _ => {}
+        }
+    }
+
+    /// Closes the schema tab of collection `name` of profile `id`, if open.
+    fn close_collection_tab(
+        &mut self,
+        id: uuid::Uuid,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self
+            .connection_tabs(cx)
+            .into_iter()
+            .find_map(|(_, tab)| match tab {
+                ConnectionTab::Collection(panel) => {
+                    let p = panel.read(cx);
+                    (p.name() == name && p.connection().read(cx).profile.id == id).then_some(panel)
+                }
+                _ => None,
+            });
+        if let Some(panel) = tab {
+            self.dock
+                .update(cx, |area, cx| area.remove_panel(panel, window, cx));
         }
     }
 

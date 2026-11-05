@@ -32,6 +32,10 @@ pub trait CollectionsBackend: Send + Sync {
     fn create(&self, client: Client, schema: Value) -> BoxFuture<Result<Collection, Error>>;
     /// Changes the schema of collection `name` with `patch`, the PATCH body as is.
     fn update(&self, client: Client, name: String, patch: Value) -> BoxFuture<Result<(), Error>>;
+    /// Deletes all documents of collection `name`; the number deleted.
+    fn truncate(&self, client: Client, name: String) -> BoxFuture<Result<u64, Error>>;
+    /// Deletes collection `name` with its documents.
+    fn delete(&self, client: Client, name: String) -> BoxFuture<Result<(), Error>>;
     /// The schema changes in progress, asked of the client's active node: the node a PATCH
     /// from the same client went to.
     fn schema_changes(&self, client: Client) -> BoxFuture<Result<Vec<SchemaChange>, Error>>;
@@ -78,6 +82,14 @@ impl CollectionsBackend for TokioBackend {
 
     fn update(&self, client: Client, name: String, patch: Value) -> BoxFuture<Result<(), Error>> {
         self.run(async move { client.update_collection(&name, &patch).await })
+    }
+
+    fn truncate(&self, client: Client, name: String) -> BoxFuture<Result<u64, Error>> {
+        self.run(async move { client.truncate_collection(&name).await })
+    }
+
+    fn delete(&self, client: Client, name: String) -> BoxFuture<Result<(), Error>> {
+        self.run(async move { client.delete_collection(&name).await })
     }
 
     fn schema_changes(&self, client: Client) -> BoxFuture<Result<Vec<SchemaChange>, Error>> {

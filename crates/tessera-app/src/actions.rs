@@ -35,7 +35,9 @@ gpui_kit::actions!(
         ShowForm,
         ShowJson,
         AddField,
-        SubmitSchema
+        SubmitSchema,
+        TruncateCollection,
+        DeleteCollection
     ]
 );
 
@@ -142,6 +144,10 @@ const SHOW_JSON: &str = "cmd-2";
 #[cfg(not(target_os = "macos"))]
 const SHOW_JSON: &str = "ctrl-2";
 #[cfg(target_os = "macos")]
+const TRUNCATE: &str = "cmd-shift-backspace";
+#[cfg(not(target_os = "macos"))]
+const TRUNCATE: &str = "ctrl-shift-backspace";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
@@ -185,6 +191,11 @@ pub fn bind_keys(cx: &mut App) {
         // ⌘E edits a connection only in SIDEBAR_ENTRY, so the two never meet.
         KeyBinding::new(EDIT, EditSchema, Some(COLLECTIONS)),
         KeyBinding::new(EDIT, EditSchema, Some(COLLECTION)),
+        // ⌘⌫ deletes a connection only in SIDEBAR_ENTRY, so the two never meet.
+        KeyBinding::new(TRUNCATE, TruncateCollection, Some(COLLECTIONS)),
+        KeyBinding::new(TRUNCATE, TruncateCollection, Some(COLLECTION)),
+        KeyBinding::new(DELETE, DeleteCollection, Some(COLLECTIONS)),
+        KeyBinding::new(DELETE, DeleteCollection, Some(COLLECTION)),
         KeyBinding::new(SHOW_FORM, ShowForm, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SHOW_JSON, ShowJson, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SAVE, SubmitSchema, Some(SCHEMA_DIALOG)),
