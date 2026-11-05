@@ -13,6 +13,7 @@ pub mod overview;
 pub mod request_detail;
 pub mod request_log;
 pub mod root;
+pub mod schema_dialog;
 pub mod schema_view;
 pub mod sidebar;
 pub mod stats_table;

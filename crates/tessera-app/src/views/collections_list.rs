@@ -21,8 +21,10 @@ use tessera_client::{Alias, Collection};
 use tessera_core::profile::Node;
 
 use super::overview::grouped;
+use super::schema_dialog::SchemaDialog;
 use crate::actions::{
-    COLLECTIONS, COLLECTIONS_HEADER, FocusSearch, OpenCollectionRow, Refresh, ToggleFavorite,
+    COLLECTIONS, COLLECTIONS_HEADER, CloneCollection, FocusSearch, NewCollection,
+    OpenCollectionRow, Refresh, ToggleFavorite,
 };
 use crate::collections::aliases_of;
 use crate::connection::ConnectionState;
@@ -390,6 +392,10 @@ impl TableDelegate for Rows {
             Box::new(OpenCollectionRow),
         )
         .menu(toggle.to_string(), Box::new(ToggleFavorite))
+        .menu(
+            t!("collections.clone").to_string(),
+            Box::new(CloneCollection),
+        )
     }
 }
 
@@ -568,6 +574,36 @@ impl CollectionsList {
         }));
     }
 
+    /// Opens the dialog for a new collection.
+    pub fn new_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        SchemaDialog::open_create(self.state.clone(), self.connection.clone(), window, cx);
+    }
+
+    /// Opens the clone dialog for the selected collection.
+    pub fn clone_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.visible_selected(cx) else {
+            return;
+        };
+        let source = self
+            .connection
+            .read(cx)
+            .collection_cache
+            .collections
+            .iter()
+            .flatten()
+            .find(|c| c.name == name)
+            .cloned();
+        if let Some(source) = source {
+            SchemaDialog::open_clone(
+                self.state.clone(),
+                self.connection.clone(),
+                source,
+                window,
+                cx,
+            );
+        }
+    }
+
     /// Puts the cursor in the search field.
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.read(cx).focus_handle(cx).focus(window, cx);
@@ -615,6 +651,18 @@ impl CollectionsList {
                     .child(count),
             )
             .child(div().flex_1())
+            .child(
+                Button::new("collections.new")
+                    .primary()
+                    .small()
+                    .label(t!("collections.new").to_string())
+                    .children(Kbd::binding_for_action(
+                        &NewCollection,
+                        Some(COLLECTIONS),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.new_collection(window, cx))),
+            )
             .child(
                 Button::new("collections.reload")
                     .ghost()

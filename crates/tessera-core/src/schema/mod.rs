@@ -96,7 +96,7 @@ impl FieldType {
 
 /// Whether the server sorts a field of this type by default.
 // shortcut: scalars only, arrays are not confirmed against the docs; revisit if a clone shows `sort` noise.
-fn default_sort(t: &FieldType) -> bool {
+pub fn default_sort(t: &FieldType) -> bool {
     matches!(
         t,
         FieldType::Int32 | FieldType::Int64 | FieldType::Float | FieldType::Bool

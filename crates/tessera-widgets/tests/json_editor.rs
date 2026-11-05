@@ -86,3 +86,29 @@ async fn read_only_ignores_typing(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+async fn jump_to_error_puts_the_cursor_on_the_error(cx: &mut TestAppContext) {
+    let (handle, editor) = open(cx, "{\n  \"a\": 1,\n}", false);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        editor.update(cx, |e, cx| e.jump_to_error(window, cx));
+        window.render_frame(cx);
+        window.input("X", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    // Line 3, column 1: the closing brace the trailing comma runs into.
+    cx.update(|cx| assert_eq!(editor.read(cx).text(cx), "{\n  \"a\": 1,\nX}"));
+}
+
+#[gpui_kit::test]
+async fn empty_text_is_a_parse_error(cx: &mut TestAppContext) {
+    let (handle, editor) = open(cx, "", false);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(editor.read(cx).error().map(|e| e.line), Some(1));
+        assert!(window.try_find("json.error").is_some());
+    })
+    .unwrap();
+}

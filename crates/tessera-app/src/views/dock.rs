@@ -23,8 +23,8 @@ use super::schema_view::SchemaView;
 use super::sidebar::Sidebar;
 use super::{env_badge, unlock, welcome};
 use crate::actions::{
-    COLLECTION, COLLECTIONS, FocusSearch, LockAgain, OVERVIEW, OpenCollectionRow, Refresh,
-    ToggleFavorite, TogglePolling,
+    COLLECTION, COLLECTIONS, CloneCollection, FocusSearch, LockAgain, NewCollection, OVERVIEW,
+    OpenCollectionRow, Refresh, ToggleFavorite, TogglePolling,
 };
 use crate::connection::ConnectionState;
 use crate::poller::Poller;
@@ -271,6 +271,12 @@ impl Render for CollectionsPanel {
             .on_action(cx.listener(|this, _: &OpenCollectionRow, _, cx| {
                 this.list.update(cx, |l, cx| l.open_selected(cx));
             }))
+            .on_action(cx.listener(|this, _: &NewCollection, window, cx| {
+                this.list.update(cx, |l, cx| l.new_collection(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &CloneCollection, window, cx| {
+                this.list.update(cx, |l, cx| l.clone_selected(window, cx));
+            }))
             .size_full()
             .border_t_2()
             .border_color(edge)
@@ -292,13 +298,15 @@ impl CollectionPanel {
     /// The tab of collection `name` on `connection`; loads its schema.
     pub fn new(
         connection: Entity<ConnectionState>,
+        state: Entity<AppState>,
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
-            schema: cx.new(|cx| SchemaView::new(connection.clone(), name.clone(), window, cx)),
+            schema: cx
+                .new(|cx| SchemaView::new(state, connection.clone(), name.clone(), window, cx)),
             connection,
             name,
             focus_handle: cx.focus_handle(),
@@ -362,6 +370,10 @@ impl Render for CollectionPanel {
             }))
             .on_action(cx.listener(|this, _: &Refresh, window, cx| {
                 this.schema.update(cx, |s, cx| s.reload(true, window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &CloneCollection, window, cx| {
+                this.schema
+                    .update(cx, |s, cx| s.clone_collection(window, cx));
             }))
             .size_full()
             .border_t_2()

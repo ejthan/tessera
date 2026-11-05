@@ -29,7 +29,12 @@ gpui_kit::actions!(
         FocusSearch,
         OpenCollectionRow,
         OpenLink,
-        LockAgain
+        LockAgain,
+        CloneCollection,
+        ShowForm,
+        ShowJson,
+        AddField,
+        SubmitSchema
     ]
 );
 
@@ -52,6 +57,10 @@ pub const COLLECTIONS_TABLE: &str = "Collections > DataTable";
 pub const COLLECTIONS_HEADER: &str = "CollectionsHeader";
 /// Key context of the Collections and favorite rows under a sidebar entry.
 pub const SIDEBAR_LINK: &str = "SidebarLink";
+/// Key context of the create and clone dialog.
+pub const SCHEMA_DIALOG: &str = "SchemaDialog";
+/// Key context of the dialog's last field row, where ⌘↩ / Ctrl+↩ adds the next field.
+pub const SCHEMA_LAST_FIELD: &str = "SchemaLastField";
 
 #[cfg(target_os = "macos")]
 const NEW_CONNECTION: &str = "cmd-n";
@@ -114,6 +123,22 @@ const LOCK_AGAIN: &str = "cmd-shift-l";
 #[cfg(not(target_os = "macos"))]
 const LOCK_AGAIN: &str = "ctrl-shift-l";
 #[cfg(target_os = "macos")]
+const NEW_COLLECTION: &str = "cmd-shift-n";
+#[cfg(not(target_os = "macos"))]
+const NEW_COLLECTION: &str = "ctrl-shift-n";
+#[cfg(target_os = "macos")]
+const CLONE: &str = "alt-cmd-d";
+#[cfg(not(target_os = "macos"))]
+const CLONE: &str = "ctrl-alt-d";
+#[cfg(target_os = "macos")]
+const SHOW_FORM: &str = "cmd-1";
+#[cfg(not(target_os = "macos"))]
+const SHOW_FORM: &str = "ctrl-1";
+#[cfg(target_os = "macos")]
+const SHOW_JSON: &str = "cmd-2";
+#[cfg(not(target_os = "macos"))]
+const SHOW_JSON: &str = "ctrl-2";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
@@ -151,6 +176,14 @@ pub fn bind_keys(cx: &mut App) {
         // Unbinds Enter under the table's binding, so the header handles it as a click.
         KeyBinding::new("enter", NoAction, Some(COLLECTIONS_HEADER)),
         KeyBinding::new("enter", OpenLink, Some(SIDEBAR_LINK)),
+        KeyBinding::new(NEW_COLLECTION, NewCollection, Some(COLLECTIONS)),
+        KeyBinding::new(CLONE, CloneCollection, Some(COLLECTIONS)),
+        KeyBinding::new(CLONE, CloneCollection, Some(COLLECTION)),
+        KeyBinding::new(SHOW_FORM, ShowForm, Some(SCHEMA_DIALOG)),
+        KeyBinding::new(SHOW_JSON, ShowJson, Some(SCHEMA_DIALOG)),
+        KeyBinding::new(SAVE, SubmitSchema, Some(SCHEMA_DIALOG)),
+        // Deeper than the dialog, so in the last row ⌘↩ adds a field instead of creating.
+        KeyBinding::new(SAVE, AddField, Some(SCHEMA_LAST_FIELD)),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }

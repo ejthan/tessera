@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui_kit::{Global, SharedString};
+use serde_json::Value;
 use tessera_client::{Alias, Client, Collection, Error};
 use tokio::runtime::Handle;
 
@@ -27,6 +28,8 @@ pub trait CollectionsBackend: Send + Sync {
     fn list(&self, client: Client) -> BoxFuture<Result<CollectionList, Error>>;
     /// One collection with its schema.
     fn get(&self, client: Client, name: String) -> BoxFuture<Result<Collection, Error>>;
+    /// Creates a collection from `schema`, the request body as is.
+    fn create(&self, client: Client, schema: Value) -> BoxFuture<Result<Collection, Error>>;
 }
 
 /// The backend the views use.
@@ -62,6 +65,10 @@ impl CollectionsBackend for TokioBackend {
 
     fn get(&self, client: Client, name: String) -> BoxFuture<Result<Collection, Error>> {
         self.run(async move { client.collection(&name).await })
+    }
+
+    fn create(&self, client: Client, schema: Value) -> BoxFuture<Result<Collection, Error>> {
+        self.run(async move { client.create_collection(&schema).await })
     }
 }
 

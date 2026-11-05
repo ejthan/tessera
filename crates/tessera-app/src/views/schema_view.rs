@@ -22,9 +22,11 @@ use tessera_widgets::JsonEditor;
 
 use super::collections_list::created_text;
 use super::overview::grouped;
-use crate::actions::{COLLECTION, Refresh};
+use super::schema_dialog::SchemaDialog;
+use crate::actions::{COLLECTION, CloneCollection, Refresh};
 use crate::collections::{CollectionsBackendGlobal, aliases_of};
 use crate::connection::{ConnectionState, error_text};
+use crate::state::AppState;
 
 /// The attribute columns every field table has, in the order of the spec.
 pub const KNOWN_ATTRIBUTES: [&str; 14] = [
@@ -169,6 +171,7 @@ fn mask(collection: &Collection) -> Result<Loaded, serde_json::Error> {
 
 /// The schema of one collection.
 pub struct SchemaView {
+    state: Entity<AppState>,
     connection: Entity<ConnectionState>,
     name: String,
     loaded: Option<Loaded>,
@@ -185,6 +188,7 @@ pub struct SchemaView {
 impl SchemaView {
     /// The schema of `name` on `connection`; loads it.
     pub fn new(
+        state: Entity<AppState>,
         connection: Entity<ConnectionState>,
         name: String,
         window: &mut Window,
@@ -208,6 +212,7 @@ impl SchemaView {
         let editor = cx.new(|cx| JsonEditor::new("", true, window, cx));
         let mut this = Self {
             _observe: cx.observe(&connection, |_, _, cx| cx.notify()),
+            state,
             connection,
             name,
             loaded: None,
@@ -288,6 +293,20 @@ impl SchemaView {
         self.editor.read(cx).text(cx)
     }
 
+    /// Opens the clone dialog for the collection as shown (embedding secrets are blanked).
+    pub fn clone_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(loaded) = &self.loaded {
+            let source = loaded.collection.clone();
+            SchemaDialog::open_clone(
+                self.state.clone(),
+                self.connection.clone(),
+                source,
+                window,
+                cx,
+            );
+        }
+    }
+
     /// Puts the masked JSON on the clipboard and says "Copied" for a moment.
     fn copy_json(&mut self, cx: &mut Context<Self>) {
         let Some(loaded) = &self.loaded else {
@@ -347,6 +366,18 @@ impl SchemaView {
                     .child(text)
             }))
             .child(div().flex_1())
+            .child(
+                Button::new("schema.clone")
+                    .outline()
+                    .small()
+                    .label(t!("collections.clone").to_string())
+                    .children(Kbd::binding_for_action(
+                        &CloneCollection,
+                        Some(COLLECTION),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.clone_collection(window, cx))),
+            )
             .child(
                 Button::new("schema.reload")
                     .ghost()

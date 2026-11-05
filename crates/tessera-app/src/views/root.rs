@@ -220,7 +220,8 @@ impl RootView {
                             (PanelId::from(panel.entity_id()), panel_handle(panel))
                         }
                         Kind::Collection(name) => {
-                            let panel = cx.new(|cx| CollectionPanel::new(conn, name, window, cx));
+                            let panel =
+                                cx.new(|cx| CollectionPanel::new(conn, state, name, window, cx));
                             (PanelId::from(panel.entity_id()), panel_handle(panel))
                         }
                     };
