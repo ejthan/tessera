@@ -4,29 +4,77 @@
 
 use gpui_kit::{App, KeyBinding};
 
-gpui_kit::actions!(tessera, [NewConnection, Quit]);
+gpui_kit::actions!(
+    tessera,
+    [
+        NewConnection,
+        Quit,
+        ConnectSelected,
+        DisconnectSelected,
+        EditConnection,
+        DeleteConnection,
+        ImportProfiles,
+        ExportProfiles,
+        ToggleReopenLast,
+        TestConnection,
+        SaveConnection,
+        ToggleKeyMask
+    ]
+);
+
+/// Key context of a sidebar entry.
+pub const SIDEBAR_ENTRY: &str = "SidebarEntry";
+/// Key context of the button under a sidebar entry ("Add API key", "Save as profile").
+pub const SIDEBAR_ENTRY_BUTTON: &str = "SidebarEntryButton";
+/// Key context of the connection dialog.
+pub const CONNECT_DIALOG: &str = "ConnectDialog";
 
 #[cfg(target_os = "macos")]
 const NEW_CONNECTION: &str = "cmd-n";
 #[cfg(not(target_os = "macos"))]
 const NEW_CONNECTION: &str = "ctrl-n";
 #[cfg(target_os = "macos")]
+const DISCONNECT: &str = "cmd-shift-d";
+#[cfg(not(target_os = "macos"))]
+const DISCONNECT: &str = "ctrl-shift-d";
+#[cfg(target_os = "macos")]
+const EDIT: &str = "cmd-e";
+#[cfg(not(target_os = "macos"))]
+const EDIT: &str = "ctrl-e";
+#[cfg(target_os = "macos")]
+const DELETE: &str = "cmd-backspace";
+#[cfg(not(target_os = "macos"))]
+const DELETE: &str = "ctrl-backspace";
+#[cfg(target_os = "macos")]
+const TEST: &str = "cmd-t";
+#[cfg(not(target_os = "macos"))]
+const TEST: &str = "ctrl-t";
+#[cfg(target_os = "macos")]
+const SAVE: &str = "cmd-enter";
+#[cfg(not(target_os = "macos"))]
+const SAVE: &str = "ctrl-enter";
+#[cfg(target_os = "macos")]
+const TOGGLE_KEY: &str = "alt-cmd-k";
+#[cfg(not(target_os = "macos"))]
+const TOGGLE_KEY: &str = "ctrl-alt-k";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
-
-/// Shortcut label shown next to the "Add connection" control.
-pub const NEW_CONNECTION_HINT: &str = if cfg!(target_os = "macos") {
-    "⌘N"
-} else {
-    "Ctrl+N"
-};
 
 /// Registers global key bindings and app-level action handlers.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(NEW_CONNECTION, NewConnection, None),
         KeyBinding::new(QUIT, Quit, None),
+        KeyBinding::new("enter", ConnectSelected, Some(SIDEBAR_ENTRY)),
+        KeyBinding::new(DISCONNECT, DisconnectSelected, Some(SIDEBAR_ENTRY)),
+        KeyBinding::new(EDIT, EditConnection, Some(SIDEBAR_ENTRY)),
+        KeyBinding::new(DELETE, DeleteConnection, Some(SIDEBAR_ENTRY)),
+        KeyBinding::new(EDIT, EditConnection, Some(SIDEBAR_ENTRY_BUTTON)),
+        KeyBinding::new(TEST, TestConnection, Some(CONNECT_DIALOG)),
+        KeyBinding::new(SAVE, SaveConnection, Some(CONNECT_DIALOG)),
+        KeyBinding::new(TOGGLE_KEY, ToggleKeyMask, Some(CONNECT_DIALOG)),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }

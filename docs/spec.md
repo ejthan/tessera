@@ -184,7 +184,7 @@ All crates set `publish = false`. Tessera is an application, and the names `tess
 
 ### 5.3 State management
 
-- A global `AppState` entity holds the list of connections, the active connection, settings and the request log (ring buffer, 5,000 entries).
+- A global `AppState` entity holds the list of connections, the active connection, settings and the request log (two ring buffers: 5,000 entries for user requests, 500 for polling, D12).
 - Each connection has a `ConnectionState` entity with its client, capabilities, cached collection list and health status.
 - Views hold only their own view state and read everything else through entity handles. Changes flow through `cx.notify()` or events (`EventEmitter`).
 - Resource caches are invalidated after every mutation. A manual refresh is available everywhere (⌘R / Ctrl+R).
@@ -267,7 +267,7 @@ Each module lists acceptance criteria (AC).
 - **API key** only in the OS keychain (`keyring`, service `tessera`, account = profile UUID). The profile itself holds no key.
 - **Connection test** before saving: `/health`, `/debug`, and a permission probe with `GET /collections` and `GET /keys`. The result is shown as "admin key" or "restricted key".
 - **Cluster profiles:** several nodes in one profile. Per-node view (leader/follower) in §7.2.
-- **Read-only mode** per profile, **on** by default for tag `prod`: all write actions are disabled. Unlocking is a temporary session grant, confirmed by typing the profile name.
+- **Read-only mode** per profile, **on** by default for tag `prod`: all write actions are disabled. Unlocking is a temporary session grant, confirmed by typing the profile name. The unlock arrives in M2 with the first write action (D10).
 - **Import:** `config.json` from bfritscher's dashboard (fields `apiKey`, `node`, `history[]`, `clusterTag`), environment variables (`TYPESENSE_HOST` …), command line (`tessera --host … --port …`, key via stdin).
 - **Export** of profiles as JSON, without keys.
 - The most recently used connection can optionally open at startup.
@@ -443,7 +443,7 @@ List, detail view and import (JSONL with `word`/`root`) via `POST /stemming/dict
 ### 7.19 Request log (P0)
 
 - Bottom dock panel listing every request: time, connection, method, path, status, duration, size.
-- Detail view with request and response bodies (truncated above 1 MB, full view on demand).
+- Detail view with request and response bodies (truncated above 1 MB, full view on demand from M4 on).
 - **Redaction:** the `X-TYPESENSE-API-KEY` header always shows as `abcd••••`. Known secret fields in bodies (`api_key`, `value` on keys) are masked.
 - Filter by status, method and connection. "Copy as curl" uses the placeholder `$TYPESENSE_API_KEY` instead of the real key.
 
@@ -639,7 +639,7 @@ Each milestone ends with green CI, an updated CHANGELOG and a short demo (GIF in
 | # | Content | Acceptance |
 |---|---|---|
 | **M0 Foundation** | Workspace with `tessera-client`, `tessera-core`, `tessera-app`; CI (lint, test, integration, build, smoke start); license and governance files; GPUI Kit window with root, theme, dock skeleton, sidebar, status bar; tokio bridge (§5.4); `tessera-client` with `health` and `debug`; welcome screen and connect dialog; `dev/docker-compose.yml`. Details: `docs/superpowers/specs/2026-11-04-m0-foundation-design.md` | App starts on macOS, Linux and Windows. "Connect" against localhost shows the version |
-| **M1 Connections and overview** | §7.1 complete (keychain, profiles, tags, read-only, import from bfritscher config), §7.2 (metrics, stats, cluster view), §7.19 request log | AC from §7.1 and §7.2 met |
+| **M1 Connections and overview** | §7.1 complete (keychain, profiles, tags, read-only, import from bfritscher config), §7.2 (metrics, stats, cluster view), §7.19 request log. Details: `docs/superpowers/specs/2026-11-04-m1-connections-design.md` | AC from §7.1 and §7.2 met |
 | **M2 Collections** | §7.3 without the JOIN graph: list, schema view, create (form and JSON), clone, PATCH with diff, delete, truncate. Creates `tessera-widgets`; `xtask seed` with small data sets | Integration tests for all collection endpoints green |
 | **M3 Document browser** | §7.4: DataTable, infinite scroll, filter with autocompletion, inspector with JSON editor, CRUD, multi-select, delete by query with preview. `xtask seed` gains the 200k `products` set | NF2 met (200k rows) |
 | **M4 Search and raw console** | §7.5 (without P2 parts), multi-search, history, saved queries, code export. §7.17 raw console. §7.20 command palette | Exported curl reproduces the response |
@@ -687,6 +687,13 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D7 | Apple signing | Ad-hoc until the first stable version |
 | D8 | Repository hosting | Public GitHub repository, CI on GitHub Actions |
 | D9 | Repository language | English, except the German UI translation `de.yml` |
+| D10 | Read-only unlock in M1? | No. M1 has the profile flag, the client guard and the badges; the unlock flow arrives in M2 with the first write action |
+| D11 | Prod frame with several connections in one window | Red band and frame while the active tab belongs to a prod connection |
+| D12 | Polling traffic in the request log | Logged in its own 500-entry buffer next to the 5,000-entry buffer for user requests; hidden by default |
+| D13 | Connection from env vars or CLI flags | Temporary, never saved, key in memory only; "Save as profile" opens the prefilled dialog |
+| D14 | Request routing in cluster profiles | Active node with failover for idempotent methods; no round robin |
+| D15 | Keyboard shortcut for "Disconnect" in the sidebar (UX rule 5) | ⌘⇧D / Ctrl+Shift+D on the focused sidebar entry, shown in the context menu |
+| D16 | Connection switcher in the title bar? | No dropdown in M1: the title bar shows the selected connection. Switching happens in the sidebar (PR A) and in the tabs (PR B) |
 
 ---
 
