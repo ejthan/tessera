@@ -93,11 +93,43 @@ async fn connected_as(
     data: Option<(Vec<Collection>, Vec<Alias>)>,
     prod: bool,
 ) -> Fixture {
+    connected_saving_to(cx, data, prod, None).await
+}
+
+/// Like [`connected_as`], with the profiles saved to `store`: the path and how its load went.
+/// After a failed load the profile is added in memory, as the connect dialog does.
+async fn connected_saving_to(
+    cx: &mut TestAppContext,
+    data: Option<(Vec<Collection>, Vec<Alias>)>,
+    prod: bool,
+    store: Option<(
+        std::path::PathBuf,
+        Result<(), tessera_core::store::StoreError>,
+    )>,
+) -> Fixture {
     let backend = fake_backend(cx, data);
     fake_connector(cx, |p| Ok(server_for(p)));
     let (staging, prod_profile, secrets) = two_profiles();
     let staging = if prod { prod_profile } else { staging };
-    let (handle, state, rt) = open_app(cx, vec![staging.clone()], secrets);
+    let (handle, state, rt) = match store {
+        None => open_app(cx, vec![staging.clone()], secrets),
+        Some((path, loaded)) => {
+            let rt = tokio(cx);
+            let failed = loaded.is_err();
+            let loaded = loaded.map(|()| tessera_core::store::ConnectionsFile {
+                profiles: vec![staging.clone()],
+                ..Default::default()
+            });
+            let (handle, state) = open_state_at(cx, loaded, Some(path), secrets);
+            if failed {
+                let profile = staging.clone();
+                cx.update(|cx| {
+                    state.update(cx, |s, cx| s.upsert_profile(profile, None, cx).detach())
+                });
+            }
+            (handle, state, rt)
+        }
+    };
     let opened = Arc::new(Mutex::new(Vec::new()));
     let record = opened.clone();
     cx.update(|cx| {
@@ -836,4 +868,20 @@ async fn writable_connection_shows_no_lock(cx: &mut TestAppContext) {
     f.open_collections(cx).await;
     assert!(f.shown(cx, "collections.new"));
     assert!(!f.shown(cx, "collections.new.readonly"));
+}
+
+#[gpui_kit::test]
+async fn favorite_after_a_failed_load_says_so_inline(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("connections.json");
+    std::fs::write(&path, "{ not json").unwrap();
+    let loaded = tessera_core::store::load(&path).map(drop);
+    let f = connected_saving_to(cx, Some(data()), false, Some((path.clone(), loaded))).await;
+    f.open_collections(cx).await;
+    f.row_shortcut(cx, "books", TOGGLE_FAVORITE).await;
+    act(cx, f.handle, |window, _| {
+        let text = label(window, "collections.favorite_error");
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains("could not be read"), "{text}");
+    });
 }

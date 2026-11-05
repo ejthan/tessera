@@ -334,11 +334,16 @@ impl AppState {
             });
         }
         cx.notify();
-        if saved {
-            self.save(cx)
-        } else {
-            Task::ready(Ok(()))
+        if !saved {
+            return Task::ready(Ok(()));
         }
+        // `save` skips the write after a failed load; the favorite would be lost silently.
+        if let (Some(error), Some(path)) = (&self.load_error, &self.store_path) {
+            let path = path.display().to_string();
+            let text = t!("collections.favorite_unsaved", path = path, error = error);
+            return Task::ready(Err(text.to_string()));
+        }
+        self.save(cx)
     }
 
     /// Removes a profile, its connection and its stored key, and saves.
@@ -1130,6 +1135,24 @@ mod tests {
             );
         });
         assert!(!path.exists(), "nothing written");
+    }
+
+    #[gpui_kit::test]
+    async fn favorite_after_a_failed_load_says_it_is_not_saved(cx: &mut TestAppContext) {
+        rust_i18n::set_locale("en");
+        let _rt = tokio(cx);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        let state = new_state(cx, store::load(&path), Some(path.clone()), Arc::default());
+        let profile = Profile::new("kept in memory", vec![node()]);
+        let id = profile.id;
+        state.update(cx, |s, cx| s.upsert_profile(profile, None, cx).detach());
+        let save = state.update(cx, |s, cx| s.toggle_favorite(id, "books", cx));
+        let error = save.await.unwrap_err();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains("could not be read"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
     }
 
     #[gpui_kit::test]
