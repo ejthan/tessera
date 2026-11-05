@@ -227,6 +227,8 @@ impl SchemaDialog {
         // "Stop waiting" takes the place of Back.
         self.safe_focus.focus(window, cx);
         let wanted = name.clone();
+        // Tagged as polling: one request a second would flood the request log otherwise.
+        let client = client.polling();
         self.poll = Some(cx.spawn(async move |this, cx| {
             loop {
                 let changes = backend.schema_changes(client.clone()).await;

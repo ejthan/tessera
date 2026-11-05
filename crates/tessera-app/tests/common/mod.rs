@@ -200,6 +200,8 @@ pub struct FakeData {
     pub schema_changes: Mutex<Vec<SchemaChange>>,
     /// Number of `schema_changes` calls.
     pub schema_change_calls: Mutex<usize>,
+    /// Origin of the client of each `schema_changes` call.
+    pub schema_change_origins: Mutex<Vec<Origin>>,
 }
 
 impl FakeData {
@@ -355,9 +357,14 @@ impl CollectionsBackend for FakeBackend {
 
     fn schema_changes(
         &self,
-        _: Client,
+        client: Client,
     ) -> tessera_app::collections::BoxFuture<Result<Vec<SchemaChange>, Error>> {
         *self.0.schema_change_calls.lock().unwrap() += 1;
+        self.0
+            .schema_change_origins
+            .lock()
+            .unwrap()
+            .push(client.origin());
         let answer = self.0.schema_changes.lock().unwrap().clone();
         Box::pin(async move { Ok(answer) })
     }

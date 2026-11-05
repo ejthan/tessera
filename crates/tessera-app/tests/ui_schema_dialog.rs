@@ -798,6 +798,15 @@ async fn progress_shows_schema_change_counts(cx: &mut TestAppContext) {
     cx.executor().advance_clock(Duration::from_secs(1));
     f.settle(cx);
     assert!(*f.backend.schema_change_calls.lock().unwrap() > calls);
+    // The poll is tagged as polling, so "Show polling" hides it from the request log.
+    let origins = f.backend.schema_change_origins.lock().unwrap().clone();
+    assert!(!origins.is_empty());
+    assert!(
+        origins
+            .iter()
+            .all(|o| *o == tessera_client::Origin::Polling),
+        "{origins:?}"
+    );
     // The change ends: the dialog closes and the poll stops.
     release.send(()).unwrap();
     wait_for_element(cx, f.handle, "schema.progress".into(), false).await;
