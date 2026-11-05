@@ -709,6 +709,7 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D28 | Which confirmation for document deletes and bulk updates? | Medium dialog; type the collection name above 1,000 documents or on prod, for single and multi delete, delete by query and update by query |
 | D29 | NF2 names a GPUI Kit FPS HUD that does not exist | Measured with GPUI's debug frame overlay behind a `frame-overlay` cargo feature, by hand, p95 draw time ≤ 16.6 ms |
 | D30 | `filter_by` over 4,000 bytes in the browser | Not supported in M3: the server's message shows inline. `POST /multi_search` is a read, but the read-only guard refuses POST and failover skips it. M4 needs it and should allow that one path in the guard |
+| D31 | Unsaved changes in the inspector when a tab, connection or app closes | ⌘W / Ctrl+W asks, with focus in the tab. The kit's other closes cannot ask, so `closable` vetoes them and the tab hides its close button until the changes are saved or reverted. Disconnect and quit have no veto in the pinned kit, and they discard without asking |
 
 ---
 

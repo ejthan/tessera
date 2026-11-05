@@ -73,6 +73,13 @@ struct Check {
 pub enum GoToResult {
     /// The inspector shows the document.
     Found,
+    /// The document exists, but the editor holds unsaved changes it would replace.
+    Unsaved {
+        /// The id looked up.
+        id: String,
+        /// The document, for [`Inspector::show_found`].
+        document: Value,
+    },
     /// Why the document could not be loaded.
     Failed(SharedString),
 }
@@ -172,11 +179,39 @@ impl Inspector {
         self.editor.update(cx, |e, cx| e.focus(window, cx));
     }
 
-    /// Back to the document as it was loaded.
+    /// Back to the document as it was loaded. Waits out a running task: dropping a create
+    /// would leave its outcome unknown, and a load is about to replace the document.
     pub fn revert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(base) = self.base.clone() {
+        if self.task.is_none()
+            && let Some(base) = self.base.clone()
+        {
             self.set_document(base, window, cx);
         }
+    }
+
+    /// Shows a document Go to ID found.
+    pub fn show_found(
+        &mut self,
+        id: String,
+        document: Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_loaded(id, document, window, cx);
+        cx.emit(GoToResult::Found);
+    }
+
+    fn show_loaded(
+        &mut self,
+        id: String,
+        document: Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.mode = InspectorMode::Existing;
+        self.set_document(document, window, cx);
+        self.id = Some(id);
+        self.error = None;
     }
 
     /// Shows `document` as the unchanged state of the editor.
@@ -233,15 +268,11 @@ impl Inspector {
     ) {
         self.idle(cx);
         match result {
-            Ok(document) => {
-                self.mode = InspectorMode::Existing;
-                self.set_document(document, window, cx);
-                self.id = Some(id);
-                self.error = None;
-                if go_to {
-                    cx.emit(GoToResult::Found);
-                }
+            Ok(document) if go_to && self.is_dirty(cx) => {
+                cx.emit(GoToResult::Unsaved { id, document });
             }
+            Ok(document) if go_to => self.show_found(id, document, window, cx),
+            Ok(document) => self.show_loaded(id, document, window, cx),
             Err(e) => {
                 let text = self.error_text(&e, cx);
                 if go_to {
@@ -277,6 +308,17 @@ impl Inspector {
         let text = self.editor.read(cx).text(cx);
         let parsed = serde_json::from_str::<Value>(&text).ok();
         self.creating || self.differs(&text, parsed.as_ref())
+    }
+
+    /// Whether a load, a fetch or a create is running.
+    pub fn is_busy(&self) -> bool {
+        self.task.is_some()
+    }
+
+    /// Whether the header says there are unsaved changes, as of the last check. Cheap enough
+    /// for the tab bar, which asks on every frame.
+    pub fn shows_unsaved(&self) -> bool {
+        self.creating || self.check.dirty
     }
 
     /// The key of the reason `parsed` cannot go to review.
@@ -414,11 +456,23 @@ impl Inspector {
                 return;
             }
         };
+        let stale = self.base.as_ref() != Some(&fresh);
+        if stale {
+            // Back from the review, Revert and the diff must mean the server's version.
+            self.loaded_text = pretty(&fresh);
+            self.base = Some(fresh.clone());
+            self.recheck(cx);
+        }
         let (Some(old), Some(new), Some(id)) =
             (fresh.as_object(), document.as_object(), self.base_id())
         else {
             return;
         };
+        let entries = diff_entries(old, new);
+        if entries.is_empty() {
+            self.save_error = Some(t!("documents.review.same").to_string().into());
+            return;
+        }
         let mode = self.save_mode;
         let body = match mode {
             SaveMode::Patch => Value::Object(merge_patch(old, new)),
@@ -436,9 +490,9 @@ impl Inspector {
             collection: self.name.clone(),
             id,
             mode,
-            entries: diff_entries(old, new),
+            entries,
             body,
-            stale: self.base.as_ref() != Some(&fresh),
+            stale,
             on_apply,
         };
         review::open(data, window, cx);

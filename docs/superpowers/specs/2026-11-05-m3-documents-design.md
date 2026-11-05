@@ -351,7 +351,7 @@ An `h_resizable` split as in the request log (D22). ⌘I / Ctrl+I toggles. Enter
 
 - Header control **Save as**: PATCH (default) or Upsert, two selected-style buttons as in the schema dialog, ⌘⇧M / Ctrl+Shift+M flips. **Review changes…** ⌘↩ / Ctrl+↩.
 - Review disabled when: the JSON does not parse, the text is no object, `id` changed (inline: "The id cannot change. To copy a document, use New document."), or `diff_entries` is empty.
-- Before the dialog the document is fetched again. If it changed since it was loaded, the diff is computed against the fresh copy and a warning says so. This is what stops an upsert from silently overwriting someone else's edit.
+- Before the dialog the document is fetched again. If it changed since it was loaded, the diff is computed against the fresh copy and a warning says so. This is what stops an upsert from silently overwriting someone else's edit. A stale PATCH diffs against the fresh document too, so its body may undo the other edit, as the diff shows; the fresh copy also becomes the base Back and Revert return to. If it already equals the draft, an inline message replaces the dialog.
 - The review dialog is medium danger: target line (`PATCH /collections/products/documents/42`), `diff_entries` (added green, removed red, changed with old and new), the exact body in a read-only `JsonEditor`, consequence for upsert ("Replaces the whole document. Fields missing here are removed."). Focus starts on Back. Apply is ⌘↩ / Ctrl+↩ with focus on it, Back is Esc.
 - PATCH sends `merge_patch`. Upsert sends the editor's document.
 - Success closes the dialog, replaces the editor text with the response, drops pages and reloads visible ones. Failure shows the message inline and stays.

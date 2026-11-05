@@ -1465,6 +1465,7 @@ async fn edit_then_review_shows_the_diff_and_patch_body(cx: &mut TestAppContext)
 async fn apply_sends_the_merge_patch(cx: &mut TestAppContext) {
     let f = open_found(cx, plain_schema(), 10).await;
     f.review_renamed(cx);
+    f.act(cx, |window, cx| window.press("tab", cx));
     f.act(cx, |window, cx| window.press(SAVE, cx));
     f.settle(cx);
     let writes = f.writes();
@@ -1753,6 +1754,7 @@ async fn go_to_while_dirty_asks_first(cx: &mut TestAppContext) {
     f.open_document(cx);
     f.edit(cx, RENAMED);
     f.go_to(cx, "7");
+    f.settle(cx);
     assert!(f.has(cx, "confirm.ok"));
     assert!(f.inspector_text(cx).contains("\"new\""));
     f.click(cx, "confirm.ok");
@@ -1854,4 +1856,125 @@ async fn vector_survives_a_patch_edit(cx: &mut TestAppContext) {
     f.settle(cx);
     let (_, _, body) = f.writes().pop().unwrap();
     assert!(body.get("embedding").is_none(), "{body}");
+}
+
+#[gpui_kit::test]
+async fn second_press_of_the_review_chord_does_not_apply(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.review_renamed(cx);
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(f.writes().is_empty());
+    assert!(f.has(cx, "review.back"));
+}
+
+#[gpui_kit::test]
+async fn go_to_a_missing_id_keeps_the_draft_without_asking(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    *f.docs.document_fail.lock().unwrap() = Some((404, "no such id".into()));
+    f.go_to(cx, "7");
+    assert!(!f.has(cx, "confirm.ok"));
+    assert!(f.text_of(cx, "documents.goto.error").contains("no such id"));
+    assert!(f.inspector_text(cx).contains("\"new\""));
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("3"));
+}
+
+#[gpui_kit::test]
+async fn back_from_a_stale_review_keeps_the_fresh_document_as_base(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    *f.docs.stored.lock().unwrap() =
+        Some(json!({"id": "3", "title": "theirs", "embedding": [0.25, 0.5]}));
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    f.act(cx, |window, cx| window.press("escape", cx));
+    wait_for_element(cx, f.handle, "review.back".into(), false).await;
+    cx.executor().advance_clock(Duration::from_secs(1));
+    f.settle(cx);
+    f.act(cx, |window, cx| window.press(REVERT, cx));
+    f.settle(cx);
+    assert!(f.inspector_text(cx).contains("theirs"));
+    assert!(!f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn draft_equal_to_the_fresh_document_opens_no_review(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    *f.docs.stored.lock().unwrap() = Some(serde_json::from_str(RENAMED).unwrap());
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(!f.has(cx, "review.back"));
+    assert!(f.text_of(cx, "inspector.save_error").contains("already"));
+    assert!(!f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn nothing_drops_a_create_in_flight(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.act(cx, |window, cx| window.press(NEW_DOCUMENT, cx));
+    f.settle(cx);
+    f.edit(cx, r#"{"title": "x", "price": 1.0}"#);
+    let hold = f.docs.hold_next();
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    f.act(cx, |window, cx| window.press(REVERT, cx));
+    f.act(cx, |window, cx| window.press(INSPECTOR, cx));
+    f.act(cx, |window, cx| window.press(CLOSE_TAB, cx));
+    f.settle(cx);
+    assert!(!f.has(cx, "confirm.ok"), "no discard while it runs");
+    hold.send(()).unwrap();
+    f.settle(cx);
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("new"));
+    assert!(f.text_of(cx, "documents.status").starts_with("11 of"));
+}
+
+#[gpui_kit::test]
+async fn revert_during_a_load_leaves_it_running(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    let hold = f.docs.hold_next();
+    f.select_row(cx, 5);
+    f.follow(cx);
+    let inspector = f.inspector(cx);
+    f.act(cx, |window, cx| {
+        inspector.update(cx, |i, cx| i.revert(window, cx));
+    });
+    hold.send(()).unwrap();
+    f.settle(cx);
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("5"));
+    assert!(f.inspector_text(cx).contains("t5"));
+}
+
+#[gpui_kit::test]
+async fn close_tab_while_dirty_asks(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    let id = f.profile_id(cx);
+    let tab = format!("tab.{id}.collection.products");
+    f.act(cx, |window, cx| window.press(CLOSE_TAB, cx));
+    f.settle(cx);
+    assert!(f.has(cx, "confirm.ok"));
+    assert!(f.dirty(cx));
+    f.click(cx, "confirm.ok");
+    wait_for_element(cx, f.handle, tab, false).await;
+}
+
+#[gpui_kit::test]
+async fn unsaved_changes_veto_the_kits_close(cx: &mut TestAppContext) {
+    use gpui_kit::component::dock::BasePanel as _;
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    let panel = f.panel(cx);
+    cx.update(|cx| assert!(panel.read(cx).closable(cx)));
+    f.edit(cx, RENAMED);
+    cx.update(|cx| assert!(!panel.read(cx).closable(cx)));
+    f.act(cx, |window, cx| window.press(REVERT, cx));
+    f.settle(cx);
+    cx.update(|cx| assert!(panel.read(cx).closable(cx)));
 }

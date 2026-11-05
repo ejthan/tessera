@@ -84,8 +84,6 @@ pub const INSPECTOR: &str = "Inspector";
 const INSPECTOR_EDITOR: &str = "Inspector > Input";
 /// Key context of the document review.
 pub const DOCUMENT_REVIEW: &str = "DocumentReview";
-/// Key context of the request body in the document review.
-const DOCUMENT_REVIEW_BODY: &str = "DocumentReview > Input";
 /// Key context of the collections table; Enter opens the selected row only there, so a
 /// focused header keeps Enter for sorting.
 pub const COLLECTIONS_TABLE: &str = "Collections > DataTable";
@@ -301,7 +299,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SAVE_MODE, ToggleSaveMode, Some(INSPECTOR)),
         KeyBinding::new(REVERT, RevertDocument, Some(INSPECTOR)),
         KeyBinding::new(SAVE, ApplyDocument, Some(DOCUMENT_REVIEW)),
-        KeyBinding::new(SAVE, ApplyDocument, Some(DOCUMENT_REVIEW_BODY)),
         KeyBinding::new("enter", OpenDocument, Some(DOCUMENTS_TABLE)),
         // Only on the table: elsewhere ⌘C copies the selected text.
         KeyBinding::new(COPY_CELL, CopyCell, Some(DOCUMENTS_TABLE)),

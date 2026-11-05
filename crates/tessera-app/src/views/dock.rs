@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
-use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
+use gpui_kit::component::dock::{BasePanel, ClosePanel, Panel, PanelEvent};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
@@ -404,6 +404,11 @@ impl BasePanel for CollectionPanel {
     fn panel_name(&self) -> &'static str {
         "Collection"
     }
+
+    /// Unsaved changes veto the kit's close, which cannot ask. ⌘W asks in [`Render`].
+    fn closable(&self, cx: &App) -> bool {
+        !self.documents.read(cx).shows_unsaved(cx)
+    }
 }
 
 impl Panel for CollectionPanel {
@@ -451,6 +456,9 @@ impl Render for CollectionPanel {
             .key_context(COLLECTION)
             .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
                 this.connection.update(cx, |c, cx| c.lock(cx));
+            }))
+            .on_action(cx.listener(|this, _: &ClosePanel, window, cx| {
+                this.documents.update(cx, |d, cx| d.close_tab(window, cx));
             }))
             .on_action(cx.listener(|this, _: &ShowDocuments, window, cx| {
                 this.show(CollectionView::Documents, window, cx);

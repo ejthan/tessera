@@ -199,7 +199,12 @@ impl Render for Review {
         let rows: Vec<_> = d.entries.iter().map(|e| self.diff_row(e, cx)).collect();
         v_flex()
             .key_context(DOCUMENT_REVIEW)
-            .on_action(cx.listener(|this, _: &ApplyDocument, window, cx| this.apply(window, cx)))
+            // The chord that opened the review must not also apply it from Back.
+            .on_action(cx.listener(|this, _: &ApplyDocument, window, cx| {
+                if this.apply_focus.is_focused(window) {
+                    this.apply(window, cx);
+                }
+            }))
             .gap_3()
             .child(notice("review.target", target.to_string(), muted))
             .when(d.stale, |el| {

@@ -190,16 +190,29 @@ impl DocumentsView {
                         this.go_to(window, cx);
                     }
                 }),
-                cx.subscribe(&inspector, |this, _, event: &GoToResult, cx| {
-                    match event {
-                        GoToResult::Found => {
-                            this.goto_error = None;
-                            this.inspector_open = true;
+                cx.subscribe_in(
+                    &inspector,
+                    window,
+                    |this, _, event: &GoToResult, window, cx| {
+                        match event {
+                            GoToResult::Found => {
+                                this.goto_error = None;
+                                this.inspector_open = true;
+                            }
+                            GoToResult::Unsaved { id, document } => {
+                                this.goto_error = None;
+                                let (id, document) = (id.clone(), document.clone());
+                                this.after_discard(window, cx, move |this, window, cx| {
+                                    let (id, document) = (id.clone(), document.clone());
+                                    this.inspector
+                                        .update(cx, |i, cx| i.show_found(id, document, window, cx));
+                                });
+                            }
+                            GoToResult::Failed(error) => this.goto_error = Some(error.clone()),
                         }
-                        GoToResult::Failed(error) => this.goto_error = Some(error.clone()),
-                    }
-                    cx.notify();
-                }),
+                        cx.notify();
+                    },
+                ),
                 cx.subscribe(&inspector, |this, _, _: &DocumentSaved, cx| this.reload(cx)),
                 cx.subscribe(&connection, |this, _, CollectionChanged(name), cx| {
                     if *name == this.name {
@@ -536,15 +549,38 @@ impl DocumentsView {
         cx.notify();
     }
 
+    /// ⌘W / Ctrl+W: closes the tab, after asking when the inspector holds unsaved changes.
+    /// A clean tab goes on to the kit's own handler.
+    pub fn close_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.inspector.read(cx).is_dirty(cx) {
+            return cx.propagate();
+        }
+        self.after_discard(window, cx, |this, _, cx| {
+            let (profile, name) = (this.profile, this.name.clone());
+            this.state
+                .update(cx, |s, cx| s.close_collection(profile, name, cx));
+        });
+    }
+
+    /// Whether the tab must not close without asking.
+    pub fn shows_unsaved(&self, cx: &App) -> bool {
+        self.inspector.read(cx).shows_unsaved()
+    }
+
     /// Runs `then` now, or once the user agreed to drop the inspector's unsaved changes.
+    /// Changes with a task running cannot be dropped, so nothing happens until it ends.
     fn after_discard(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         then: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) {
-        if !self.inspector.read(cx).is_dirty(cx) {
+        let inspector = self.inspector.read(cx);
+        if !inspector.is_dirty(cx) {
             return then(self, window, cx);
+        }
+        if inspector.is_busy() {
+            return;
         }
         let view = cx.entity().downgrade();
         confirm::open(
@@ -612,16 +648,16 @@ impl DocumentsView {
         }
     }
 
-    /// Loads the document whose id is in the Go to ID input.
+    /// Looks up the document whose id is in the Go to ID input. Unsaved changes are only at
+    /// stake once it is found.
     fn go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.goto.read(cx).value().trim().to_string();
-        if !id.is_empty() {
-            self.after_discard(window, cx, move |this, window, cx| {
-                this.follow_task = None;
-                let id = id.clone();
-                this.inspector.update(cx, |i, cx| i.go_to(id, window, cx));
-            });
+        let inspector = self.inspector.read(cx);
+        if id.is_empty() || (inspector.is_busy() && inspector.is_dirty(cx)) {
+            return;
         }
+        self.follow_task = None;
+        self.inspector.update(cx, |i, cx| i.go_to(id, window, cx));
     }
 
     /// Says "Copied" on the button for a moment.
