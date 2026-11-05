@@ -81,6 +81,10 @@ pub struct AppState {
     pub document_views: ViewsFile,
     /// Where `document_views.json` lives; `None` means preferences are not persisted.
     pub views_path: Option<PathBuf>,
+    /// The last write of `document_views.json`; each write awaits the previous one.
+    views_save_task: Option<Task<()>>,
+    /// Waits for `views_save_task` on quit; registered with the first write.
+    views_on_quit: Option<Subscription>,
     log: RequestLog,
     log_tx: UnboundedSender<LogEntry>,
     /// Taken by [`AppState::spawn_log_drain`].
@@ -122,6 +126,8 @@ impl AppState {
             on_quit: None,
             document_views: ViewsFile::default(),
             views_path: None,
+            views_save_task: None,
+            views_on_quit: None,
         }
     }
 
@@ -149,7 +155,32 @@ impl AppState {
             return Task::ready(Ok(()));
         };
         let file = self.document_views.clone();
-        cx.background_spawn(async move { views::save(&path, &file).map_err(|e| e.to_string()) })
+        let previous = self.views_save_task.take();
+        let (done, result) = tokio::sync::oneshot::channel();
+        // Owned by the state, not the caller: closing a tab must not cancel the write. On the
+        // background executor so the quit handler can wait for it.
+        self.views_save_task = Some(cx.background_spawn(async move {
+            if let Some(previous) = previous {
+                previous.await;
+            }
+            done.send(views::save(&path, &file).map_err(|e| e.to_string()))
+                .ok();
+        }));
+        if self.views_on_quit.is_none() {
+            self.views_on_quit = Some(cx.on_app_quit(|s, _| {
+                let pending = s.views_save_task.take();
+                async move {
+                    if let Some(pending) = pending {
+                        pending.await;
+                    }
+                }
+            }));
+        }
+        cx.background_spawn(async move {
+            result
+                .await
+                .unwrap_or_else(|_| Err("the save was dropped".into()))
+        })
     }
 
     /// The request log of all connections.
@@ -1253,6 +1284,31 @@ mod tests {
             assert_eq!(s.document_view(id, "books"), view);
             assert_eq!(s.document_view(id, "other"), CollectionView::default());
         });
+    }
+
+    #[gpui_kit::test]
+    async fn quick_document_view_saves_land_in_order(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("document_views.json");
+        let state = new_state(
+            cx,
+            Ok(ConnectionsFile::default()),
+            None,
+            Arc::new(MemoryStore::default()),
+        );
+        let id = Uuid::new_v4();
+        state.update(cx, |s, _| s.views_path = Some(path.clone()));
+        let mut saves = Vec::new();
+        for n in 0..20 {
+            let mut view = CollectionView::default();
+            view.widths.insert("title".into(), 100. + n as f32);
+            // The caller drops the task, as a closed tab does.
+            saves.push(state.update(cx, |s, cx| s.set_document_view(id, "books", view, cx)));
+        }
+        let last = saves.pop().unwrap();
+        drop(saves);
+        last.await.unwrap();
+        assert_eq!(views::load(&path).view(id, "books").widths["title"], 119.);
     }
 
     #[gpui_kit::test]
