@@ -97,6 +97,49 @@ impl Fixture {
         self.act(cx, |window, cx| window.click(("icon-sort", col), cx));
     }
 
+    fn profile_id(&self, cx: &mut TestAppContext) -> uuid::Uuid {
+        cx.update(|cx| self.conn.read(cx).profile.id)
+    }
+
+    /// Opens the column picker.
+    fn open_columns(&self, cx: &mut TestAppContext) {
+        self.act(cx, |window, cx| window.click("documents.columns", cx));
+    }
+
+    fn click(&self, cx: &mut TestAppContext, id: &str) {
+        let id = id.to_string();
+        self.act(cx, |window, cx| window.click(id, cx));
+    }
+
+    /// Keys of the columns drawn, left to right.
+    fn column_keys(&self, cx: &mut TestAppContext) -> Vec<String> {
+        let table = self.table(cx);
+        cx.update(|cx| {
+            let columns = &table.read(cx).delegate().columns;
+            columns.iter().map(|c| c.key.clone()).collect()
+        })
+    }
+
+    fn select_cell(&self, cx: &mut TestAppContext, col: usize) {
+        let table = self.table(cx);
+        cx.update(|cx| table.update(cx, |t, cx| t.set_selected_cell(0, col, cx)));
+    }
+
+    /// Closes the tab and opens the collection again.
+    async fn reopen(&self, cx: &mut TestAppContext) {
+        let id = self.profile_id(cx);
+        let tab = format!("tab.{id}.collection.products");
+        self.click(cx, &tab);
+        self.act(cx, |window, cx| window.press(CLOSE_TAB, cx));
+        wait_for_element(cx, self.handle, tab.clone(), false).await;
+        cx.update(|cx| {
+            self.state
+                .update(cx, |s, cx| s.open_collection(id, "products".into(), cx))
+        });
+        wait_for_element(cx, self.handle, tab, true).await;
+        self.settle(cx);
+    }
+
     fn cell(&self, cx: &mut TestAppContext, id: &str) -> Option<String> {
         let id = id.to_string();
         self.act(cx, |window, _| {
@@ -513,4 +556,120 @@ async fn shortcuts_of_the_hidden_schema_do_nothing_on_documents(cx: &mut TestApp
     f.act(cx, show_schema);
     f.act(cx, |window, cx| window.press(DELETE, cx));
     wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+}
+
+#[gpui_kit::test]
+async fn hidden_column_is_not_drawn_and_stays_hidden_after_reopen(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_columns(cx);
+    f.click(cx, "documents.column.title");
+    assert!(f.cell(cx, "documents.cell.0.title").is_none());
+    assert_eq!(f.cell(cx, "documents.cell.0.price").unwrap(), "0");
+    f.reopen(cx).await;
+    assert!(f.cell(cx, "documents.cell.0.title").is_none());
+    assert_eq!(f.cell(cx, "documents.cell.0.price").unwrap(), "0");
+    // Shown again through the picker.
+    f.open_columns(cx);
+    f.click(cx, "documents.column.title");
+    assert_eq!(f.cell(cx, "documents.cell.0.title").unwrap(), "t0");
+}
+
+#[gpui_kit::test]
+async fn pinned_column_comes_first(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_columns(cx);
+    f.click(cx, "documents.pin.price");
+    assert_eq!(f.column_keys(cx), ["id", "price", "title"]);
+    f.click(cx, "documents.pin.id");
+    assert_eq!(f.column_keys(cx), ["price", "id", "title"]);
+}
+
+#[gpui_kit::test]
+async fn pin_shortcut_uses_the_selected_cell(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_cell(cx, 2);
+    f.act(cx, |window, cx| window.press(PIN, cx));
+    assert_eq!(f.column_keys(cx), ["id", "price", "title"]);
+    let id = f.profile_id(cx);
+    let saved = cx.update(|cx| f.state.read(cx).document_view(id, "products"));
+    assert_eq!(saved.pinned, ["id", "price"]);
+}
+
+#[gpui_kit::test]
+async fn resized_width_survives_a_refresh(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let table = f.table(cx);
+    let width =
+        |cx: &mut TestAppContext| cx.update(|cx| f32::from(table.read(cx).col_width(1).unwrap()));
+    let before = width(cx);
+    f.select_cell(cx, 1);
+    f.act(cx, |window, cx| window.press(WIDER, cx));
+    assert_eq!(width(cx), before + 20.);
+    f.act(cx, |window, cx| window.press(NARROWER, cx));
+    f.act(cx, |window, cx| window.press(NARROWER, cx));
+    assert_eq!(width(cx), before - 20.);
+    f.act(cx, |window, cx| window.press(WIDER, cx));
+    f.act(cx, |window, cx| window.press(WIDER, cx));
+    // A page brings a new key, which redraws the columns.
+    *f.docs.extra_key.lock().unwrap() = Some("brand".into());
+    cx.update(|cx| {
+        f.conn
+            .update(cx, |c, cx| c.collection_changed("products".into(), cx))
+    });
+    f.settle(cx);
+    assert_eq!(f.cell(cx, "documents.cell.0.brand").unwrap(), "x");
+    assert_eq!(width(cx), before + 20.);
+}
+
+#[gpui_kit::test]
+async fn last_visible_column_cannot_be_hidden(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_columns(cx);
+    for key in ["id", "title", "price"] {
+        f.click(cx, &format!("documents.column.{key}"));
+    }
+    assert_eq!(f.column_keys(cx), ["price"]);
+    assert_eq!(f.cell(cx, "documents.cell.0.price").unwrap(), "0");
+}
+
+#[gpui_kit::test]
+async fn reset_brings_back_the_default_columns(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_columns(cx);
+    f.click(cx, "documents.column.title");
+    f.click(cx, "documents.pin.price");
+    f.click(cx, "documents.columns.reset");
+    assert_eq!(f.column_keys(cx), ["id", "title", "price"]);
+}
+
+#[gpui_kit::test]
+async fn preferences_are_per_collection(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_columns(cx);
+    f.click(cx, "documents.column.title");
+    let id = f.profile_id(cx);
+    cx.update(|cx| {
+        let state = f.state.read(cx);
+        assert_eq!(state.document_view(id, "products").hidden, ["title"]);
+        assert!(state.document_view(id, "books").hidden.is_empty());
+    });
+}
+
+#[gpui_kit::test]
+async fn failed_save_shows_inline(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("file");
+    std::fs::write(&blocker, "").unwrap();
+    // The parent of the path is a file, so the write fails.
+    let path = blocker.join("document_views.json");
+    cx.update(|cx| f.state.update(cx, |s, _| s.views_path = Some(path)));
+    f.open_columns(cx);
+    f.click(cx, "documents.column.title");
+    f.settle(cx);
+    f.act(cx, |window, _| {
+        assert!(label(window, "documents.columns_error").contains("Could not save the column"));
+    });
+    // The change stays in effect.
+    assert!(f.cell(cx, "documents.cell.0.title").is_none());
 }

@@ -2,23 +2,28 @@
 
 //! The documents view of a collection tab.
 
+pub mod columns;
 pub mod table;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::kbd::Kbd;
-use gpui_kit::component::table::{DataTable, TableState};
+use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, div, prelude::*,
+    App, AppContext as _, Context, Entity, FocusHandle, IntoElement, ParentElement as _, Pixels,
+    Render, SharedString, Styled as _, Subscription, Task, Window, div, prelude::*,
 };
 use rust_i18n::t;
+use std::time::Duration;
 use tessera_client::Collection;
 use tessera_core::documents::columns::{columns_from_schema, exclude_fields, merge_keys};
+use uuid::Uuid;
 
 use self::table::DocRows;
 use super::overview::grouped;
-use crate::actions::{DOCUMENTS, SortByColumn};
+use crate::actions::{
+    DOCUMENTS, NarrowerColumn, SortByColumn, ToggleColumns, TogglePinColumn, WiderColumn,
+};
 use crate::connection::{CollectionChanged, ConnectionState};
 use crate::state::AppState;
 
@@ -31,25 +36,37 @@ fn next_sort(current: Option<(String, bool)>, key: String) -> Option<(String, bo
     }
 }
 
+/// How long a resize waits for the next one before it is saved, so a drag writes once.
+const SAVE_DELAY: Duration = Duration::from_millis(300);
+
 /// The documents of one collection, as a table.
 pub struct DocumentsView {
+    state: Entity<AppState>,
+    profile: Uuid,
     name: String,
+    columns_open: bool,
+    /// Why the last save of the column settings failed.
+    save_error: Option<SharedString>,
+    /// The save to come or running; a newer change replaces it.
+    save_task: Option<Task<()>>,
     has_schema: bool,
     table: Entity<TableState<DocRows>>,
     focus_handle: FocusHandle,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 impl DocumentsView {
     /// The view of collection `name`; it loads once the schema arrives.
     pub fn new(
-        _state: Entity<AppState>,
+        state: Entity<AppState>,
         connection: Entity<ConnectionState>,
         name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let rows = DocRows::new(connection.clone(), name.clone());
+        let profile = connection.read(cx).profile.id;
+        let prefs = state.read(cx).document_view(profile, &name);
+        let rows = DocRows::new(connection.clone(), name.clone(), prefs);
         let table = cx.new(|cx| {
             TableState::new(rows, window, cx)
                 .cell_selectable(true)
@@ -61,13 +78,23 @@ impl DocumentsView {
         Self {
             _subscriptions: [
                 cx.observe(&table, |_, _, cx| cx.notify()),
+                cx.subscribe_in(&table, window, |this, _, event: &TableEvent, _, cx| {
+                    if let TableEvent::ColumnWidthsChanged(widths) = event {
+                        this.widths_changed(widths, cx);
+                    }
+                }),
                 cx.subscribe(&connection, |this, _, CollectionChanged(name), cx| {
                     if *name == this.name {
                         this.reload(cx);
                     }
                 }),
             ],
+            state,
+            profile,
             name,
+            columns_open: false,
+            save_error: None,
+            save_task: None,
             has_schema: false,
             table,
             focus_handle: cx.focus_handle(),
@@ -88,20 +115,20 @@ impl DocumentsView {
                     .is_some_and(|fields| fields.split(',').any(|f| f == key))
             };
             let seen: Vec<String> = rows
-                .columns
+                .all_columns
                 .iter()
                 .filter(|c| !c.in_schema && !excluded(&c.key))
                 .map(|c| c.key.clone())
                 .collect();
-            rows.columns = columns_from_schema(&collection);
-            merge_keys(&mut rows.columns, &seen);
+            rows.all_columns = columns_from_schema(&collection);
+            merge_keys(&mut rows.all_columns, &seen);
+            rows.apply_prefs();
             let exclude_changed = rows.exclude != exclude;
             rows.exclude = exclude;
             // Left in place, the server would refuse every query, with no column to clear it.
-            let sort_gone = rows
-                .sort
-                .as_ref()
-                .is_some_and(|(key, _)| !rows.columns.iter().any(|c| c.key == *key && c.sortable));
+            let sort_gone = rows.sort.as_ref().is_some_and(|(key, _)| {
+                !rows.all_columns.iter().any(|c| c.key == *key && c.sortable)
+            });
             if sort_gone {
                 rows.sort = None;
             }
@@ -124,6 +151,121 @@ impl DocumentsView {
             rows.query_error = Some(error);
             cx.notify();
         });
+    }
+
+    /// Opens or closes the column picker.
+    pub fn set_columns_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.columns_open = open;
+        cx.notify();
+    }
+
+    /// Hides or shows column `key`; the last visible one stays.
+    pub fn toggle_hidden(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.edit_prefs(cx, |r| {
+            columns::toggle_hidden(&r.all_columns, &mut r.prefs, key)
+        });
+    }
+
+    /// Pins or unpins column `key`.
+    pub fn toggle_pin(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.edit_prefs(cx, |r| {
+            columns::toggle_pin(&mut r.prefs, key);
+            true
+        });
+    }
+
+    /// Back to the default columns and widths.
+    pub fn reset_columns(&mut self, cx: &mut Context<Self>) {
+        self.edit_prefs(cx, |r| {
+            r.prefs = Default::default();
+            true
+        });
+    }
+
+    /// Applies `change` to the table's delegate; when it says so, redraws the columns and
+    /// saves the settings.
+    fn edit_prefs(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut DocRows) -> bool) {
+        let changed = self.table.update(cx, |t, cx| {
+            if !change(t.delegate_mut()) {
+                return false;
+            }
+            t.delegate_mut().apply_prefs();
+            t.refresh(cx);
+            cx.notify();
+            true
+        });
+        if changed {
+            self.save(None, cx);
+            cx.notify();
+        }
+    }
+
+    /// Takes the widths a drag or a fit left in the table.
+    fn widths_changed(&mut self, widths: &[Pixels], cx: &mut Context<Self>) {
+        self.table.update(cx, |t, _| {
+            let rows = t.delegate_mut();
+            for (column, width) in rows.columns.iter().zip(widths) {
+                rows.prefs
+                    .widths
+                    .insert(column.key.clone(), f32::from(*width));
+            }
+        });
+        self.save(Some(SAVE_DELAY), cx);
+    }
+
+    /// Key and drawn width of the selected cell's column.
+    fn selected_column(&self, cx: &App) -> Option<(String, f32)> {
+        let t = self.table.read(cx);
+        let (_, col) = t.selected_cell()?;
+        let key = t.delegate().columns.get(col)?.key.clone();
+        Some((key, f32::from(t.col_width(col)?)))
+    }
+
+    fn resize_selected(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let Some((key, width)) = self.selected_column(cx) else {
+            return;
+        };
+        self.edit_prefs(cx, |r| {
+            columns::set_width(&mut r.prefs, &key, width + delta);
+            true
+        });
+    }
+
+    /// Stores the settings in the app state at once, or after `delay`, and writes them. A
+    /// newer change replaces a save that has not run yet.
+    fn save(&mut self, delay: Option<Duration>, cx: &mut Context<Self>) {
+        let now = delay.is_none().then(|| self.commit(cx));
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            let saving = match (now, delay) {
+                (Some(saving), _) => saving,
+                (None, delay) => {
+                    cx.background_executor()
+                        .timer(delay.unwrap_or_default())
+                        .await;
+                    let Ok(saving) = this.update(cx, |this, cx| this.commit(cx)) else {
+                        return;
+                    };
+                    saving
+                }
+            };
+            let result = saving.await;
+            this.update(cx, |this, cx| {
+                this.save_error = result.err().map(|error| {
+                    t!("documents.columns_save_failed", error = error)
+                        .to_string()
+                        .into()
+                });
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn commit(&self, cx: &mut Context<Self>) -> Task<Result<(), String>> {
+        let prefs = self.table.read(cx).delegate().prefs.clone();
+        self.state.update(cx, |s, cx| {
+            s.set_document_view(self.profile, &self.name, prefs, cx)
+        })
     }
 
     /// Whether the columns are known.
@@ -174,6 +316,12 @@ impl DocumentsView {
         });
     }
 
+    fn pin_selected(&mut self, cx: &mut Context<Self>) {
+        if let Some((key, _)) = self.selected_column(cx) {
+            self.toggle_pin(&key, cx);
+        }
+    }
+
     fn status(&self, window: &Window, cx: &App) -> Option<impl IntoElement + use<>> {
         let rows = self.table.read(cx).delegate();
         if !rows.answered {
@@ -219,14 +367,49 @@ impl Render for DocumentsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.table.read(cx).delegate();
         let error = rows.query_error.clone().or_else(|| rows.error.clone());
+        let picker = self.has_schema.then(|| {
+            columns::picker(
+                cx.entity(),
+                self.columns_open,
+                rows.all_columns.clone(),
+                rows.prefs.clone(),
+                window,
+            )
+        });
+        let save_error = self.save_error.clone();
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(DOCUMENTS)
             .on_action(cx.listener(|this, _: &SortByColumn, _, cx| this.sort_selected(cx)))
+            .on_action(cx.listener(|this, _: &ToggleColumns, _, cx| {
+                this.set_columns_open(!this.columns_open, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TogglePinColumn, _, cx| this.pin_selected(cx)))
+            .on_action(cx.listener(|this, _: &NarrowerColumn, _, cx| {
+                this.resize_selected(-columns::STEP, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &WiderColumn, _, cx| this.resize_selected(columns::STEP, cx)),
+            )
             .size_full()
             .p_3()
             .gap_2()
-            .children(self.status(window, cx))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(div().children(self.status(window, cx)))
+                    .children(picker),
+            )
+            .children(save_error.map(|e| {
+                div()
+                    .id("documents.columns_error")
+                    .test_support()
+                    .aria_label(e.clone())
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(e)
+            }))
             .children(error.map(|e| {
                 div()
                     .id("documents.error")

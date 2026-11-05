@@ -76,6 +76,10 @@ pub fn run(launch: Launch) -> Result<(), String> {
         .as_deref()
         .map_or_else(|| Ok(store::ConnectionsFile::default()), store::load);
     let mut state = state::AppState::new(loaded, store_path, Arc::new(KeyringStore));
+    state.views_path = tessera_core::documents::views::views_path();
+    if let Some(path) = &state.views_path {
+        state.document_views = tessera_core::documents::views::load(path);
+    }
     let open = state.resolve(launch)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

@@ -567,6 +567,9 @@ pub const LOCK_AGAIN: &str = key("cmd-shift-l", "ctrl-shift-l");
 pub const SHOW_DOCUMENTS: &str = key("cmd-1", "ctrl-1");
 pub const SHOW_SCHEMA: &str = key("cmd-2", "ctrl-2");
 pub const SORT: &str = key("cmd-shift-s", "ctrl-shift-s");
+pub const PIN: &str = key("cmd-shift-p", "ctrl-shift-p");
+pub const NARROWER: &str = key("cmd-shift-left", "ctrl-shift-left");
+pub const WIDER: &str = key("cmd-shift-right", "ctrl-shift-right");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 pub fn fake_connector(

@@ -40,7 +40,11 @@ gpui_kit::actions!(
         DeleteCollection,
         ShowDocuments,
         ShowSchema,
-        SortByColumn
+        SortByColumn,
+        ToggleColumns,
+        TogglePinColumn,
+        NarrowerColumn,
+        WiderColumn
     ]
 );
 
@@ -161,6 +165,22 @@ const TRUNCATE: &str = "ctrl-shift-backspace";
 const SORT: &str = "cmd-shift-s";
 #[cfg(not(target_os = "macos"))]
 const SORT: &str = "ctrl-shift-s";
+#[cfg(target_os = "macos")]
+const COLUMNS: &str = "cmd-shift-o";
+#[cfg(not(target_os = "macos"))]
+const COLUMNS: &str = "ctrl-shift-o";
+#[cfg(target_os = "macos")]
+const PIN: &str = "cmd-shift-p";
+#[cfg(not(target_os = "macos"))]
+const PIN: &str = "ctrl-shift-p";
+#[cfg(target_os = "macos")]
+const NARROWER: &str = "cmd-shift-left";
+#[cfg(not(target_os = "macos"))]
+const NARROWER: &str = "ctrl-shift-left";
+#[cfg(target_os = "macos")]
+const WIDER: &str = "cmd-shift-right";
+#[cfg(not(target_os = "macos"))]
+const WIDER: &str = "ctrl-shift-right";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -218,6 +238,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SHOW_FORM, ShowDocuments, Some(COLLECTION)),
         KeyBinding::new(SHOW_JSON, ShowSchema, Some(COLLECTION)),
         KeyBinding::new(SORT, SortByColumn, Some(DOCUMENTS)),
+        KeyBinding::new(COLUMNS, ToggleColumns, Some(DOCUMENTS)),
+        KeyBinding::new(PIN, TogglePinColumn, Some(DOCUMENTS)),
+        KeyBinding::new(NARROWER, NarrowerColumn, Some(DOCUMENTS)),
+        KeyBinding::new(WIDER, WiderColumn, Some(DOCUMENTS)),
         // Schema actions must not fire from the documents view, where they are not shown.
         KeyBinding::new(EDIT, NoAction, Some(DOCUMENTS)),
         KeyBinding::new(CLONE, NoAction, Some(DOCUMENTS)),

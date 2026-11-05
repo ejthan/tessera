@@ -18,8 +18,10 @@ use rust_i18n::t;
 use tessera_client::{DocumentQuery, Error};
 use tessera_core::documents::columns::{ColumnDef, merge_keys, sort_key};
 use tessera_core::documents::page::{DocumentPage, PageCache, Row, row_position, wanted_pages};
+use tessera_core::documents::views::CollectionView;
 use tessera_core::documents::{PAGE_CACHE, PER_PAGE};
 
+use super::columns::{MIN_WIDTH, visible_columns};
 use crate::connection::{ConnectionState, error_text};
 use crate::documents::{DocumentsBackendGlobal, PageResult};
 
@@ -31,7 +33,6 @@ const MAX_INFLIGHT: usize = 4;
 const DEFAULT_WIDTH: f32 = 160.;
 const ID_WIDTH: f32 = 120.;
 const NUMERIC_WIDTH: f32 = 100.;
-const MIN_WIDTH: f32 = 60.;
 
 /// Where pages come from. The client is read per request, so a reconnect needs no new table.
 struct Target {
@@ -41,10 +42,12 @@ struct Target {
 
 /// The table's data: a window of pages over `found` rows.
 pub struct DocRows {
-    /// Visible columns, pinned ones first.
+    /// Visible columns, pinned ones first: `all_columns` seen through `prefs`.
     pub columns: Vec<ColumnDef>,
-    /// Column widths by key, where they differ from the default.
-    pub widths: HashMap<String, f32>,
+    /// Every column of the schema and every key seen in documents.
+    pub all_columns: Vec<ColumnDef>,
+    /// Hidden, pinned and sized columns of this collection.
+    pub prefs: CollectionView,
     /// Sort key and whether it ascends.
     pub sort: Option<(String, bool)>,
     /// Documents matching the query.
@@ -76,11 +79,12 @@ pub struct DocRows {
 }
 
 impl DocRows {
-    /// An empty table over collection `name` of `connection`.
-    pub fn new(connection: Entity<ConnectionState>, name: String) -> Self {
+    /// An empty table over collection `name` of `connection`, laid out by `prefs`.
+    pub fn new(connection: Entity<ConnectionState>, name: String, prefs: CollectionView) -> Self {
         Self {
             columns: Vec::new(),
-            widths: HashMap::new(),
+            all_columns: Vec::new(),
+            prefs,
             sort: None,
             found: 0,
             out_of: 0,
@@ -104,6 +108,11 @@ impl DocRows {
     /// Pages held in memory.
     pub fn cached_pages(&self) -> usize {
         self.pages.len()
+    }
+
+    /// Shows `all_columns` as `prefs` say; the caller refreshes the table.
+    pub fn apply_prefs(&mut self) {
+        self.columns = visible_columns(&self.all_columns, &self.prefs);
     }
 
     /// The number of the current query.
@@ -188,7 +197,10 @@ impl DocRows {
                 if replaced {
                     self.pages.clear();
                 }
-                let new_column = merge_keys(&mut self.columns, &answer.page.keys);
+                let shown = self.columns.len();
+                merge_keys(&mut self.all_columns, &answer.page.keys);
+                self.apply_prefs();
+                let new_column = self.columns.len() != shown;
                 self.pages.insert(page, Arc::new(answer.page));
                 self.found = answer.found;
                 self.out_of = answer.out_of;
@@ -248,7 +260,7 @@ impl TableDelegate for DocRows {
             (_, true) => NUMERIC_WIDTH,
             _ => DEFAULT_WIDTH,
         };
-        let width = self.widths.get(&def.key).copied().unwrap_or(default);
+        let width = self.prefs.widths.get(&def.key).copied().unwrap_or(default);
         let column = Column::new(def.key.clone(), def.key.clone())
             .width(px(width))
             .min_width(px(MIN_WIDTH));
@@ -257,8 +269,7 @@ impl TableDelegate for DocRows {
         } else {
             column
         };
-        // shortcut: only `id` is pinned, until Task 5 keeps pins per collection.
-        let column = if def.key == "id" {
+        let column = if self.prefs.pinned.contains(&def.key) {
             column.fixed_left()
         } else {
             column
