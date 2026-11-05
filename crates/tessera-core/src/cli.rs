@@ -42,6 +42,7 @@ impl fmt::Display for CliError {
 impl std::error::Error for CliError {}
 
 /// How the app starts.
+#[allow(clippy::large_enum_variant)] // built once at startup
 pub enum Launch {
     /// Open the normal window with no connection.
     Normal,

@@ -2,6 +2,7 @@
 
 //! HTTP client for the Typesense API.
 
+mod collections;
 mod error;
 mod event;
 mod models;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+pub use collections::{Alias, Collection, Field, SchemaChange};
 pub use error::Error;
 pub use event::{BODY_LIMIT, Body, Origin, RequestEvent, RequestHook};
 pub use models::{CollectionSummary, Debug, Health, KeyAccess, Metrics, RaftState, Stats};
@@ -253,6 +255,21 @@ impl Client {
         self.collections_probe_on(None).await
     }
 
+    /// `GET /collections`: every collection with its full schema.
+    pub async fn collections(&self) -> Result<Vec<Collection>, Error> {
+        self.collections_on(None).await
+    }
+
+    /// `GET /collections/{name}`.
+    pub async fn collection(&self, name: &str) -> Result<Collection, Error> {
+        self.collection_on(None, name).await
+    }
+
+    /// `GET /aliases`.
+    pub async fn aliases(&self) -> Result<Vec<Alias>, Error> {
+        self.aliases_on(None).await
+    }
+
     /// `GET /keys`, to learn whether the key is an admin key. Only the status counts:
     /// `200` is [`KeyAccess::Admin`], `401` or `403` is [`KeyAccess::Restricted`].
     ///
@@ -317,6 +334,24 @@ impl Client {
         self.get_ok(pin, "collections", Some("limit=1&exclude_fields=fields"))
             .await
             .map(drop)
+    }
+
+    async fn collections_on(&self, pin: Option<usize>) -> Result<Vec<Collection>, Error> {
+        let body = self.get_ok(pin, "collections", None).await?;
+        serde_json::from_str(&body).map_err(Error::Decode)
+    }
+
+    async fn collection_on(&self, pin: Option<usize>, name: &str) -> Result<Collection, Error> {
+        let body = self
+            .get_ok(pin, &collections::collection_path(name, ""), None)
+            .await?;
+        serde_json::from_str(&body).map_err(Error::Decode)
+    }
+
+    async fn aliases_on(&self, pin: Option<usize>) -> Result<Vec<Alias>, Error> {
+        let body = self.get_ok(pin, "aliases", None).await?;
+        let list: collections::AliasList = serde_json::from_str(&body).map_err(Error::Decode)?;
+        Ok(list.aliases)
     }
 
     async fn keys_probe_on(&self, pin: Option<usize>) -> Result<KeyAccess, Error> {
@@ -445,6 +480,21 @@ impl NodeClient {
     /// See [`Client::collections_probe`].
     pub async fn collections_probe(&self) -> Result<(), Error> {
         self.client.collections_probe_on(Some(self.index)).await
+    }
+
+    /// `GET /collections` on this node. See [`Client::collections`].
+    pub async fn collections(&self) -> Result<Vec<Collection>, Error> {
+        self.client.collections_on(Some(self.index)).await
+    }
+
+    /// `GET /collections/{name}` on this node. See [`Client::collection`].
+    pub async fn collection(&self, name: &str) -> Result<Collection, Error> {
+        self.client.collection_on(Some(self.index), name).await
+    }
+
+    /// `GET /aliases` on this node. See [`Client::aliases`].
+    pub async fn aliases(&self) -> Result<Vec<Alias>, Error> {
+        self.client.aliases_on(Some(self.index)).await
     }
 
     /// `GET /keys` on this node. See [`Client::keys_probe`].

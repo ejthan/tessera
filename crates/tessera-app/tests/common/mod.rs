@@ -16,14 +16,15 @@ use gpui_kit::{
     WindowOptions, base::Root, px, size,
 };
 use secrecy::ExposeSecret as _;
+use tessera_app::collections::{CollectionsBackend, CollectionsBackendGlobal};
 use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
 use tessera_app::poller::{CollectionsFetcherGlobal, NodeSample, PollFetcherGlobal, SampleFuture};
 use tessera_app::runtime::Tokio;
 use tessera_app::state::AppState;
 use tessera_app::views::root::RootView;
 use tessera_client::{
-    Client, ClientOptions, CollectionSummary, Debug, Error, Health, KeyAccess, Metrics, NodeClient,
-    Origin, Stats,
+    Alias, Client, ClientOptions, Collection, CollectionSummary, Debug, Error, Health, KeyAccess,
+    Metrics, NodeClient, Origin, Stats,
 };
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::secrets::{MemoryStore, SecretStore};
@@ -158,6 +159,66 @@ fn install_poll_fakes(cx: &mut gpui_kit::App) {
             Box::pin(async { Ok(Vec::new()) })
         })));
     }
+    if !cx.has_global::<CollectionsBackendGlobal>() {
+        cx.set_global(CollectionsBackendGlobal(Arc::new(FakeBackend(
+            Arc::default(),
+        ))));
+    }
+}
+
+/// What a [`FakeBackend`] answers and has been asked. `data: None` makes every call time out.
+#[derive(Default)]
+pub struct FakeData {
+    pub data: Mutex<Option<(Vec<Collection>, Vec<Alias>)>>,
+    /// Number of `list` calls.
+    pub lists: Mutex<usize>,
+    /// Names asked of `get`.
+    pub gets: Mutex<Vec<String>>,
+}
+
+/// The installed backend; the test keeps the [`FakeData`] handle.
+pub struct FakeBackend(pub Arc<FakeData>);
+
+impl CollectionsBackend for FakeBackend {
+    fn list(
+        &self,
+        _: Client,
+    ) -> tessera_app::collections::BoxFuture<Result<(Vec<Collection>, Vec<Alias>), Error>> {
+        *self.0.lists.lock().unwrap() += 1;
+        let answer = self.0.data.lock().unwrap().clone().ok_or(Error::Timeout);
+        Box::pin(async move { answer })
+    }
+
+    fn get(
+        &self,
+        _: Client,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<Collection, Error>> {
+        self.0.gets.lock().unwrap().push(name.clone());
+        let found = self
+            .0
+            .data
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|(c, _)| c.iter().find(|c| c.name == name).cloned());
+        Box::pin(async move { found.ok_or(Error::Timeout) })
+    }
+}
+
+/// Installs a collections backend answering with `data` (`None`: every call times out) and
+/// returns the handle to change the answer and inspect the calls.
+pub fn fake_backend(
+    cx: &mut TestAppContext,
+    data: Option<(Vec<Collection>, Vec<Alias>)>,
+) -> Arc<FakeData> {
+    let backend = Arc::new(FakeData {
+        data: Mutex::new(data),
+        ..Default::default()
+    });
+    let installed = FakeBackend(backend.clone());
+    cx.update(|cx| cx.set_global(CollectionsBackendGlobal(Arc::new(installed))));
+    backend
 }
 
 /// Installs a node fetcher that answers with `answer` and records every node URL it polls.

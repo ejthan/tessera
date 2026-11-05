@@ -15,12 +15,17 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 
+use super::collections_list::CollectionsList;
 use super::connect_dialog::ConnectDialog;
 use super::import_dialog::ImportDialog;
 use super::overview::Overview;
+use super::schema_view::SchemaView;
 use super::sidebar::Sidebar;
 use super::{env_badge, welcome};
-use crate::actions::{OVERVIEW, Refresh, TogglePolling};
+use crate::actions::{
+    COLLECTION, COLLECTIONS, FocusSearch, OVERVIEW, OpenCollectionRow, Refresh, ToggleFavorite,
+    TogglePolling,
+};
 use crate::connection::ConnectionState;
 use crate::poller::Poller;
 use crate::state::AppState;
@@ -173,6 +178,175 @@ impl Render for OverviewPanel {
             .border_t_2()
             .border_color(edge)
             .child(self.overview.clone())
+    }
+}
+
+/// A center tab with the collections of one connection.
+pub struct CollectionsPanel {
+    connection: Entity<ConnectionState>,
+    list: Entity<CollectionsList>,
+    focus_handle: FocusHandle,
+    _subscription: Subscription,
+}
+
+impl CollectionsPanel {
+    /// The collections of `connection`; loads them.
+    pub fn new(
+        connection: Entity<ConnectionState>,
+        state: Entity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
+            list: cx.new(|cx| CollectionsList::new(connection.clone(), state, window, cx)),
+            connection,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    /// The connection this tab shows.
+    pub fn connection(&self) -> &Entity<ConnectionState> {
+        &self.connection
+    }
+}
+
+panel_basics!(CollectionsPanel);
+
+impl BasePanel for CollectionsPanel {
+    fn panel_name(&self) -> &'static str {
+        "Collections"
+    }
+}
+
+impl Panel for CollectionsPanel {
+    /// Color dot, "Collections" and environment badge (UX rule 1).
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let profile = &self.connection.read(cx).profile;
+        let name = SharedString::from(t!("sidebar.collections").to_string());
+        h_flex()
+            .id(SharedString::from(format!(
+                "tab.{}.collections",
+                profile.id
+            )))
+            .test_support()
+            .aria_label(name.clone())
+            .gap_2()
+            .items_center()
+            .child(env_badge::dot(profile.color, cx))
+            .child(name)
+            .child(env_badge::render(&profile.environment, cx))
+    }
+}
+
+impl Render for CollectionsPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let edge = env_badge::color(self.connection.read(cx).profile.color, cx.theme());
+        v_flex()
+            .track_focus(&self.focus_handle)
+            .key_context(COLLECTIONS)
+            .on_action(cx.listener(|this, _: &Refresh, _, cx| {
+                this.list.update(cx, |l, cx| l.reload(cx));
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFavorite, _, cx| {
+                this.list.update(cx, |l, cx| l.toggle_favorite(cx));
+            }))
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.list.update(cx, |l, cx| l.focus_search(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &OpenCollectionRow, _, cx| {
+                this.list.update(cx, |l, cx| l.open_selected(cx));
+            }))
+            .size_full()
+            .border_t_2()
+            .border_color(edge)
+            .child(self.list.clone())
+    }
+}
+
+/// A center tab with the schema of one collection.
+pub struct CollectionPanel {
+    connection: Entity<ConnectionState>,
+    name: String,
+    schema: Entity<SchemaView>,
+    focus_handle: FocusHandle,
+    _subscription: Subscription,
+}
+
+impl CollectionPanel {
+    /// The tab of collection `name` on `connection`; loads its schema.
+    pub fn new(
+        connection: Entity<ConnectionState>,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
+            schema: cx.new(|cx| SchemaView::new(connection.clone(), name.clone(), window, cx)),
+            connection,
+            name,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    /// The connection this tab shows.
+    pub fn connection(&self) -> &Entity<ConnectionState> {
+        &self.connection
+    }
+
+    /// The collection this tab shows.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The schema view, for tests.
+    pub fn schema(&self) -> &Entity<SchemaView> {
+        &self.schema
+    }
+}
+
+panel_basics!(CollectionPanel);
+
+impl BasePanel for CollectionPanel {
+    fn panel_name(&self) -> &'static str {
+        "Collection"
+    }
+}
+
+impl Panel for CollectionPanel {
+    /// Color dot, collection name and environment badge (UX rule 1).
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let profile = &self.connection.read(cx).profile;
+        let name = SharedString::from(self.name.clone());
+        h_flex()
+            .id(SharedString::from(format!(
+                "tab.{}.collection.{}",
+                profile.id, self.name
+            )))
+            .test_support()
+            .aria_label(name.clone())
+            .gap_2()
+            .items_center()
+            .child(env_badge::dot(profile.color, cx))
+            .child(name)
+            .child(env_badge::render(&profile.environment, cx))
+    }
+}
+
+impl Render for CollectionPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let edge = env_badge::color(self.connection.read(cx).profile.color, cx.theme());
+        v_flex()
+            .track_focus(&self.focus_handle)
+            .key_context(COLLECTION)
+            .on_action(cx.listener(|this, _: &Refresh, window, cx| {
+                this.schema.update(cx, |s, cx| s.reload(true, window, cx));
+            }))
+            .size_full()
+            .border_t_2()
+            .border_color(edge)
+            .child(self.schema.clone())
     }
 }
 

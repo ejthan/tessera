@@ -292,7 +292,7 @@ Each module lists acceptance criteria (AC).
 - **Create:**
   - Form mode: field editor with a type dropdown (all types including `auto`, `string*`, `object`, `object[]`, `geopoint`, `geopolygon`, `image`, `float[]`), live validation.
   - JSON mode: code editor, synchronized with the form in both directions.
-  - **Infer schema from a file:** JSONL/JSON/CSV sample (first N = 1,000 rows) → suggested type per field, including `optional` when fields are missing.
+  - **Infer schema from a file:** JSONL/JSON/CSV sample (first N = 1,000 rows) → suggested type per field, including `optional` when fields are missing. Arrives in M5 with import (D19).
   - **Clone:** use the schema of an existing collection as a template.
 - **Modify (PATCH):** add and drop fields (`drop: true`); changing a field is a drop plus an add. A diff preview is shown before sending. Progress comes from the schema change status (§7.18).
 - **Delete:** confirmed by typing the collection name. A warning appears if aliases still point to the collection.
@@ -640,7 +640,7 @@ Each milestone ends with green CI, an updated CHANGELOG and a short demo (GIF in
 |---|---|---|
 | **M0 Foundation** | Workspace with `tessera-client`, `tessera-core`, `tessera-app`; CI (lint, test, integration, build, smoke start); license and governance files; GPUI Kit window with root, theme, dock skeleton, sidebar, status bar; tokio bridge (§5.4); `tessera-client` with `health` and `debug`; welcome screen and connect dialog; `dev/docker-compose.yml`. Details: `docs/superpowers/specs/2026-11-04-m0-foundation-design.md` | App starts on macOS, Linux and Windows. "Connect" against localhost shows the version |
 | **M1 Connections and overview** | §7.1 complete (keychain, profiles, tags, read-only, import from bfritscher config), §7.2 (metrics, stats, cluster view), §7.19 request log. Details: `docs/superpowers/specs/2026-11-04-m1-connections-design.md` | AC from §7.1 and §7.2 met |
-| **M2 Collections** | §7.3 without the JOIN graph: list, schema view, create (form and JSON), clone, PATCH with diff, delete, truncate. Creates `tessera-widgets`; `xtask seed` with small data sets | Integration tests for all collection endpoints green |
+| **M2 Collections** | §7.3 without the JOIN graph and schema inference (M5, D19): list, schema view, create (form and JSON), clone, PATCH with diff, delete, truncate, read-only unlock (D10). Creates `tessera-widgets`; `xtask seed` with small data sets. Details: `docs/superpowers/specs/2026-11-05-m2-collections-design.md` | Integration tests for all collection endpoints green |
 | **M3 Document browser** | §7.4: DataTable, infinite scroll, filter with autocompletion, inspector with JSON editor, CRUD, multi-select, delete by query with preview. `xtask seed` gains the 200k `products` set | NF2 met (200k rows) |
 | **M4 Search and raw console** | §7.5 (without P2 parts), multi-search, history, saved queries, code export. §7.17 raw console. §7.20 command palette | Exported curl reproduces the response |
 | **M5 Import/export** | §7.6, §7.7 including schema inference, error report, cancel. Jobs panel | NF3 met |
@@ -695,6 +695,8 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D15 | Keyboard shortcut for "Disconnect" in the sidebar (UX rule 5) | ⌘⇧D / Ctrl+Shift+D on the focused sidebar entry, shown in the context menu |
 | D16 | Connection switcher in the title bar? | No dropdown in M1: the title bar shows the selected connection. Switching happens in the sidebar (PR A) and in the tabs (PR B) |
 | D17 | What the overview shows while the active node is down | Its last figures and curves stay, dimmed, with "last sample N s ago" under the node cards; they are not cleared |
+| D18 | Collections in the sidebar | Favorites only, under "Collections"; the full list is the collections tab |
+| D19 | Schema inference from a file: M2 or M5? | M5, with import, which shares the file readers |
 
 ---
 

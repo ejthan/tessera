@@ -5,9 +5,16 @@
 use serde_json::Value;
 
 const MASK: &str = "••••";
-const SECRET_KEYS: [&str; 2] = ["api_key", "value"];
+const SECRET_KEYS: [&str; 5] = [
+    "api_key",
+    "value",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+];
 
-/// Masks the string values of the keys `api_key` and `value` at any depth.
+/// Masks the string values of the keys in `SECRET_KEYS` (`api_key`, `value` and the
+/// embedding model credentials) at any depth.
 ///
 /// Valid JSON comes back pretty-printed. Text that is not valid JSON (for example a body
 /// cut at 1 MiB) is masked textually and otherwise left byte-identical.
@@ -72,7 +79,8 @@ pub fn text_query_params(text: &str) -> String {
 
 const KEY_PARAM: &str = "x-typesense-api-key";
 
-fn mask_value(v: &mut Value) {
+/// Masks the secret string values in `v` in place, at any depth (for display of a parsed body).
+pub fn mask_value(v: &mut Value) {
     match v {
         Value::Object(map) => {
             for (k, child) in map.iter_mut() {
@@ -152,6 +160,28 @@ mod tests {
         let out = json(r#"{"a":{"api_key":"sk"},"keys":[{"value":"abc"}]}"#);
         assert!(!out.contains("sk\"") && !out.contains("abc"));
         assert_eq!(out.matches(MASK).count(), 2);
+    }
+
+    const EMBED: &str = r#"{"name":"emb","type":"float[]","embed":{"from":["title"],"model_config":{"model_name":"openai/text-embedding-3-small","api_key":"sk-embed-1234","access_token":"at-5678","refresh_token":"rt-9012","client_secret":"cs-3456"}}}"#;
+    const EMBED_SECRETS: [&str; 4] = ["sk-embed-1234", "at-5678", "rt-9012", "cs-3456"];
+
+    #[test]
+    fn embedding_credentials_are_masked() {
+        let body = format!(r#"{{"name":"c","fields":[{EMBED}]}}"#);
+        let out = json(&body);
+        assert!(EMBED_SECRETS.iter().all(|s| !out.contains(s)), "{out}");
+        let v: Value = serde_json::from_str(&out).expect("json");
+        let cfg = &v["fields"][0]["embed"]["model_config"];
+        for k in ["api_key", "access_token", "refresh_token", "client_secret"] {
+            assert_eq!(cfg[k], MASK, "{k}");
+        }
+        assert_eq!(cfg["model_name"], "openai/text-embedding-3-small");
+    }
+
+    #[test]
+    fn embedding_credentials_are_masked_in_truncated_text() {
+        let out = json(&EMBED[..EMBED.len() - 2]);
+        assert!(EMBED_SECRETS.iter().all(|s| !out.contains(s)), "{out}");
     }
 
     #[test]

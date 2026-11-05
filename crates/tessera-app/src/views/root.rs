@@ -15,12 +15,12 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use super::connect_dialog::ConnectDialog;
-use super::dock::{OverviewPanel, SidebarPanel, WelcomePanel};
+use super::dock::{CollectionPanel, CollectionsPanel, OverviewPanel, SidebarPanel, WelcomePanel};
 use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
 use crate::actions::{CopyAsCurl, NewConnection, ToggleRequestLog};
 use crate::connection::ConnectionState;
-use crate::state::{AppState, OpenOverview};
+use crate::state::{AppState, OpenCollection, OpenCollections, OpenOverview};
 
 /// Width of the left sidebar.
 const SIDEBAR_WIDTH: f32 = 240.;
@@ -34,10 +34,10 @@ pub struct RootView {
     dock: Entity<DockArea>,
     welcome: Entity<WelcomePanel>,
     log: Entity<RequestLogPanel>,
-    /// The overview tab selected last, in the center or an open dock. Band, frame, title bar
+    /// The connection tab selected last, in the center or an open dock. Band, frame, title bar
     /// and status bar follow it.
     active: Option<PanelId>,
-    /// The overview tabs on screen at the last layout change.
+    /// The connection tabs on screen at the last layout change.
     displayed: Vec<PanelId>,
     _subscriptions: Vec<Subscription>,
 }
@@ -79,7 +79,21 @@ impl RootView {
                 &state,
                 window,
                 |this, _, event: &OpenOverview, window, cx| {
-                    this.open_overview(event.0, window, cx);
+                    this.open_tab(event.0, Kind::Overview, window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &state,
+                window,
+                |this, _, event: &OpenCollections, window, cx| {
+                    this.open_tab(event.0, Kind::Collections, window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &state,
+                window,
+                |this, _, event: &OpenCollection, window, cx| {
+                    this.open_tab(event.0, Kind::Collection(event.1.clone()), window, cx);
                 },
             ),
             cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, window, cx| {
@@ -102,10 +116,9 @@ impl RootView {
         }
     }
 
-    /// The connection of the active overview tab.
+    /// The connection of the active tab.
     pub fn active_connection(&self, cx: &App) -> Option<Entity<ConnectionState>> {
-        let panel = overview_panel(self.dock.read(cx), self.active?)?;
-        Some(panel.read(cx).connection().clone())
+        Some(connection_tab(self.dock.read(cx), self.active?)?.connection(cx))
     }
 
     /// The dock area, for tests that rearrange panels as a user would by dragging.
@@ -113,18 +126,18 @@ impl RootView {
         &self.dock
     }
 
-    /// Every overview tab in the dock with the region it sits in.
-    fn overview_tabs(&self, cx: &App) -> Vec<(DockPlacement, Entity<OverviewPanel>)> {
+    /// Every connection tab in the dock with the region it sits in.
+    fn connection_tabs(&self, cx: &App) -> Vec<(DockPlacement, ConnectionTab)> {
         let area = self.dock.read(cx);
         REGIONS
             .into_iter()
             .filter_map(|placement| Some((placement, area.layout(placement)?)))
             .flat_map(|(placement, tree)| tree.panels().map(move |id| (placement, id)))
-            .filter_map(|(placement, id)| Some((placement, overview_panel(area, id)?)))
+            .filter_map(|(placement, id)| Some((placement, connection_tab(area, id)?)))
             .collect()
     }
 
-    /// The overview tabs on screen: the displayed tab of each group in the center and in
+    /// The connection tabs on screen: the displayed tab of each group in the center and in
     /// the open docks.
     fn displayed_tabs(&self, cx: &App) -> Vec<PanelId> {
         let area = self.dock.read(cx);
@@ -141,7 +154,7 @@ impl RootView {
                     displayed.extend(
                         panels
                             .get(active_ix)
-                            .filter(|id| overview_panel(area, **id).is_some()),
+                            .filter(|id| connection_tab(area, **id).is_some()),
                     );
                 }
             });
@@ -167,9 +180,15 @@ impl RootView {
         });
     }
 
-    /// Opens the overview tab of profile `id`, or shows and activates the one already open,
+    /// Opens the `kind` tab of profile `id`, or shows and activates the one already open,
     /// opening the dock it was moved into.
-    fn open_overview(&mut self, id: uuid::Uuid, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_tab(
+        &mut self,
+        id: uuid::Uuid,
+        kind: Kind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(conn) = self.state.read(cx).connection(id, cx) else {
             return;
         };
@@ -177,32 +196,41 @@ impl RootView {
             return;
         }
         let existing = self
-            .overview_tabs(cx)
+            .connection_tabs(cx)
             .into_iter()
-            .find(|(_, tab)| tab.read(cx).connection() == &conn);
+            .find(|(_, tab)| tab.kind(cx) == kind && tab.connection(cx) == conn);
         let welcome = self.welcome.clone();
+        let state = self.state.clone();
         let panel = self.dock.update(cx, |area, cx| {
-            let panel = match existing {
-                Some((placement, panel)) => {
+            let (id, new) = match existing {
+                Some((placement, tab)) => {
                     if placement != DockPlacement::Center && !area.is_dock_open(placement) {
                         area.toggle_dock(placement, window, cx);
                     }
-                    panel
+                    (tab.id(), None)
                 }
                 None => {
-                    let panel = cx.new(|cx| OverviewPanel::new(conn, window, cx));
-                    area.add_panel_view(
-                        panel_handle(panel.clone()),
-                        DockPlacement::Center,
-                        None,
-                        window,
-                        cx,
-                    );
-                    area.remove_panel(welcome, window, cx);
-                    panel
+                    let (id, handle) = match kind {
+                        Kind::Overview => {
+                            let panel = cx.new(|cx| OverviewPanel::new(conn, window, cx));
+                            (PanelId::from(panel.entity_id()), panel_handle(panel))
+                        }
+                        Kind::Collections => {
+                            let panel = cx.new(|cx| CollectionsPanel::new(conn, state, window, cx));
+                            (PanelId::from(panel.entity_id()), panel_handle(panel))
+                        }
+                        Kind::Collection(name) => {
+                            let panel = cx.new(|cx| CollectionPanel::new(conn, name, window, cx));
+                            (PanelId::from(panel.entity_id()), panel_handle(panel))
+                        }
+                    };
+                    (id, Some(handle))
                 }
             };
-            let id = PanelId::from(panel.entity_id());
+            if let Some(handle) = new {
+                area.add_panel_view(handle, DockPlacement::Center, None, window, cx);
+                area.remove_panel(welcome, window, cx);
+            }
             // A no-op for a tab already displayed, e.g. in another split group.
             area.select_panel(id, window, cx);
             id
@@ -210,23 +238,33 @@ impl RootView {
         // Set here, not from the layout event: selecting a displayed tab changes no layout.
         self.displayed = self.displayed_tabs(cx);
         self.set_active(Some(panel), cx);
+        // Its shortcuts (search, favorite) work from the moment the tab is open.
+        match connection_tab(self.dock.read(cx), panel) {
+            Some(ConnectionTab::Collections(tab)) => tab.focus_handle(cx).focus(window, cx),
+            Some(ConnectionTab::Collection(tab)) => tab.focus_handle(cx).focus(window, cx),
+            _ => {}
+        }
     }
 
     /// Closes the tabs of connections that were closed. Closing a tab never disconnects.
     fn close_stale_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let stale: Vec<_> = self
-            .overview_tabs(cx)
+            .connection_tabs(cx)
             .into_iter()
             .map(|(_, tab)| tab)
-            .filter(|tab| !state.connections.contains(tab.read(cx).connection()))
+            .filter(|tab| !state.connections.contains(&tab.connection(cx)))
             .collect();
         if stale.is_empty() {
             return;
         }
         self.dock.update(cx, |area, cx| {
             for tab in stale {
-                area.remove_panel(tab, window, cx);
+                match tab {
+                    ConnectionTab::Overview(panel) => area.remove_panel(panel, window, cx),
+                    ConnectionTab::Collections(panel) => area.remove_panel(panel, window, cx),
+                    ConnectionTab::Collection(panel) => area.remove_panel(panel, window, cx),
+                }
             }
         });
     }
@@ -266,9 +304,62 @@ const REGIONS: [DockPlacement; 4] = [
     DockPlacement::Bottom,
 ];
 
-/// The overview tab `id`, if the dock holds one under that id.
-fn overview_panel(area: &DockArea, id: PanelId) -> Option<Entity<OverviewPanel>> {
-    area.panel(id)?.view().downcast::<OverviewPanel>().ok()
+/// The kinds of tab a connection has.
+#[derive(Clone, PartialEq)]
+enum Kind {
+    Overview,
+    Collections,
+    /// The schema tab of the named collection.
+    Collection(String),
+}
+
+/// A tab of one connection.
+enum ConnectionTab {
+    Overview(Entity<OverviewPanel>),
+    Collections(Entity<CollectionsPanel>),
+    Collection(Entity<CollectionPanel>),
+}
+
+impl ConnectionTab {
+    fn kind(&self, cx: &App) -> Kind {
+        match self {
+            Self::Overview(_) => Kind::Overview,
+            Self::Collections(_) => Kind::Collections,
+            Self::Collection(panel) => Kind::Collection(panel.read(cx).name().to_owned()),
+        }
+    }
+
+    fn id(&self) -> PanelId {
+        PanelId::from(match self {
+            Self::Overview(panel) => panel.entity_id(),
+            Self::Collections(panel) => panel.entity_id(),
+            Self::Collection(panel) => panel.entity_id(),
+        })
+    }
+
+    fn connection(&self, cx: &App) -> Entity<ConnectionState> {
+        match self {
+            Self::Overview(panel) => panel.read(cx).connection().clone(),
+            Self::Collections(panel) => panel.read(cx).connection().clone(),
+            Self::Collection(panel) => panel.read(cx).connection().clone(),
+        }
+    }
+}
+
+/// The connection tab `id`, if the dock holds one under that id.
+fn connection_tab(area: &DockArea, id: PanelId) -> Option<ConnectionTab> {
+    let view = area.panel(id)?.view();
+    let view = match view.clone().downcast::<OverviewPanel>() {
+        Ok(panel) => return Some(ConnectionTab::Overview(panel)),
+        Err(view) => view,
+    };
+    match view.downcast::<CollectionsPanel>() {
+        Ok(panel) => Some(ConnectionTab::Collections(panel)),
+        Err(view) => view
+            .downcast::<CollectionPanel>()
+            .ok()
+            .map(ConnectionTab::Collection),
+    }
 }
 
 impl Render for RootView {

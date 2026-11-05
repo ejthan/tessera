@@ -49,6 +49,14 @@ TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d
 cargo run -p tessera-app -- --host localhost --port 18108 --api-key-stdin <<< xyz
 ```
 
+### Seed data
+
+```bash
+cargo xtask seed --url http://localhost:18108 [--key xyz] [--reset]
+```
+
+Fills the server with `books` (10,000 documents, with the alias `books_current` and the synonym set `books_synonyms`), `authors` (500), `books_ref` (2,000, references `authors`), `places` (1,000, geopoints) and `articles_vec` (1,000, 8-dimensional vectors). The documents are generated from a fixed seed, so every run gives the same data. There is no default URL; without `--url` the command prints its usage and exits with 2. The key defaults to `xyz`. If one of these collections exists, the command stops and names it; `--reset` drops those collections, the alias and the synonym set first, and nothing else.
+
 ## Tests
 
 ```bash
