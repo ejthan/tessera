@@ -40,6 +40,12 @@ pub enum SaveError {
 /// existing one.
 pub struct OpenOverview(pub Uuid);
 
+/// Asks the window to show the collections list of a connected profile.
+pub struct OpenCollections(pub Uuid);
+
+/// Asks the window to show the tab of one collection of a profile.
+pub struct OpenCollection(pub Uuid, pub String);
+
 /// Profiles, keys and open connections of the app.
 pub struct AppState {
     /// Saved profiles, in sidebar order.
@@ -499,6 +505,20 @@ impl AppState {
         cx.notify();
     }
 
+    /// Asks for the collections tab of profile `id`.
+    pub fn open_collections(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.selected = Some(id);
+        cx.emit(OpenCollections(id));
+        cx.notify();
+    }
+
+    /// Asks for the tab of collection `name` of profile `id`.
+    pub fn open_collection(&mut self, id: Uuid, name: String, cx: &mut Context<Self>) {
+        self.selected = Some(id);
+        cx.emit(OpenCollection(id, name));
+        cx.notify();
+    }
+
     /// Closes the connection of profile `id`. Dropping it cancels a running attempt.
     pub fn disconnect(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.connections.retain(|c| c.read(cx).profile.id != id);
@@ -530,6 +550,8 @@ fn observe_connection(conn: &Entity<ConnectionState>, cx: &mut Context<AppState>
 }
 
 impl EventEmitter<OpenOverview> for AppState {}
+impl EventEmitter<OpenCollections> for AppState {}
+impl EventEmitter<OpenCollection> for AppState {}
 
 /// Runs a blocking secret-store or file call on tokio's blocking pool.
 fn blocking<T: Send + 'static>(cx: &App, f: impl FnOnce() -> T + Send + 'static) -> JoinHandle<T> {

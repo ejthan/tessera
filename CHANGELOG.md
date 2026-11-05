@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `THIRD_PARTY_NOTICES.md` with the `webpki-root-certs` notice (CDLA-Permissive-2.0).
 - A 3-node dev cluster (compose profile `cluster`) and nightly cluster tests for leader detection and failover.
 - CI on macOS, Linux and Windows: lint, tests, integration tests against Typesense 30.0 and 30.2, release builds with a size check and a smoke start.
+- Collections tab per connection: a sortable table with document and field counts, creation time, aliases and synonym and curation sets, a search over names and aliases (⌘F / Ctrl+F), favorites first (⌘D / Ctrl+D) and Enter to open a collection. Favorites also appear under "Collections" in the sidebar. Reload with ⌘R / Ctrl+R.
 
 ### Changed
 

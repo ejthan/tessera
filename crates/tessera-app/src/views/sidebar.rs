@@ -3,6 +3,7 @@
 //! The sidebar: saved profiles and open connections.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -24,7 +25,8 @@ use super::env_badge;
 use super::import_dialog::ImportDialog;
 use crate::actions::{
     ConnectSelected, DeleteConnection, DisconnectSelected, EditConnection, ExportProfiles,
-    ImportProfiles, NewConnection, SIDEBAR_ENTRY, SIDEBAR_ENTRY_BUTTON, ToggleReopenLast,
+    ImportProfiles, NewConnection, OpenLink, SIDEBAR_ENTRY, SIDEBAR_ENTRY_BUTTON, SIDEBAR_LINK,
+    ToggleReopenLast,
 };
 use crate::state::AppState;
 use tessera_widgets::confirm;
@@ -38,6 +40,9 @@ pub struct Sidebar {
     focus: HashMap<Uuid, FocusHandle>,
     /// Focus handles of the "Overview" rows under connected entries.
     overview_focus: HashMap<Uuid, FocusHandle>,
+    /// Focus handles of the "Collections" rows and of the favorites under them.
+    collections_focus: HashMap<Uuid, FocusHandle>,
+    favorite_focus: HashMap<(Uuid, String), FocusHandle>,
     /// Why the last header action (export, reopen toggle, delete) failed, shown under the header.
     header_error: Option<SharedString>,
     export_task: Option<Task<()>>,
@@ -65,6 +70,8 @@ impl Sidebar {
             state,
             focus: HashMap::new(),
             overview_focus: HashMap::new(),
+            collections_focus: HashMap::new(),
+            favorite_focus: HashMap::new(),
             header_error: None,
             export_task: None,
             _subscription: subscription,
@@ -160,6 +167,46 @@ impl Sidebar {
                 }
             })
             .collect()
+    }
+
+    /// A row under a connected entry that opens a tab. Enter or a click calls `open`.
+    fn link_row(
+        id: String,
+        label: SharedString,
+        focus: &FocusHandle,
+        indent: bool,
+        selected: bool,
+        open: Rc<dyn Fn(&mut gpui_kit::App)>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let on_click = open.clone();
+        div()
+            // Its own context: in SIDEBAR_ENTRY, Enter would open the overview instead.
+            .key_context(SIDEBAR_LINK)
+            .on_action(move |_: &OpenLink, _, cx| open(cx))
+            .child(
+                div()
+                    .id(SharedString::from(id))
+                    .test_support()
+                    .track_focus(focus)
+                    .aria_label(label.clone())
+                    .when(indent, |el| el.ml_8())
+                    .when(!indent, |el| el.ml_4())
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(transparent_black())
+                    .text_sm()
+                    .truncate()
+                    .when(selected, |el| el.bg(theme.secondary))
+                    .hover(|s| s.bg(theme.secondary))
+                    .focus(|s| s.border_color(theme.ring))
+                    .on_click(move |_, _, cx| on_click(cx))
+                    .child(label),
+            )
+            .into_any_element()
     }
 
     fn render_entry(
@@ -408,6 +455,57 @@ impl Sidebar {
                         .on_click(move |_, _, cx| open_overview(cx))
                         .child(overview),
                 )
+            })
+            .when(entry.connected, |el| {
+                let state = self.state.clone();
+                let focus = self
+                    .collections_focus
+                    .entry(id)
+                    .or_insert_with(|| cx.focus_handle().tab_stop(true))
+                    .clone();
+                let open = {
+                    let state = state.clone();
+                    Rc::new(move |cx: &mut gpui_kit::App| {
+                        state.update(cx, |s, cx| s.open_collections(id, cx))
+                    })
+                };
+                let label = SharedString::from(t!("sidebar.collections").to_string());
+                let el = el.child(Self::link_row(
+                    format!("sidebar.{id}.collections"),
+                    label,
+                    &focus,
+                    false,
+                    entry.selected,
+                    open,
+                    cx,
+                ));
+                entry
+                    .profile
+                    .favorite_collections
+                    .iter()
+                    .fold(el, |el, name| {
+                        let focus = self
+                            .favorite_focus
+                            .entry((id, name.clone()))
+                            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+                            .clone();
+                        let open = {
+                            let state = state.clone();
+                            let name = name.clone();
+                            Rc::new(move |cx: &mut gpui_kit::App| {
+                                state.update(cx, |s, cx| s.open_collection(id, name.clone(), cx))
+                            })
+                        };
+                        el.child(Self::link_row(
+                            format!("sidebar.{id}.collection.{name}"),
+                            SharedString::from(name.clone()),
+                            &focus,
+                            true,
+                            false,
+                            open,
+                            cx,
+                        ))
+                    })
             });
         v_flex()
             .child(entry_el)
@@ -423,6 +521,13 @@ impl Render for Sidebar {
             .retain(|id, _| entries.iter().any(|e| e.profile.id == *id));
         self.overview_focus
             .retain(|id, _| entries.iter().any(|e| e.profile.id == *id && e.connected));
+        self.collections_focus
+            .retain(|id, _| entries.iter().any(|e| e.profile.id == *id && e.connected));
+        self.favorite_focus.retain(|(id, name), _| {
+            entries.iter().any(|e| {
+                e.profile.id == *id && e.connected && e.profile.favorite_collections.contains(name)
+            })
+        });
         let rows: Vec<_> = entries
             .into_iter()
             .map(|entry| self.render_entry(entry, window, cx))

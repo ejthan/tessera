@@ -3,7 +3,7 @@
 //! App-wide actions and their key bindings.
 
 use gpui_kit::component::dock::{ClosePanel, ToggleZoom};
-use gpui_kit::{App, KeyBinding};
+use gpui_kit::{App, KeyBinding, NoAction};
 
 gpui_kit::actions!(
     tessera,
@@ -23,7 +23,12 @@ gpui_kit::actions!(
         ToggleRequestLog,
         CopyAsCurl,
         TogglePolling,
-        Refresh
+        Refresh,
+        NewCollection,
+        ToggleFavorite,
+        FocusSearch,
+        OpenCollectionRow,
+        OpenLink
     ]
 );
 
@@ -35,6 +40,15 @@ pub const SIDEBAR_ENTRY_BUTTON: &str = "SidebarEntryButton";
 pub const CONNECT_DIALOG: &str = "ConnectDialog";
 /// Key context of an overview tab.
 pub const OVERVIEW: &str = "Overview";
+/// Key context of a collections tab.
+pub const COLLECTIONS: &str = "Collections";
+/// Key context of the collections table; Enter opens the selected row only there, so a
+/// focused header keeps Enter for sorting.
+pub const COLLECTIONS_TABLE: &str = "Collections > DataTable";
+/// Key context of a sortable header of the collections table: Enter sorts there.
+pub const COLLECTIONS_HEADER: &str = "CollectionsHeader";
+/// Key context of the Collections and favorite rows under a sidebar entry.
+pub const SIDEBAR_LINK: &str = "SidebarLink";
 
 #[cfg(target_os = "macos")]
 const NEW_CONNECTION: &str = "cmd-n";
@@ -85,6 +99,14 @@ const REFRESH: &str = "cmd-r";
 #[cfg(not(target_os = "macos"))]
 const REFRESH: &str = "ctrl-r";
 #[cfg(target_os = "macos")]
+const TOGGLE_FAVORITE: &str = "cmd-d";
+#[cfg(not(target_os = "macos"))]
+const TOGGLE_FAVORITE: &str = "ctrl-d";
+#[cfg(target_os = "macos")]
+const FIND: &str = "cmd-f";
+#[cfg(not(target_os = "macos"))]
+const FIND: &str = "ctrl-f";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
@@ -111,6 +133,13 @@ pub fn bind_keys(cx: &mut App) {
         // Space is text in an input, so it pauses only outside one.
         KeyBinding::new("space", TogglePolling, Some("Overview && !Input")),
         KeyBinding::new(REFRESH, Refresh, Some(OVERVIEW)),
+        KeyBinding::new(REFRESH, Refresh, Some(COLLECTIONS)),
+        KeyBinding::new(TOGGLE_FAVORITE, ToggleFavorite, Some(COLLECTIONS)),
+        KeyBinding::new(FIND, FocusSearch, Some(COLLECTIONS)),
+        KeyBinding::new("enter", OpenCollectionRow, Some(COLLECTIONS_TABLE)),
+        // Unbinds Enter under the table's binding, so the header handles it as a click.
+        KeyBinding::new("enter", NoAction, Some(COLLECTIONS_HEADER)),
+        KeyBinding::new("enter", OpenLink, Some(SIDEBAR_LINK)),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }

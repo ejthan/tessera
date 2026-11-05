@@ -2,6 +2,7 @@
 
 //! Views of the main window.
 
+pub mod collections_list;
 pub mod connect_dialog;
 pub mod dock;
 pub mod env_badge;
