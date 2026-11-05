@@ -20,9 +20,9 @@ use rust_i18n::t;
 use tessera_client::{Alias, Collection};
 use tessera_core::profile::Node;
 
-use super::collection_danger;
 use super::overview::grouped;
 use super::schema_dialog::SchemaDialog;
+use super::{collection_danger, env_badge};
 use crate::actions::{
     COLLECTIONS, COLLECTIONS_HEADER, CloneCollection, DeleteCollection, EditSchema, FocusSearch,
     NewCollection, OpenCollectionRow, Refresh, ToggleFavorite, TruncateCollection,
@@ -199,6 +199,8 @@ struct Rows {
     favorites: Vec<String>,
     sort: (SortKey, bool),
     headers: Vec<gpui_kit::FocusHandle>,
+    /// Writes ask to unlock first; their menu entries show the lock.
+    locked: bool,
 }
 
 impl Rows {
@@ -383,33 +385,55 @@ impl TableDelegate for Rows {
         let Some(row) = self.row(row_ix) else {
             return menu;
         };
-        let toggle = if self.favorites.contains(&row.name) {
-            t!("collections.favorite_remove")
-        } else {
-            t!("collections.favorite_add")
-        };
-        menu.menu(
+        let favorite = self.favorites.contains(&row.name);
+        menu_entries(favorite, self.locked)
+            .into_iter()
+            .fold(menu, |menu, (label, action, lock)| {
+                if lock {
+                    let icon = Icon::new(gpui_kit::assets::IconName::Lock);
+                    menu.menu_with_icon(label, icon, action)
+                } else {
+                    menu.menu(label, action)
+                }
+            })
+    }
+}
+
+/// The row menu: label, action, and whether it shows the lock (a write while `locked`).
+fn menu_entries(favorite: bool, locked: bool) -> Vec<(String, Box<dyn gpui_kit::Action>, bool)> {
+    let toggle = if favorite {
+        t!("collections.favorite_remove")
+    } else {
+        t!("collections.favorite_add")
+    };
+    vec![
+        (
             t!("collections.open").to_string(),
             Box::new(OpenCollectionRow),
-        )
-        .menu(toggle.to_string(), Box::new(ToggleFavorite))
-        .menu(
+            false,
+        ),
+        (toggle.to_string(), Box::new(ToggleFavorite), false),
+        (
             t!("collections.edit_schema").to_string(),
             Box::new(EditSchema),
-        )
-        .menu(
+            locked,
+        ),
+        (
             t!("collections.clone").to_string(),
             Box::new(CloneCollection),
-        )
-        .menu(
+            locked,
+        ),
+        (
             t!("collections.truncate").to_string(),
             Box::new(TruncateCollection),
-        )
-        .menu(
+            locked,
+        ),
+        (
             t!("collections.delete").to_string(),
             Box::new(DeleteCollection),
-        )
-    }
+            locked,
+        ),
+    ]
 }
 
 /// The content of a collections tab.
@@ -447,6 +471,7 @@ impl CollectionsList {
             favorites: Vec::new(),
             sort: (SortKey::Name, true),
             headers,
+            locked: false,
         };
         let table = cx.new(|cx| {
             TableState::new(rows, window, cx)
@@ -510,6 +535,7 @@ impl CollectionsList {
     /// Rebuilds the rows when the cache or the favorites changed.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let conn = self.connection.read(cx);
+        let locked = conn.writes_locked();
         let cache = &conn.collection_cache;
         let stamp = (cache.loaded_at, conn.profile.favorite_collections.clone());
         if self.loaded.as_ref() != Some(&stamp) {
@@ -529,6 +555,8 @@ impl CollectionsList {
             self.loaded = Some(stamp);
             self.reselect(cx);
         }
+        self.table
+            .update(cx, |t, _| t.delegate_mut().locked = locked);
         cx.notify();
     }
 
@@ -659,6 +687,7 @@ impl CollectionsList {
     }
 
     fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let locked = self.connection.read(cx).writes_locked();
         let delegate = self.table.read(cx).delegate();
         let count = SharedString::from(
             t!(
@@ -699,6 +728,9 @@ impl CollectionsList {
                     .primary()
                     .small()
                     .label(t!("collections.new").to_string())
+                    .when(locked, |b| {
+                        b.child(env_badge::lock("collections.new", false, cx))
+                    })
                     .children(Kbd::binding_for_action(
                         &NewCollection,
                         Some(COLLECTIONS),
@@ -848,6 +880,19 @@ mod tests {
         assert_eq!(names(&rows), ["a", "c", "b"]);
         sort_rows(&mut rows, SortKey::Name, false, &[]);
         assert_eq!(names(&rows), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn row_menu_locks_only_the_writes() {
+        let locks = |locked| -> Vec<bool> {
+            menu_entries(false, locked)
+                .into_iter()
+                .map(|(_, _, lock)| lock)
+                .collect()
+        };
+        // Open, toggle favorite, edit, clone, truncate, delete.
+        assert_eq!(locks(true), [false, false, true, true, true, true]);
+        assert_eq!(locks(false), [false; 6]);
     }
 
     #[test]

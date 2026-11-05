@@ -791,3 +791,49 @@ async fn truncate_timeout_says_the_server_may_still_be_working(cx: &mut TestAppC
         assert!(!text.contains("seconds"), "{text}");
     });
 }
+
+impl Fixture {
+    /// Unlocks writes on the fixture's connection, as the unlock dialog does.
+    fn unlock(&self, cx: &mut TestAppContext) {
+        let (id, state) = (self.profile.id, self.state.clone());
+        cx.update(|cx| {
+            let conn = state.read(cx).connection(id, cx).unwrap();
+            conn.update(cx, |c, cx| c.unlock(cx));
+        });
+        cx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+async fn write_buttons_show_the_lock_until_unlocked(cx: &mut TestAppContext) {
+    let f = connected_as(cx, Some(data()), true).await;
+    f.open_collections(cx).await;
+    assert!(f.shown(cx, "collections.new.readonly"));
+    assert!(!f.shown(cx, "collections.reload.readonly"));
+    let (id, state) = (f.profile.id, f.state.clone());
+    cx.update(|cx| state.update(cx, |s, cx| s.open_collection(id, "books".into(), cx)));
+    wait_for_label(cx, f.handle, "schema.documents".into(), "10,000").await;
+    for button in ["edit", "clone", "truncate", "delete"] {
+        assert!(
+            f.shown(cx, &format!("schema.{button}.readonly")),
+            "{button}"
+        );
+    }
+    f.unlock(cx);
+    for button in ["edit", "clone", "truncate", "delete"] {
+        assert!(
+            !f.shown(cx, &format!("schema.{button}.readonly")),
+            "{button}"
+        );
+    }
+    f.click(cx, f.sidebar("collections")).await;
+    assert!(!f.shown(cx, "collections.new.readonly"));
+}
+
+#[gpui_kit::test]
+async fn writable_connection_shows_no_lock(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    assert!(f.shown(cx, "collections.new"));
+    assert!(!f.shown(cx, "collections.new.readonly"));
+}

@@ -222,11 +222,17 @@ impl ConnectionState {
         cx: &mut Context<Self>,
         then: impl FnOnce(&mut Window, &mut App) + 'static,
     ) {
-        if self.profile.read_only && !self.writes_unlocked {
+        if self.writes_locked() {
             unlock::open(cx.entity().downgrade(), &self.profile, then, window, cx);
         } else {
             window.defer(cx, then);
         }
+    }
+
+    /// A write first asks to unlock: the profile is read-only and writes are not unlocked.
+    /// Write controls show the lock then (spec §7.3).
+    pub fn writes_locked(&self) -> bool {
+        self.profile.read_only && !self.writes_unlocked
     }
 
     /// Allows writes until [`Self::lock`] or disconnect. Nothing is written to disk.

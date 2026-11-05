@@ -20,10 +20,10 @@ use tessera_client::{Collection, Field};
 use tessera_core::redact::mask_value;
 use tessera_widgets::JsonEditor;
 
-use super::collection_danger;
 use super::collections_list::created_text;
 use super::overview::grouped;
 use super::schema_dialog::SchemaDialog;
+use super::{collection_danger, env_badge};
 use crate::actions::{
     COLLECTION, CloneCollection, DeleteCollection, EditSchema, Refresh, TruncateCollection,
 };
@@ -377,6 +377,7 @@ impl SchemaView {
 
     fn header(&self, c: &Collection, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let conn = self.connection.read(cx);
+        let locked = conn.writes_locked();
         let aliases: Vec<&str> = aliases_of(&conn.collection_cache.aliases, &c.name).collect();
         let list = |items: &[&str]| {
             if items.is_empty() {
@@ -425,6 +426,9 @@ impl SchemaView {
                     .outline()
                     .small()
                     .label(t!("collections.edit_schema").to_string())
+                    .when(locked, |b| {
+                        b.child(env_badge::lock("schema.edit", false, cx))
+                    })
                     .children(Kbd::binding_for_action(
                         &EditSchema,
                         Some(COLLECTION),
@@ -437,6 +441,9 @@ impl SchemaView {
                     .outline()
                     .small()
                     .label(t!("collections.clone").to_string())
+                    .when(locked, |b| {
+                        b.child(env_badge::lock("schema.clone", false, cx))
+                    })
                     .children(Kbd::binding_for_action(
                         &CloneCollection,
                         Some(COLLECTION),
@@ -450,6 +457,9 @@ impl SchemaView {
                     .danger()
                     .small()
                     .label(t!("collections.truncate").to_string())
+                    .when(locked, |b| {
+                        b.child(env_badge::lock("schema.truncate", false, cx))
+                    })
                     .children(Kbd::binding_for_action(
                         &TruncateCollection,
                         Some(COLLECTION),
@@ -463,6 +473,9 @@ impl SchemaView {
                     .danger()
                     .small()
                     .label(t!("collections.delete").to_string())
+                    .when(locked, |b| {
+                        b.child(env_badge::lock("schema.delete", false, cx))
+                    })
                     .children(Kbd::binding_for_action(
                         &DeleteCollection,
                         Some(COLLECTION),
