@@ -83,7 +83,7 @@ impl SchemaDiff {
         if let Some(m) = &self.metadata {
             body.insert(
                 "metadata".into(),
-                m.clone().map_or(Value::Null, Value::Object),
+                Value::Object(m.clone().unwrap_or_default()),
             );
         }
         Value::Object(body)
@@ -121,7 +121,12 @@ pub fn diff(old: &Collection, new: &SchemaDraft) -> SchemaDiff {
         d.consequences
             .push(Consequence::RewritesDocuments(old.num_documents));
     }
-    if !old.default_sorting_field.is_empty() && d.dropped.contains(&old.default_sorting_field) {
+    if !old.default_sorting_field.is_empty()
+        && (d.dropped.contains(&old.default_sorting_field)
+            || d.changed
+                .iter()
+                .any(|c| c.name == old.default_sorting_field))
+    {
         d.consequences.push(Consequence::ClearsDefaultSortingField(
             old.default_sorting_field.clone(),
         ));
@@ -159,6 +164,13 @@ mod tests {
 
     fn coll(v: Value) -> Collection {
         serde_json::from_value(v).unwrap()
+    }
+
+    impl SchemaDraft {
+        fn tap_no_meta(mut self) -> Self {
+            self.metadata = None;
+            self
+        }
     }
 
     fn base() -> Collection {
@@ -227,6 +239,21 @@ mod tests {
             json!({"synonym_sets":["s"],"metadata":{"a":1}})
         );
         assert!(d.consequences.is_empty());
+
+        // changing the type of the default sorting field also clears it
+        let mut n = same.clone();
+        n.fields[1].r#type = FieldType::Int64;
+        assert!(
+            diff(&old, &n)
+                .consequences
+                .contains(&Consequence::ClearsDefaultSortingField("n".into()))
+        );
+
+        // removing metadata sends an empty object
+        let mut with_meta = old.clone();
+        with_meta.metadata = Some(Map::from_iter([("a".to_string(), json!(1))]));
+        let d = diff(&with_meta, &same.clone().tap_no_meta());
+        assert_eq!(d.patch_body(), json!({"metadata":{}}));
 
         // dropping the default sorting field
         let mut n = same.clone();
