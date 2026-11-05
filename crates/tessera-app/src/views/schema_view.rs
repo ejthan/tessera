@@ -399,7 +399,8 @@ impl SchemaView {
             ("curation_sets", sets(&c.curation_sets)),
         ];
         let muted = cx.theme().muted_foreground;
-        h_flex()
+        let facts = h_flex()
+            .flex_wrap()
             .gap_4()
             .items_center()
             .child(
@@ -419,8 +420,12 @@ impl SchemaView {
                     .text_sm()
                     .text_color(muted)
                     .child(text)
-            }))
-            .child(div().flex_1())
+            }));
+        // Linux and Windows spell shortcuts out, so the buttons must wrap, not run off the window.
+        let actions = h_flex()
+            .flex_wrap()
+            .gap_2()
+            .items_center()
             .child(
                 Button::new("schema.edit")
                     .outline()
@@ -490,7 +495,8 @@ impl SchemaView {
                     .label(t!("collections.reload").to_string())
                     .children(Kbd::binding_for_action(&Refresh, Some(COLLECTION), window))
                     .on_click(cx.listener(|this, _, window, cx| this.reload(true, window, cx))),
-            )
+            );
+        v_flex().gap_2().child(facts).child(actions)
     }
 
     fn options(&self, c: &Collection, cx: &App) -> impl IntoElement {

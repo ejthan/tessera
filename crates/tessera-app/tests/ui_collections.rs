@@ -402,6 +402,19 @@ async fn unknown_attribute_gets_a_column(cx: &mut TestAppContext) {
     });
 }
 
+/// Linux and Windows spell shortcuts out ("Ctrl+Shift+Backspace"), so the header is wider there.
+#[gpui_kit::test]
+async fn header_actions_stay_clickable_at_the_minimum_window_width(cx: &mut TestAppContext) {
+    let f = open_schema(cx, vec![embedding_collection()]).await;
+    cx.simulate_window_resize(
+        f.handle.into(),
+        gpui_kit::size(gpui_kit::px(960.), gpui_kit::px(600.)),
+    );
+    act(cx, f.handle, |_, _| {});
+    act(cx, f.handle, |window, cx| window.click("schema.delete", cx));
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+}
+
 #[gpui_kit::test]
 async fn embedding_key_is_masked_in_table_and_json(cx: &mut TestAppContext) {
     let f = open_schema(cx, vec![embedding_collection()]).await;
