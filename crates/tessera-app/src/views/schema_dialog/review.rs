@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::Cancel;
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
@@ -113,12 +115,22 @@ impl SchemaDialog {
             .filter(|(changed, _)| *changed)
             .map(|(_, key)| t!("schema.fixed_option", option = t!(*key)).to_string())
             .collect();
+        // Other top-level keys (`curation_sets`, newer options): `diff` ignores them too.
+        let mut keys: Vec<&String> = now.extra.keys().chain(was.extra.keys()).collect();
+        keys.sort();
+        keys.dedup();
+        problems.extend(
+            keys.into_iter()
+                .filter(|k| now.extra.get(*k) != was.extra.get(*k))
+                .map(|k| t!("schema.fixed_option", option = k).to_string()),
+        );
         let d = diff(old, now);
         self.blanked = d
             .added
             .iter()
             .chain(d.changed.iter().map(|c| &c.after))
-            .filter(|f| f.embed.as_ref().is_some_and(contains_mask))
+            // `mask_value` masks at any depth, not only under `embed`.
+            .filter(|f| contains_mask(&f.to_value()))
             .map(|f| f.name.clone())
             .collect();
         if let Some(Some(m)) = &d.metadata
@@ -157,11 +169,12 @@ impl SchemaDialog {
         cx.notify();
     }
 
-    fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Back to the draft as it was.
+    pub(super) fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.step = Step::Draft;
         self.review = None;
         self.server_error = None;
-        self.focus_handle.focus(window, cx);
+        self.focus_first(window, cx);
         cx.notify();
     }
 
@@ -272,7 +285,11 @@ impl SchemaDialog {
         window.close_dialog(cx);
     }
 
-    pub(super) fn render_review(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_review(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let Some(review) = &self.review else {
             return div().into_any_element();
         };
@@ -429,6 +446,8 @@ impl SchemaDialog {
                     .child(
                         Button::new("schema.review.back")
                             .label(t!("schema.review.back").to_string())
+                            // Esc goes back here instead of closing the dialog.
+                            .children(Kbd::binding_for_action(&Cancel, Some("Dialog"), window))
                             .track_focus(&self.safe_focus)
                             .on_click(cx.listener(|this, _, window, cx| this.back(window, cx))),
                     )

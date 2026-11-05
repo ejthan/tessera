@@ -14,7 +14,7 @@ use std::cell::Cell;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::dialog::Cancel;
-use gpui_kit::component::input::Enter;
+use gpui_kit::component::input::{Enter, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, WindowExt as _, h_flex,
@@ -204,19 +204,17 @@ impl SchemaDialog {
         let profile = connection.read(cx).profile.clone();
         let view = cx.new(|cx| Self::new(state, connection, mode, draft, blanked, window, cx));
         let d = view.read(cx);
-        // The name is fixed in edit mode; start in the first field there.
-        let first = match (&d.mode, d.form.rows.first()) {
-            (Mode::Edit(_), Some(row)) => row.input(Text::Name),
-            _ => d.form.opt(Opt::Name),
-        }
-        .clone();
+        let first = d
+            .first_input()
+            .map(|i| i.focus_handle(cx))
+            .unwrap_or_else(|| d.focus_handle.clone());
         let first_build = Cell::new(true);
         let dialog_view = view.clone();
         window.open_dialog(cx, move |dialog, window, cx| {
             if first_build.replace(false) {
-                first.focus_handle(cx).focus(window, cx);
+                first.focus(window, cx);
             }
-            let busy = dialog_view.clone();
+            let cancel = dialog_view.clone();
             let enter = dialog_view.clone();
             dialog
                 .title(
@@ -239,8 +237,7 @@ impl SchemaDialog {
                     enter.update(cx, |d, cx| d.press_focused(window, cx));
                     false
                 })
-                // A create in flight finishes first, so its result lands in this dialog.
-                .on_cancel(move |_, _, cx| !busy.read(cx).busy)
+                .on_cancel(move |_, window, cx| cancel.update(cx, |d, cx| d.cancel(window, cx)))
                 .child(dialog_view.clone())
         });
         view
@@ -310,6 +307,33 @@ impl SchemaDialog {
         matches!(self.mode, Mode::Edit(_))
     }
 
+    /// Where the cursor goes in the form: the name, or in edit mode, where the name is fixed,
+    /// the first field's name (`None` when there is no field).
+    fn first_input(&self) -> Option<Entity<InputState>> {
+        match (&self.mode, self.form.rows.first()) {
+            (Mode::Edit(_), row) => row.map(|r| r.input(Text::Name).clone()),
+            (Mode::Create, _) => Some(self.form.opt(Opt::Name).clone()),
+        }
+    }
+
+    /// Puts the cursor in [`Self::first_input`], or keeps focus in the dialog.
+    fn focus_first(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.first_input() {
+            Some(input) => input.update(cx, |i, cx| i.focus(window, cx)),
+            None => self.focus_handle.focus(window, cx),
+        }
+    }
+
+    /// Esc, the close button or the backdrop: in the review they go back to the draft; a
+    /// create or change in flight finishes first, so its result lands in this dialog.
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.step == Step::Review && !self.busy {
+            self.back(window, cx);
+            return false;
+        }
+        !self.busy
+    }
+
     /// Form inputs whose text the draft could not take, as summary lines.
     fn form_problems(&self, cx: &App) -> Vec<String> {
         if self.locked() {
@@ -364,10 +388,7 @@ impl SchemaDialog {
         match tab {
             Tab::Json => self.json.update(cx, |e, cx| e.focus(window, cx)),
             Tab::Form if self.locked() => self.focus_handle.focus(window, cx),
-            Tab::Form => self
-                .form
-                .opt(Opt::Name)
-                .update(cx, |n, cx| n.focus(window, cx)),
+            Tab::Form => self.focus_first(window, cx),
         }
         cx.notify();
     }
@@ -497,6 +518,14 @@ impl SchemaDialog {
                         .filter(|_| !self.locked())
                         .cloned(),
                 )
+                // The row says it too, but embeddings are edited in the JSON tab.
+                .chain(self.blanked.iter().filter(|_| self.editing()).map(|name| {
+                    let i = self.draft.fields.iter().position(|f| &f.name == name);
+                    self.issue_line(
+                        i.unwrap_or_default(),
+                        t!("schema.field.secret_blanked").to_string(),
+                    )
+                }))
                 .map(|l| (l, theme.danger)),
         );
         if lines.is_empty() {
@@ -519,7 +548,7 @@ impl Render for SchemaDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match self.step {
             Step::Draft => self.render_draft(window, cx).into_any_element(),
-            Step::Review => self.render_review(cx).into_any_element(),
+            Step::Review => self.render_review(window, cx).into_any_element(),
             Step::Progress => self.render_progress(cx).into_any_element(),
         };
         v_flex()

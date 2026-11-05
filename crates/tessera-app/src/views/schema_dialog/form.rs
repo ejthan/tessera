@@ -245,9 +245,7 @@ impl SchemaDialog {
             return;
         }
         self.form.rows.remove(i);
-        self.form
-            .opt(Opt::Name)
-            .update(cx, |n, cx| n.focus(window, cx));
+        self.focus_first(window, cx);
         self.edit(|d| drop(d.fields.remove(i)), window, cx);
     }
 

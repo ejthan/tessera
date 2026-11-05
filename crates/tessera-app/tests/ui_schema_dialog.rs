@@ -623,6 +623,12 @@ async fn edit_locks_name_and_fixed_options(cx: &mut TestAppContext) {
     assert!(f.submit_disabled(cx));
     f.edit_json(cx, &dialog, |j| j["name"] = json!("books"));
     assert!(!f.submit_disabled(cx));
+    // Back in the form, the cursor goes to the first field, not the fixed name.
+    f.act(cx, |window, cx| window.press(SHOW_JSON, cx));
+    f.act(cx, |window, cx| window.press(SHOW_FORM, cx));
+    f.query(cx, |w| {
+        assert_eq!(w.find("schema.field.0.name").focused(), Some(true))
+    });
 }
 
 #[gpui_kit::test]
@@ -710,6 +716,13 @@ async fn changed_embedding_needs_the_key_again(cx: &mut TestAppContext) {
         )
     });
     assert!(f.submit_disabled(cx));
+    // The JSON tab, where embeddings are edited, says why as well.
+    f.act(cx, |window, cx| window.press(SHOW_JSON, cx));
+    let summary = f.label_of(cx, "schema.issues");
+    assert!(
+        summary.contains("embedding: Enter the key for the embedding model again"),
+        "{summary}"
+    );
     f.edit_json(cx, &dialog, |j| {
         j["fields"][3]["embed"]["model_config"]["api_key"] = json!("sk-new")
     });
@@ -737,6 +750,7 @@ async fn apply_sends_patch_body(cx: &mut TestAppContext) {
     let gets = f.backend.gets.lock().unwrap().len();
     let lists = *f.backend.lists.lock().unwrap();
     f.act(cx, |window, cx| window.click("schema.edit", cx));
+    assert!(f.submit_disabled(cx), "nothing changed yet");
     f.act(cx, |window, cx| window.click("schema.add_field", cx));
     f.act(cx, |window, cx| {
         fill(window, "schema.field.2.name", "pages", cx)
@@ -873,4 +887,63 @@ async fn edit_shortcut_opens_edit_from_the_list(cx: &mut TestAppContext) {
         assert_eq!(w.find("schema.name").value(), Some("books"));
         assert_eq!(w.find("schema.submit").label(), Some("Review changes…"));
     });
+    assert!(f.submit_disabled(cx), "nothing changed yet");
+}
+
+#[gpui_kit::test]
+async fn changed_field_with_a_masked_attribute_needs_it_again(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let mut c = books();
+    c.fields[0]
+        .attributes
+        .insert("x_options".into(), json!({"value": "secret-2"}));
+    let dialog = f.edit_of(cx, c.clone(), vec![c]);
+    assert!(!f.json(cx, &dialog).to_string().contains("secret-2"));
+    f.edit_json(cx, &dialog, |j| j["fields"][0]["facet"] = json!(true));
+    f.query(cx, |w| {
+        assert!(w.try_find("schema.field.0.secret").is_some())
+    });
+    assert!(f.submit_disabled(cx));
+}
+
+#[gpui_kit::test]
+async fn other_top_level_keys_are_fixed_too(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = f.edit_of(cx, books(), vec![books()]);
+    f.edit_json(cx, &dialog, |j| {
+        j["curation_sets"] = json!(["promos"]);
+        j["fields"][0]["facet"] = json!(true);
+    });
+    let summary = f.label_of(cx, "schema.issues");
+    assert!(
+        summary.contains("curation_sets cannot be changed after the collection is created."),
+        "{summary}"
+    );
+    assert!(f.submit_disabled(cx));
+}
+
+#[gpui_kit::test]
+async fn escape_in_review_goes_back(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = f.review_library_change(cx);
+    f.act(cx, |window, cx| window.press("escape", cx));
+    f.query(cx, |w| {
+        assert!(w.try_find("schema.review").is_none());
+        assert!(
+            w.try_find("schema.submit").is_some(),
+            "the dialog stays open"
+        );
+    });
+    let json = f.json(cx, &dialog);
+    assert!(
+        json["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["name"] == "pages")
+    );
+    // In the draft, Esc closes as before.
+    f.act(cx, |window, cx| window.press("escape", cx));
+    wait_for_element(cx, f.handle, "schema.submit".into(), false).await;
+    assert!(f.updates().is_empty());
 }
