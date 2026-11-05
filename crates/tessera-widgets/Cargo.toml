@@ -1,0 +1,19 @@
+[package]
+name = "tessera-widgets"
+description = "Reusable GPUI widgets for Tessera."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# tree-sitter enables JSON highlighting in the code editor (NF5 measured in the M2 plan).
+gpui-kit = { workspace = true, features = ["tree-sitter"] }
+rust-i18n.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support", "tree-sitter"] }
+
+[lints]
+workspace = true

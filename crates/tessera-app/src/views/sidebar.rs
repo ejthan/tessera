@@ -20,13 +20,14 @@ use tessera_core::profile::Profile;
 use uuid::Uuid;
 
 use super::connect_dialog::ConnectDialog;
+use super::env_badge;
 use super::import_dialog::ImportDialog;
-use super::{confirm, env_badge};
 use crate::actions::{
     ConnectSelected, DeleteConnection, DisconnectSelected, EditConnection, ExportProfiles,
     ImportProfiles, NewConnection, SIDEBAR_ENTRY, SIDEBAR_ENTRY_BUTTON, ToggleReopenLast,
 };
 use crate::state::AppState;
+use tessera_widgets::confirm;
 
 /// File name the export save dialog suggests.
 const EXPORT_NAME: &str = "tessera-profiles.json";

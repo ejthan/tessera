@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 tessera-client = { path = "crates/tessera-client" }
 tessera-core = { path = "crates/tessera-core" }
+tessera-widgets = { path = "crates/tessera-widgets" }
 
 anyhow = "=1.0.104"
 directories = "=6.0.0"
