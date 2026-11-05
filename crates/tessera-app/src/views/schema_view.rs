@@ -11,8 +11,9 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, ClipboardItem, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, Stateful, Styled as _, Task, Window, div, prelude::*, px,
+    App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, IntoElement,
+    ParentElement as _, Render, SharedString, Stateful, Styled as _, Task, Window, div, prelude::*,
+    px,
 };
 use rust_i18n::t;
 use serde_json::Value;
@@ -157,6 +158,15 @@ impl TableDelegate for Fields {
     }
 }
 
+/// The collection arrived, unmasked: it is not for display.
+pub struct SchemaLoaded(pub Collection);
+
+/// The collection failed to load; the full text.
+pub struct SchemaFailed(pub SharedString);
+
+impl EventEmitter<SchemaLoaded> for SchemaView {}
+impl EventEmitter<SchemaFailed> for SchemaView {}
+
 /// A loaded collection, masked once: the table and the JSON both come from it.
 struct Loaded {
     collection: Collection,
@@ -282,7 +292,11 @@ impl SchemaView {
                     .and_then(|c| mask(&c).map_err(|e| e.to_string()))
                 {
                     Ok(loaded) => view.show(loaded, window, cx),
-                    Err(e) => view.error = Some(e.into()),
+                    Err(e) => {
+                        let e = SharedString::from(e);
+                        view.error = Some(e.clone());
+                        cx.emit(SchemaFailed(e));
+                    }
                 }
                 cx.notify();
             })
@@ -302,6 +316,7 @@ impl SchemaView {
         });
         self.editor
             .update(cx, |e, cx| e.set_text(&loaded.json, window, cx));
+        cx.emit(SchemaLoaded(loaded.raw.clone()));
         self.loaded = Some(loaded);
     }
 

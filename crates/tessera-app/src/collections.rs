@@ -47,11 +47,11 @@ pub struct CollectionsBackendGlobal(pub Arc<dyn CollectionsBackend>);
 
 impl Global for CollectionsBackendGlobal {}
 
-struct TokioBackend(Handle);
+pub(crate) struct TokioBackend(pub(crate) Handle);
 
 impl TokioBackend {
     /// Runs `fut` on the runtime; the task is aborted when the returned future is dropped.
-    fn run<T: Send + 'static>(
+    pub(crate) fn run<T: Send + 'static>(
         &self,
         fut: impl Future<Output = T> + Send + 'static,
     ) -> BoxFuture<T> {

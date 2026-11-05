@@ -7,25 +7,28 @@ use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
+use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
-    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
-    prelude::*,
+    Action, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription,
+    Task, Window, div, prelude::*,
 };
 use rust_i18n::t;
 
 use super::collections_list::CollectionsList;
 use super::connect_dialog::ConnectDialog;
+use super::documents::DocumentsView;
 use super::import_dialog::ImportDialog;
 use super::overview::Overview;
-use super::schema_view::SchemaView;
+use super::schema_view::{SchemaFailed, SchemaLoaded, SchemaView};
 use super::sidebar::Sidebar;
 use super::{env_badge, unlock, welcome};
 use crate::actions::{
     COLLECTION, COLLECTIONS, CloneCollection, DeleteCollection, EditSchema, FocusSearch, LockAgain,
-    NewCollection, OVERVIEW, OpenCollectionRow, Refresh, ToggleFavorite, TogglePolling,
-    TruncateCollection,
+    NewCollection, OVERVIEW, OpenCollectionRow, Refresh, ShowDocuments, ShowSchema, ToggleFavorite,
+    TogglePolling, TruncateCollection,
 };
 use crate::connection::ConnectionState;
 use crate::poller::Poller;
@@ -296,17 +299,29 @@ impl Render for CollectionsPanel {
     }
 }
 
-/// A center tab with the schema of one collection.
+/// What a collection tab shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CollectionView {
+    /// The documents table.
+    #[default]
+    Documents,
+    /// The schema.
+    Schema,
+}
+
+/// A center tab with the documents and the schema of one collection.
 pub struct CollectionPanel {
     connection: Entity<ConnectionState>,
     name: String,
+    view: CollectionView,
+    documents: Entity<DocumentsView>,
     schema: Entity<SchemaView>,
     focus_handle: FocusHandle,
-    _subscription: Subscription,
+    _subscriptions: [Subscription; 3],
 }
 
 impl CollectionPanel {
-    /// The tab of collection `name` on `connection`; loads its schema.
+    /// The tab of collection `name` on `connection`; loads its schema, then its documents.
     pub fn new(
         connection: Entity<ConnectionState>,
         state: Entity<AppState>,
@@ -314,14 +329,37 @@ impl CollectionPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let documents = cx.new(|cx| {
+            DocumentsView::new(state.clone(), connection.clone(), name.clone(), window, cx)
+        });
+        let schema =
+            cx.new(|cx| SchemaView::new(state, connection.clone(), name.clone(), window, cx));
         Self {
-            _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
-            schema: cx
-                .new(|cx| SchemaView::new(state, connection.clone(), name.clone(), window, cx)),
+            _subscriptions: [
+                cx.observe(&connection, |_, _, cx| cx.notify()),
+                cx.subscribe_in(&schema, window, |this, _, SchemaLoaded(c), window, cx| {
+                    this.documents
+                        .update(cx, |d, cx| d.set_schema(c.clone(), window, cx));
+                }),
+                cx.subscribe(&schema, |this, _, SchemaFailed(e), cx| {
+                    this.documents
+                        .update(cx, |d, cx| d.schema_failed(e.clone(), cx));
+                }),
+            ],
+            view: CollectionView::Documents,
+            documents,
+            schema,
             connection,
             name,
             focus_handle: cx.focus_handle(),
         }
+    }
+
+    fn show(&mut self, view: CollectionView, window: &mut Window, cx: &mut Context<Self>) {
+        self.view = view;
+        // Focus left in the view going away would leave no key context behind.
+        self.focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 
     /// The connection this tab shows.
@@ -338,9 +376,29 @@ impl CollectionPanel {
     pub fn schema(&self) -> &Entity<SchemaView> {
         &self.schema
     }
+
+    /// The handle of the tab's own root, outside either view, for tests.
+    pub fn chrome_focus(&self) -> &FocusHandle {
+        &self.focus_handle
+    }
+
+    /// The documents view, for tests.
+    pub fn documents(&self) -> &Entity<DocumentsView> {
+        &self.documents
+    }
 }
 
-panel_basics!(CollectionPanel);
+impl EventEmitter<PanelEvent> for CollectionPanel {}
+
+impl Focusable for CollectionPanel {
+    /// The table on the documents view: its shortcuts work from the moment the tab shows.
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match self.view {
+            CollectionView::Documents => self.documents.read(cx).table().read(cx).focus_handle(cx),
+            CollectionView::Schema => self.focus_handle.clone(),
+        }
+    }
+}
 
 impl BasePanel for CollectionPanel {
     fn panel_name(&self) -> &'static str {
@@ -370,36 +428,99 @@ impl Panel for CollectionPanel {
     }
 }
 
+/// One entry of a collection tab's view switch, with its shortcut.
+fn view_tab(id: &'static str, label: SharedString, action: &dyn Action, window: &Window) -> Tab {
+    Tab::new()
+        .aria_label(label.clone())
+        .child(
+            div()
+                .id(id)
+                .test_support()
+                .aria_label(label.clone())
+                .child(label),
+        )
+        .suffix(div().children(Kbd::binding_for_action(action, Some(COLLECTION), window)))
+}
+
 impl Render for CollectionPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let edge = env_badge::color(self.connection.read(cx).profile.color, cx.theme());
+        let on_schema = self.view == CollectionView::Schema;
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(COLLECTION)
             .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
                 this.connection.update(cx, |c, cx| c.lock(cx));
             }))
+            .on_action(cx.listener(|this, _: &ShowDocuments, window, cx| {
+                this.show(CollectionView::Documents, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowSchema, window, cx| {
+                this.show(CollectionView::Schema, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &Refresh, window, cx| {
-                this.schema.update(cx, |s, cx| s.reload(true, window, cx));
+                // Without a schema the documents wait for it, so it is what can be retried.
+                if this.view == CollectionView::Documents && this.documents.read(cx).has_schema() {
+                    this.documents.update(cx, |d, cx| d.reload(cx));
+                } else {
+                    this.schema.update(cx, |s, cx| s.reload(true, window, cx));
+                }
             }))
-            .on_action(cx.listener(|this, _: &CloneCollection, window, cx| {
-                this.schema
-                    .update(cx, |s, cx| s.clone_collection(window, cx));
-            }))
-            .on_action(cx.listener(|this, _: &EditSchema, window, cx| {
-                this.schema.update(cx, |s, cx| s.edit_schema(window, cx));
-            }))
-            .on_action(cx.listener(|this, _: &TruncateCollection, window, cx| {
-                this.schema.update(cx, |s, cx| s.truncate(window, cx));
-            }))
-            .on_action(cx.listener(|this, _: &DeleteCollection, window, cx| {
-                this.schema.update(cx, |s, cx| s.delete(window, cx));
-            }))
+            // Only on the schema view: focus outside the documents view's key context, on
+            // the tab bar say, must not reach a dialog the user cannot see the reason for.
+            .when(on_schema, |el| {
+                el.on_action(cx.listener(|this, _: &CloneCollection, window, cx| {
+                    this.schema
+                        .update(cx, |s, cx| s.clone_collection(window, cx));
+                }))
+                .on_action(cx.listener(|this, _: &EditSchema, window, cx| {
+                    this.schema.update(cx, |s, cx| s.edit_schema(window, cx));
+                }))
+                .on_action(cx.listener(|this, _: &TruncateCollection, window, cx| {
+                    this.schema.update(cx, |s, cx| s.truncate(window, cx));
+                }))
+                .on_action(cx.listener(
+                    |this, _: &DeleteCollection, window, cx| {
+                        this.schema.update(cx, |s, cx| s.delete(window, cx));
+                    },
+                ))
+            })
             .size_full()
             .border_t_2()
             .border_color(edge)
             .children(unlock::banner(&self.connection, COLLECTION, window, cx))
-            .child(self.schema.clone())
+            .child(
+                TabBar::new("collection.views")
+                    .underline()
+                    .selected_index(usize::from(on_schema))
+                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                        let view = if *ix == 0 {
+                            CollectionView::Documents
+                        } else {
+                            CollectionView::Schema
+                        };
+                        this.show(view, window, cx);
+                    }))
+                    .child(view_tab(
+                        "collection.view.documents",
+                        t!("documents.view").to_string().into(),
+                        &ShowDocuments,
+                        window,
+                    ))
+                    .child(view_tab(
+                        "collection.view.schema",
+                        t!("documents.schema_view").to_string().into(),
+                        &ShowSchema,
+                        window,
+                    )),
+            )
+            .child(div().flex_1().min_h_0().map(|el| {
+                if on_schema {
+                    el.child(self.schema.clone())
+                } else {
+                    el.child(self.documents.clone())
+                }
+            }))
     }
 }
 

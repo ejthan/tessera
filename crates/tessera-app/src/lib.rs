@@ -5,6 +5,7 @@
 pub mod actions;
 pub mod collections;
 pub mod connection;
+pub mod documents;
 pub mod i18n;
 pub mod poller;
 pub mod runtime;
@@ -98,6 +99,9 @@ pub fn run(launch: Launch) -> Result<(), String> {
         cx.set_global(collections::CollectionsBackendGlobal(
             collections::tokio_backend(handle.clone()),
         ));
+        cx.set_global(documents::DocumentsBackendGlobal(documents::tokio_backend(
+            handle.clone(),
+        )));
         cx.set_global(runtime::Tokio(handle));
         gpui_kit::init(cx);
         i18n::init();

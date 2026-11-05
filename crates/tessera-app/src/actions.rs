@@ -37,9 +37,15 @@ gpui_kit::actions!(
         AddField,
         SubmitSchema,
         TruncateCollection,
-        DeleteCollection
+        DeleteCollection,
+        ShowDocuments,
+        ShowSchema,
+        SortByColumn
     ]
 );
+
+#[cfg(feature = "frame-overlay")]
+gpui_kit::actions!(tessera, [ToggleFrameOverlay]);
 
 /// Key context of a sidebar entry.
 pub const SIDEBAR_ENTRY: &str = "SidebarEntry";
@@ -53,6 +59,10 @@ pub const OVERVIEW: &str = "Overview";
 pub const COLLECTIONS: &str = "Collections";
 /// Key context of a collection tab.
 pub const COLLECTION: &str = "Collection";
+/// Key context of the documents view inside a collection tab.
+pub const DOCUMENTS: &str = "Documents";
+/// Key context of the documents table.
+pub const DOCUMENTS_TABLE: &str = "Documents > DataTable";
 /// Key context of the collections table; Enter opens the selected row only there, so a
 /// focused header keeps Enter for sorting.
 pub const COLLECTIONS_TABLE: &str = "Collections > DataTable";
@@ -148,6 +158,14 @@ const TRUNCATE: &str = "cmd-shift-backspace";
 #[cfg(not(target_os = "macos"))]
 const TRUNCATE: &str = "ctrl-shift-backspace";
 #[cfg(target_os = "macos")]
+const SORT: &str = "cmd-shift-s";
+#[cfg(not(target_os = "macos"))]
+const SORT: &str = "ctrl-shift-s";
+#[cfg(all(feature = "frame-overlay", target_os = "macos"))]
+const FRAME_OVERLAY: &str = "cmd-alt-f";
+#[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
+const FRAME_OVERLAY: &str = "ctrl-alt-f";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
@@ -196,11 +214,22 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(TRUNCATE, TruncateCollection, Some(COLLECTION)),
         KeyBinding::new(DELETE, DeleteCollection, Some(COLLECTIONS)),
         KeyBinding::new(DELETE, DeleteCollection, Some(COLLECTION)),
+        // The same chords as the schema dialog, which is outside COLLECTION.
+        KeyBinding::new(SHOW_FORM, ShowDocuments, Some(COLLECTION)),
+        KeyBinding::new(SHOW_JSON, ShowSchema, Some(COLLECTION)),
+        KeyBinding::new(SORT, SortByColumn, Some(DOCUMENTS)),
+        // Schema actions must not fire from the documents view, where they are not shown.
+        KeyBinding::new(EDIT, NoAction, Some(DOCUMENTS)),
+        KeyBinding::new(CLONE, NoAction, Some(DOCUMENTS)),
+        KeyBinding::new(TRUNCATE, NoAction, Some(DOCUMENTS)),
+        KeyBinding::new(DELETE, NoAction, Some(DOCUMENTS)),
         KeyBinding::new(SHOW_FORM, ShowForm, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SHOW_JSON, ShowJson, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SAVE, SubmitSchema, Some(SCHEMA_DIALOG)),
         // Deeper than the dialog, so in the last row ⌘↩ adds a field instead of creating.
         KeyBinding::new(SAVE, AddField, Some(SCHEMA_LAST_FIELD)),
     ]);
+    #[cfg(feature = "frame-overlay")]
+    cx.bind_keys([KeyBinding::new(FRAME_OVERLAY, ToggleFrameOverlay, None)]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }
