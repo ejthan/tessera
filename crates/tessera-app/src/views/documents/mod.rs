@@ -5,6 +5,7 @@
 pub mod columns;
 pub mod copy;
 pub mod inspector;
+pub mod review;
 pub mod table;
 
 use std::rc::Rc;
@@ -27,16 +28,18 @@ use gpui_kit::{
 use rust_i18n::t;
 use tessera_client::Collection;
 use tessera_core::documents::columns::{columns_from_schema, exclude_fields, merge_keys};
-use tessera_widgets::{FacetFetch, FilterField, FilterInput, FilterInputEvent};
+use tessera_core::documents::template::template;
+use tessera_widgets::{FacetFetch, FilterField, FilterInput, FilterInputEvent, confirm};
 use uuid::Uuid;
 
-use self::inspector::{GoToResult, Inspector};
+use self::inspector::{DocumentSaved, GoToResult, Inspector};
 use self::table::DocRows;
 use super::overview::grouped;
 use super::schema_view::COPIED_FOR;
 use crate::actions::{
     ClearFilter, CopyCell, CopyRowJson, DOCUMENTS, FocusSearch, GoToId, NarrowerColumn,
-    OpenDocument, SortByColumn, ToggleColumns, ToggleInspector, TogglePinColumn, WiderColumn,
+    NewDocument, OpenDocument, SortByColumn, ToggleColumns, ToggleInspector, TogglePinColumn,
+    WiderColumn,
 };
 use crate::connection::{CollectionChanged, ConnectionState};
 use crate::documents::DocumentsBackendGlobal;
@@ -108,7 +111,7 @@ pub struct DocumentsView {
     context_menu: Option<(Entity<PopupMenu>, Point<Pixels>, Subscription)>,
     connection: Entity<ConnectionState>,
     focus_handle: FocusHandle,
-    _subscriptions: [Subscription; 6],
+    _subscriptions: [Subscription; 7],
 }
 
 impl DocumentsView {
@@ -197,6 +200,7 @@ impl DocumentsView {
                     }
                     cx.notify();
                 }),
+                cx.subscribe(&inspector, |this, _, _: &DocumentSaved, cx| this.reload(cx)),
                 cx.subscribe(&connection, |this, _, CollectionChanged(name), cx| {
                     if *name == this.name {
                         this.reload(cx);
@@ -233,6 +237,8 @@ impl DocumentsView {
         let first = !std::mem::replace(&mut self.has_schema, true);
         let fields = filter_fields(&collection);
         self.filter.update(cx, |f, cx| f.set_fields(fields, cx));
+        self.inspector
+            .update(cx, |i, cx| i.set_schema(collection.clone(), cx));
         self.table.update(cx, |t, cx| {
             let rows = t.delegate_mut();
             let exclude = exclude_fields(&collection);
@@ -515,6 +521,12 @@ impl DocumentsView {
             self.open_selected(window, cx);
             return cx.notify();
         }
+        self.after_discard(window, cx, |this, window, cx| {
+            this.close_inspector(window, cx)
+        });
+    }
+
+    fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.follow_task = None;
         self.inspector_open = false;
         // The closed panel is not drawn, and with it would go every shortcut of this view.
@@ -522,6 +534,48 @@ impl DocumentsView {
             self.table.read(cx).focus_handle(cx).focus(window, cx);
         }
         cx.notify();
+    }
+
+    /// Runs `then` now, or once the user agreed to drop the inspector's unsaved changes.
+    fn after_discard(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        if !self.inspector.read(cx).is_dirty(cx) {
+            return then(self, window, cx);
+        }
+        let view = cx.entity().downgrade();
+        confirm::open(
+            t!("documents.inspector.discard.title").to_string(),
+            t!("documents.inspector.discard.body").to_string(),
+            t!("documents.inspector.discard.confirm").to_string(),
+            move |window, cx| {
+                view.update(cx, |this, cx| {
+                    this.inspector.update(cx, |i, cx| i.revert(window, cx));
+                    then(this, window, cx);
+                })
+                .ok();
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Opens the inspector on a new document from the schema's template.
+    fn new_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.after_discard(window, cx, |this, window, cx| {
+            let Some(schema) = this.inspector.read(cx).schema() else {
+                return;
+            };
+            let document = template(schema);
+            this.follow_task = None;
+            this.inspector_open = true;
+            this.inspector
+                .update(cx, |i, cx| i.new_document(document, window, cx));
+            cx.notify();
+        });
     }
 
     /// Selects the cell and opens the copy menu at the pointer. The kit never shows the
@@ -562,8 +616,11 @@ impl DocumentsView {
     fn go_to(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.goto.read(cx).value().trim().to_string();
         if !id.is_empty() {
-            self.follow_task = None;
-            self.inspector.update(cx, |i, cx| i.go_to(id, window, cx));
+            self.after_discard(window, cx, move |this, window, cx| {
+                this.follow_task = None;
+                let id = id.clone();
+                this.inspector.update(cx, |i, cx| i.go_to(id, window, cx));
+            });
         }
     }
 
@@ -677,6 +734,18 @@ impl DocumentsView {
                     }),
             )
             .child(
+                Button::new("documents.new")
+                    .ghost()
+                    .small()
+                    .label(t!("documents.new").to_string())
+                    .children(Kbd::binding_for_action(
+                        &NewDocument,
+                        Some(DOCUMENTS),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.new_document(window, cx))),
+            )
+            .child(
                 Button::new("documents.toggle_inspector")
                     .ghost()
                     .small()
@@ -783,6 +852,9 @@ impl Render for DocumentsView {
             }))
             .on_action(
                 cx.listener(|this, _: &OpenDocument, window, cx| this.open_selected(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NewDocument, window, cx| this.new_document(window, cx)),
             )
             .on_action(cx.listener(|this, _: &GoToId, window, cx| this.focus_goto(window, cx)))
             .on_action(cx.listener(|this, _: &CopyCell, _, cx| copy::copy_cell(this, cx)))
