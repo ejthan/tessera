@@ -25,6 +25,14 @@ Tessera is a native Typesense desktop client in Rust with GPUI Kit. The product 
 4. No dead controls: navigation entries, panels and buttons appear in the milestone that makes them work.
 5. Every action is reachable by keyboard, and its shortcut is shown on the control.
 
+## Plant sandbox
+
+When you run inside the plant's Linux sandbox (`.plant/Dockerfile`), there is no Docker:
+
+- Live tests: `bash dev/plant-it.sh` starts `typesense-server` on port 18108 with key `xyz` and runs them. The cluster tests (`--test cluster`) cannot run there; they run nightly in CI.
+- Smoke start: `TESSERA_SMOKE=1 xvfb-run -a cargo run -p tessera-app`.
+- Evidence for the app: start it under `xvfb-run -a -s "-screen 0 1440x900x24"`, drive it with `xdotool`, take screenshots with `import -window root evidence/ACn.png` and record with `ffmpeg -f x11grab … evidence/ACn.webm`.
+
 ## Conventions
 
 - Every source file starts with `// SPDX-License-Identifier: GPL-3.0-or-later`.

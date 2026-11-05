@@ -1,0 +1,16 @@
+# Config for the plant (loopia-plant), which turns specs into reviewed PRs.
+# The sandbox image is .plant/Dockerfile; macOS, Windows, release size and smoke start stay in CI.
+verify:
+  commands:
+    - cargo fmt --check
+    - cargo clippy --all-targets --locked -- -D warnings
+    - cargo test --workspace --locked
+    - bash dev/plant-it.sh
+evidence:
+  kind: cli
+limits:
+  repair_rounds: 3
+  # A cold GPUI build per run plus waiting for the full CI in the merge step.
+  step_timeout_minutes: 90
+merge:
+  policy: needs-human
