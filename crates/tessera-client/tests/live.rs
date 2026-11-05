@@ -274,9 +274,37 @@ async fn live_collection_lifecycle() {
         .update_collection(name, &json!({"fields":[{"name":"n","type":"int32"}]}))
         .await;
     let changes = client.schema_changes().await;
+    // Metadata and synonym sets, then removing the metadata with an empty object.
+    let synonyms = "tessera_it_lifecycle_synonyms";
+    admin(
+        reqwest::Method::PUT,
+        &format!("synonym_sets/{synonyms}"),
+        Some(r#"{"items":[{"id":"s1","synonyms":["a","b"]}]}"#),
+    )
+    .await;
+    let with_meta = client
+        .update_collection(
+            name,
+            &json!({"metadata":{"owner":"it"},"synonym_sets":[synonyms]}),
+        )
+        .await;
+    let meta = client.collection(name).await;
+    let cleared = client
+        .update_collection(name, &json!({"metadata":{}}))
+        .await;
+    let no_meta = client.collection(name).await;
+    let unknown_set = client
+        .update_collection(name, &json!({"synonym_sets":["tessera_it_no_such_set"]}))
+        .await;
     let truncated = client.truncate_collection(name).await;
     let deleted = client.delete_collection(name).await;
     let gone = client.collection(name).await;
+    admin(
+        reqwest::Method::DELETE,
+        &format!("synonym_sets/{synonyms}"),
+        None,
+    )
+    .await;
     // Everything ran; now assert.
     assert_eq!(created.unwrap().name, name);
     match duplicate {
@@ -306,6 +334,27 @@ async fn live_collection_lifecycle() {
         other => panic!("change without drop: {other:?}"),
     }
     assert!(changes.unwrap().is_empty());
+    with_meta.unwrap();
+    let meta = meta.unwrap();
+    assert_eq!(
+        meta.metadata,
+        Some(json!({"owner":"it"}).as_object().unwrap().clone())
+    );
+    assert_eq!(meta.synonym_sets, [synonyms]);
+    cleared.unwrap();
+    let no_meta = no_meta.unwrap();
+    assert_eq!(no_meta.metadata, None, "{{}} removes the metadata");
+    assert_eq!(no_meta.synonym_sets, [synonyms], "untouched");
+    // 30.2 answers 404, not 400, for a synonym set that does not exist.
+    match unknown_set {
+        Err(e @ Error::Http { status: 404, .. }) => {
+            assert!(
+                e.typesense_message().unwrap().contains("not found"),
+                "{e:?}"
+            );
+        }
+        other => panic!("unknown synonym set: {other:?}"),
+    }
     assert_eq!(truncated.unwrap(), 1);
     deleted.unwrap();
     assert!(matches!(gone, Err(Error::Http { status: 404, .. })));
