@@ -34,6 +34,7 @@ pub const FAILOVER_METHODS: [Method; 4] = [Method::GET, Method::HEAD, Method::PU
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Timeout for schema changes, deletes and truncates, which answer only when the server is done.
+/// Such a request is not retried after a timeout, only after a network error.
 pub const LONG_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// How a [`Client`] talks to its nodes.
@@ -493,7 +494,8 @@ impl Client {
     }
 
     /// Sends to node `pin`, or to the active node with failover (spec §5.2): after a network
-    /// error or timeout, a [`FAILOVER_METHODS`] request makes up to `retries` more attempts,
+    /// error or timeout (a network error only when `timeout` overrides the profile's, as for
+    /// the [`LONG_TIMEOUT`] calls), a [`FAILOVER_METHODS`] request makes up to `retries` more attempts,
     /// cycling through the nodes in list order from the active one (a single node retries
     /// itself), waiting [`backoff`] before each. The node that answers becomes the active
     /// node, unless someone changed the active node meanwhile.
@@ -523,7 +525,13 @@ impl Client {
                 .send(node, method.clone(), path, query, body, timeout)
                 .await
             {
-                Err(Error::Network(_) | Error::Timeout) if attempt + 1 < attempts => {
+                // A long operation (`timeout` set) that timed out is not retried: the server
+                // may still be applying it, and another attempt would wait that long again.
+                Err(Error::Network(_)) if attempt + 1 < attempts => {
+                    tokio::time::sleep(backoff(attempt)).await;
+                    attempt += 1;
+                }
+                Err(Error::Timeout) if timeout.is_none() && attempt + 1 < attempts => {
                     tokio::time::sleep(backoff(attempt)).await;
                     attempt += 1;
                 }
@@ -669,6 +677,31 @@ mod tests {
         let shown = format!("{body:?}");
         assert!(!shown.contains("sk-secret-body"), "{shown}");
         assert!(shown.contains("original_len: 26"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn long_request_timeout_is_not_retried() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(500)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = Client::new(
+            &[&server.uri()],
+            SecretString::from("k"),
+            ClientOptions::default(),
+        )
+        .unwrap();
+        // A per-request timeout marks a long operation: the server may still be working on
+        // it, so a retry would only wait again (or repeat the write).
+        let long = Some(Duration::from_millis(100));
+        let result = client
+            .call(None, Method::DELETE, "collections/c", None, None, long)
+            .await;
+        assert!(matches!(result, Err(Error::Timeout)), "{result:?}");
     }
 
     #[test]
