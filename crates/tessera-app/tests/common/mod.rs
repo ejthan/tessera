@@ -434,13 +434,14 @@ impl FakeDocs {
         let start = u64::from(query.page - 1) * u64::from(query.per_page);
         let end = (start + u64::from(query.per_page)).min(found);
         let descending = query.sort_by.as_ref().is_some_and(|s| s.ends_with(":desc"));
+        let excluded = |key: &String| query.exclude_fields.as_ref() == Some(key);
         let docs = (start..end)
             .map(|row| {
                 let n = if descending { found - 1 - row } else { row };
                 let mut doc = serde_json::json!({
                     "id": n.to_string(), "title": format!("t{n}"), "price": n,
                 });
-                if let Some(key) = &extra {
+                if let Some(key) = extra.as_ref().filter(|k| !excluded(k)) {
                     doc[key] = "x".into();
                 }
                 doc.as_object().unwrap().clone()

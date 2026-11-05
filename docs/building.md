@@ -34,7 +34,7 @@ cargo run -p tessera-app
 
 `TYPESENSE_API_KEY` prefills the key in the connect dialog. `RUST_LOG=debug` shows one log line per request (never the key).
 
-`cargo run -p tessera-app --features frame-overlay` adds a frame-time overlay, cycled with ⌘⌥F / Ctrl+Alt+F.
+`cargo run -p tessera-app --features frame-overlay` adds a frame-time overlay, cycled with ⌘⌥F / Ctrl+Alt+F in the documents view.
 
 ## Local Typesense
 

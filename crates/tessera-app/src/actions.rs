@@ -230,6 +230,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SAVE, AddField, Some(SCHEMA_LAST_FIELD)),
     ]);
     #[cfg(feature = "frame-overlay")]
-    cx.bind_keys([KeyBinding::new(FRAME_OVERLAY, ToggleFrameOverlay, None)]);
+    cx.bind_keys([KeyBinding::new(
+        FRAME_OVERLAY,
+        ToggleFrameOverlay,
+        Some(DOCUMENTS),
+    )]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }

@@ -61,6 +61,8 @@ pub struct DocRows {
     pub error: Option<SharedString>,
     /// No answer has arrived yet.
     pub first_load: bool,
+    /// A page has loaded, so the figures mean something.
+    pub answered: bool,
     /// A new filter or sort failed; the old rows stay.
     pub query_error: Option<SharedString>,
     /// The cached pages belong to the previous query.
@@ -87,6 +89,7 @@ impl DocRows {
             exclude: None,
             error: None,
             first_load: true,
+            answered: false,
             query_error: None,
             replacing: false,
             generation: 0,
@@ -180,6 +183,7 @@ impl DocRows {
         self.first_load = false;
         match result {
             Ok(answer) => {
+                self.answered = true;
                 let replaced = std::mem::take(&mut self.replacing);
                 if replaced {
                     self.pages.clear();

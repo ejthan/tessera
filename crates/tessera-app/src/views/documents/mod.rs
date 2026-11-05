@@ -74,23 +74,39 @@ impl DocumentsView {
         }
     }
 
-    /// Takes the columns from `collection`; the first call loads page 1, because the table
-    /// reports no visible rows while it has none.
+    /// Takes the columns from `collection`. Loads when the query changes with it, and on the
+    /// first call, because the table reports no visible rows while it has none.
     pub fn set_schema(&mut self, collection: Collection, _: &mut Window, cx: &mut Context<Self>) {
         let first = !std::mem::replace(&mut self.has_schema, true);
         self.table.update(cx, |t, cx| {
             let rows = t.delegate_mut();
+            let exclude = exclude_fields(&collection);
+            // A vector field appears in pages asked for before this schema arrived.
+            let excluded = |key: &str| {
+                exclude
+                    .as_deref()
+                    .is_some_and(|fields| fields.split(',').any(|f| f == key))
+            };
             let seen: Vec<String> = rows
                 .columns
                 .iter()
-                .filter(|c| !c.in_schema)
+                .filter(|c| !c.in_schema && !excluded(&c.key))
                 .map(|c| c.key.clone())
                 .collect();
             rows.columns = columns_from_schema(&collection);
             merge_keys(&mut rows.columns, &seen);
-            rows.exclude = exclude_fields(&collection);
+            let exclude_changed = rows.exclude != exclude;
+            rows.exclude = exclude;
+            // Left in place, the server would refuse every query, with no column to clear it.
+            let sort_gone = rows
+                .sort
+                .as_ref()
+                .is_some_and(|(key, _)| !rows.columns.iter().any(|c| c.key == *key && c.sortable));
+            if sort_gone {
+                rows.sort = None;
+            }
             t.refresh(cx);
-            if first {
+            if first || sort_gone || exclude_changed {
                 t.delegate_mut().requery(cx);
             }
             cx.notify();
@@ -160,7 +176,7 @@ impl DocumentsView {
 
     fn status(&self, window: &Window, cx: &App) -> Option<impl IntoElement + use<>> {
         let rows = self.table.read(cx).delegate();
-        if rows.first_load || !self.has_schema {
+        if !rows.answered {
             return None;
         }
         let mut parts = vec![

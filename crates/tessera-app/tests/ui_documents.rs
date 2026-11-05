@@ -38,10 +38,21 @@ struct Fixture {
     state: Entity<AppState>,
     conn: Entity<ConnectionState>,
     docs: Arc<FakeDocs>,
+    backend: Arc<FakeData>,
     _rt: tokio::runtime::Runtime,
 }
 
 impl Fixture {
+    /// The schema changed on the server, as a schema edit reports it.
+    fn change_schema(&self, cx: &mut TestAppContext, collection: Collection) {
+        *self.backend.data.lock().unwrap() = Some((vec![collection], vec![]));
+        cx.update(|cx| {
+            self.conn
+                .update(cx, |c, cx| c.collection_changed("products".into(), cx))
+        });
+        self.settle(cx);
+    }
+
     fn panel(&self, cx: &mut TestAppContext) -> Entity<CollectionPanel> {
         collection_panel(cx, self.handle, "products")
     }
@@ -105,7 +116,7 @@ async fn open_found(cx: &mut TestAppContext, collection: Collection, found: u64)
 
 async fn open_tab(cx: &mut TestAppContext, collection: Collection, docs: Arc<FakeDocs>) -> Fixture {
     let name = collection.name.clone();
-    fake_backend(cx, Some((vec![collection], vec![])));
+    let backend = fake_backend(cx, Some((vec![collection], vec![])));
     let profile = tessera_core::profile::Profile::new("test", vec![node()]);
     let profile_id = profile.id;
     let (handle, state, rt) = {
@@ -141,6 +152,7 @@ async fn open_tab(cx: &mut TestAppContext, collection: Collection, docs: Arc<Fak
         state,
         conn,
         docs,
+        backend,
         _rt: rt,
     };
     f.settle(cx);
@@ -369,6 +381,7 @@ async fn failed_first_page_shows_the_error_instead_of_the_empty_state(cx: &mut T
     f.act(cx, |window, _| {
         assert!(label(window, "documents.error").contains("Not Ready or Lagging"));
         assert!(window.try_find("documents.empty").is_none());
+        assert!(window.try_find("documents.status").is_none());
     });
 }
 
@@ -406,6 +419,65 @@ async fn collection_changed_reloads(cx: &mut TestAppContext) {
     f.act(cx, |window, _| {
         assert!(label(window, "documents.status").starts_with("3 of 3"));
     });
+}
+
+#[gpui_kit::test]
+async fn dropping_the_sorted_field_clears_the_sort(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    f.sort_header(cx, 2);
+    assert_eq!(f.docs.last_sort().as_deref(), Some("price:desc"));
+    f.change_schema(cx, products(json!([{"name": "title", "type": "string"}])));
+    assert_eq!(f.docs.last_sort(), None);
+    f.act(cx, |window, _| {
+        assert!(!label(window, "documents.status").contains("sorted"));
+    });
+    assert_eq!(f.cell(cx, "documents.cell.0.title").unwrap(), "t0");
+}
+
+#[gpui_kit::test]
+async fn field_no_longer_sortable_clears_the_sort(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    f.sort_header(cx, 2);
+    f.change_schema(
+        cx,
+        products(json!([
+            {"name": "title", "type": "string"},
+            {"name": "price", "type": "float", "sort": false},
+        ])),
+    );
+    assert_eq!(f.docs.last_sort(), None);
+}
+
+#[gpui_kit::test]
+async fn new_vector_field_is_excluded_and_gets_no_column(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    // The reload of `CollectionChanged` answers before the new schema arrives.
+    *f.docs.extra_key.lock().unwrap() = Some("embedding".into());
+    f.change_schema(
+        cx,
+        products(json!([
+            {"name": "title", "type": "string"},
+            {"name": "price", "type": "float", "sort": true},
+            {"name": "embedding", "type": "float[]", "num_dim": 4},
+        ])),
+    );
+    let last = f.docs.pages.lock().unwrap().last().unwrap().clone();
+    assert_eq!(last.exclude_fields.as_deref(), Some("embedding"));
+    assert!(f.cell(cx, "documents.cell.0.embedding").is_none());
+    let table = f.table(cx);
+    let keys = cx.update(|cx| {
+        let columns = &table.read(cx).delegate().columns;
+        columns.iter().map(|c| c.key.clone()).collect::<Vec<_>>()
+    });
+    assert_eq!(keys, ["id", "title", "price"]);
+}
+
+#[gpui_kit::test]
+async fn unchanged_schema_does_not_reload_twice(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let asked = f.docs.page_numbers().len();
+    f.change_schema(cx, plain_schema());
+    assert_eq!(f.docs.page_numbers().len(), asked + 1);
 }
 
 #[gpui_kit::test]
