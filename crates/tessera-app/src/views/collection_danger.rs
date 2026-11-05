@@ -215,7 +215,12 @@ fn open(
                     // Already gone is what the user wanted; DELETE is retried on another node
                     // after a network error, so the retry can find it deleted.
                     Err(Error::Http { status: 404, .. }) if kind == Kind::Delete => {}
-                    Err(e) => return Err(error_text(&e, &profile).into()),
+                    Err(e) => {
+                        // It may have landed (a timeout) and the user may have stopped
+                        // waiting: show what the server has now, keeping the old list meanwhile.
+                        connection.update(cx, |c, cx| c.load_collection_list(cx));
+                        return Err(error_text(&e, &profile).into());
+                    }
                     Ok(()) => {}
                 }
                 connection.update(cx, |c, cx| match kind {

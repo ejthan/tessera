@@ -193,6 +193,9 @@ pub struct FakeData {
     pub deletes: Mutex<Vec<String>>,
     /// `truncate` and `delete` fail with this status and Typesense message.
     pub danger_error: Mutex<Option<(u16, String)>>,
+    /// When set, the next `truncate` or `delete` answers only once the sender fires or is
+    /// dropped; its effect on `data` happens then.
+    pub danger_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// What `schema_changes` answers.
     pub schema_changes: Mutex<Vec<SchemaChange>>,
     /// Number of `schema_changes` calls.
@@ -204,6 +207,13 @@ impl FakeData {
     pub fn hold_update(&self) -> tokio::sync::oneshot::Sender<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         *self.update_gate.lock().unwrap() = Some(rx);
+        tx
+    }
+
+    /// Holds the next `truncate` or `delete` until the returned sender fires or is dropped.
+    pub fn hold_danger(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.danger_gate.lock().unwrap() = Some(rx);
         tx
     }
 }
@@ -334,12 +344,19 @@ impl CollectionsBackend for FakeBackend {
         name: String,
     ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
         self.0.deletes.lock().unwrap().push(name.clone());
-        let answer = self.danger_answer().inspect(|()| {
-            if let Some((all, _)) = self.0.data.lock().unwrap().as_mut() {
-                all.retain(|c| c.name != name);
+        let answer = self.danger_answer();
+        let gate = self.0.danger_gate.lock().unwrap().take();
+        let data = self.0.clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.await.ok();
             }
-        });
-        Box::pin(async move { answer })
+            answer.inspect(|()| {
+                if let Some((all, _)) = data.data.lock().unwrap().as_mut() {
+                    all.retain(|c| c.name != name);
+                }
+            })
+        })
     }
 
     fn schema_changes(

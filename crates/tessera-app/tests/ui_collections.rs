@@ -736,3 +736,43 @@ async fn alias_failure_is_a_warning_in_the_delete_dialog(cx: &mut TestAppContext
         assert!(window.try_find("danger.consequence.2").is_none());
     });
 }
+
+/// Starts a delete of `books` that the backend holds, then stops waiting.
+async fn stop_waiting_on_delete(
+    cx: &mut TestAppContext,
+    f: &Fixture,
+) -> tokio::sync::oneshot::Sender<()> {
+    let release = f.backend.hold_danger();
+    f.row_shortcut(cx, "books", DELETE).await;
+    f.confirm(cx, "books").await;
+    wait_for_element(cx, f.handle, "danger.stop_waiting".into(), true).await;
+    act(cx, f.handle, |window, cx| {
+        window.click("danger.stop_waiting".to_string(), cx);
+    });
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    release
+}
+
+#[gpui_kit::test]
+async fn stop_waiting_on_delete_reloads_the_list_when_done(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    let release = stop_waiting_on_delete(cx, &f).await;
+    assert!(f.shown(cx, "collections.row.books"), "still running");
+    release.send(()).unwrap();
+    wait_for_element(cx, f.handle, "collections.row.books".into(), false).await;
+    assert!(f.shown(cx, "collections.row.authors"));
+}
+
+#[gpui_kit::test]
+async fn stop_waiting_on_a_failing_delete_still_reloads(cx: &mut TestAppContext) {
+    let f = connected(cx, Some(data())).await;
+    f.open_collections(cx).await;
+    *f.backend.danger_error.lock().unwrap() = Some((500, "disk on fire".into()));
+    let release = stop_waiting_on_delete(cx, &f).await;
+    let lists = *f.backend.lists.lock().unwrap();
+    release.send(()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(*f.backend.lists.lock().unwrap(), lists + 1);
+    assert!(!f.shown(cx, "danger.error"));
+}
