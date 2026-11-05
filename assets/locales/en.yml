@@ -374,3 +374,4 @@ danger.delete.aliases_unchecked: "The aliases could not be loaded, so aliases th
 danger.stop_waiting: "Stop waiting"
 danger.stop_note: "Stop waiting closes this dialog. The server keeps going, and Tessera reloads the list when it is done."
 connect.error.long_timeout: "%{host} did not finish within %{minutes} minutes. The server may still be applying the change; reload to see its current state."
+collections.edit_error: "Could not load %{name} to edit its schema: %{detail}"

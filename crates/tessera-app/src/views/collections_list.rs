@@ -27,8 +27,8 @@ use crate::actions::{
     COLLECTIONS, COLLECTIONS_HEADER, CloneCollection, DeleteCollection, EditSchema, FocusSearch,
     NewCollection, OpenCollectionRow, Refresh, ToggleFavorite, TruncateCollection,
 };
-use crate::collections::aliases_of;
-use crate::connection::ConnectionState;
+use crate::collections::{CollectionsBackendGlobal, aliases_of};
+use crate::connection::{ConnectionState, error_text};
 use crate::state::AppState;
 
 /// Where the empty state points to.
@@ -447,6 +447,9 @@ pub struct CollectionsList {
     /// Why the last favorite save failed, shown under the toolbar.
     favorite_error: Option<SharedString>,
     save_task: Option<Task<()>>,
+    /// Why the schema for the edit dialog could not be loaded, shown under the toolbar.
+    edit_error: Option<SharedString>,
+    edit_task: Option<Task<()>>,
     /// What the rows were built from.
     loaded: Option<(Option<Instant>, Vec<String>)>,
     _subscriptions: Vec<Subscription>,
@@ -523,6 +526,8 @@ impl CollectionsList {
             selected: None,
             favorite_error: None,
             save_task: None,
+            edit_error: None,
+            edit_task: None,
             loaded: None,
             _subscriptions: subscriptions,
         };
@@ -633,17 +638,41 @@ impl CollectionsList {
             .cloned()
     }
 
-    /// Opens the edit dialog for the selected collection; the dialog masks it.
+    /// Loads the selected collection again and opens the edit dialog for it; the dialog
+    /// masks it. A failed load shows under the toolbar: a diff against a stale schema could
+    /// send the wrong change.
     pub fn edit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(collection) = self.selected_collection(cx) {
-            SchemaDialog::open_edit(
-                self.state.clone(),
-                self.connection.clone(),
-                collection,
-                window,
-                cx,
-            );
-        }
+        let Some(name) = self.visible_selected(cx) else {
+            return;
+        };
+        let conn = self.connection.read(cx);
+        let Some(client) = conn.connected.as_ref().map(|c| c.client.clone()) else {
+            return;
+        };
+        let profile = conn.profile.clone();
+        let load = cx
+            .global::<CollectionsBackendGlobal>()
+            .0
+            .get(client, name.clone());
+        self.edit_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = load.await;
+            this.update_in(cx, |view, window, cx| {
+                match result {
+                    Ok(collection) => {
+                        view.edit_error = None;
+                        let (state, conn) = (view.state.clone(), view.connection.clone());
+                        SchemaDialog::open_edit(state, conn, collection, window, cx);
+                    }
+                    Err(e) => {
+                        let detail = error_text(&e, &profile);
+                        let text = t!("collections.edit_error", name = name, detail = detail);
+                        view.edit_error = Some(text.to_string().into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Opens the clone dialog for the selected collection.
@@ -843,6 +872,11 @@ impl Render for CollectionsList {
                 self.favorite_error
                     .clone()
                     .map(|e| notice("collections.favorite_error", e, danger)),
+            )
+            .children(
+                self.edit_error
+                    .clone()
+                    .map(|e| notice("collections.edit_error", e, danger)),
             )
             .children(error.map(|e| notice("collections.error", e, danger)))
             .children(aliases_error.map(|e| notice("collections.aliases_error", e, danger)))

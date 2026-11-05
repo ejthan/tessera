@@ -921,6 +921,67 @@ async fn edit_shortcut_opens_edit_from_the_list(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn edit_from_the_list_starts_from_the_fresh_schema(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    f.act(cx, |window, cx| {
+        window.click(format!("sidebar.{}.collections", f.profile.id), cx)
+    });
+    wait_for_element(cx, f.handle, "collections.row.books".into(), true).await;
+    // Someone else adds a field after the list loaded.
+    let mut fresh = books();
+    fresh.fields.push(Field {
+        name: "added_elsewhere".into(),
+        r#type: "string".into(),
+        attributes: Default::default(),
+    });
+    *f.backend.data.lock().unwrap() = Some((vec![fresh], Vec::new()));
+    let gets = f.backend.gets.lock().unwrap().len();
+    f.act(cx, |window, cx| {
+        window.click("collections.row.books", cx);
+        window.press(EDIT_SCHEMA, cx);
+    });
+    f.settle(cx);
+    assert_eq!(f.backend.gets.lock().unwrap()[gets..], ["books"]);
+    f.query(cx, |w| {
+        let names: Vec<String> = (0..10)
+            .filter_map(|i| w.try_find(format!("schema.field.{i}.name")))
+            .filter_map(|e| e.value().map(str::to_owned))
+            .collect();
+        assert!(names.iter().any(|n| n == "added_elsewhere"), "{names:?}");
+    });
+}
+
+#[gpui_kit::test]
+async fn edit_from_the_list_says_why_the_reload_failed(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    f.act(cx, |window, cx| {
+        window.click(format!("sidebar.{}.collections", f.profile.id), cx)
+    });
+    wait_for_element(cx, f.handle, "collections.row.books".into(), true).await;
+    *f.backend.data.lock().unwrap() = None;
+    f.act(cx, |window, cx| {
+        window.click("collections.row.books", cx);
+        window.press(EDIT_SCHEMA, cx);
+    });
+    f.settle(cx);
+    f.query(cx, |w| {
+        assert!(
+            w.try_find("schema.name").is_none(),
+            "no dialog from a stale schema"
+        );
+        let shown = w
+            .find("collections.edit_error")
+            .label()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            shown.contains("books") && shown.contains("localhost"),
+            "{shown}"
+        );
+    });
+}
+
+#[gpui_kit::test]
 async fn changed_field_with_a_masked_attribute_needs_it_again(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, false).await;
     let mut c = books();
