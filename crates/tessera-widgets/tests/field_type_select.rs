@@ -93,7 +93,7 @@ async fn picking_a_type_emits_and_set_does_not(cx: &mut TestAppContext) {
     .unwrap();
     cx.run_until_parked();
     assert_eq!(got.borrow().len(), 1, "one pick, one event");
-    assert_ne!(got.borrow()[0], FieldType::Bool);
+    assert_eq!(got.borrow()[0], FieldType::BoolArray); // the row after Bool
 }
 
 #[gpui_kit::test]

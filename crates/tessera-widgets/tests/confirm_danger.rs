@@ -31,24 +31,7 @@ fn open_with(
     result: Result<(), &'static str>,
 ) -> (WindowHandle<Root>, Rc<Cell<u32>>) {
     let ran = Rc::new(Cell::new(0));
-    let handle = cx.update(|cx| {
-        gpui_kit::init(cx);
-        gpui_kit::component::set_locale("en");
-        let bounds = Bounds {
-            origin: Point::default(),
-            size: size(px(700.), px(500.)),
-        };
-        let (window, _) = gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            cx,
-            |_, cx| cx.new(|_| Empty),
-        )
-        .unwrap();
-        window.downcast::<Root>().unwrap()
-    });
+    let handle = open_window(cx);
     let counter = ran.clone();
     cx.update_window(handle.into(), move |_, window, cx| {
         confirm_danger::open(
@@ -69,6 +52,27 @@ fn open_with(
     })
     .unwrap();
     (handle, ran)
+}
+
+fn open_window(cx: &mut TestAppContext) -> WindowHandle<Root> {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        gpui_kit::component::set_locale("en");
+        let bounds = Bounds {
+            origin: Point::default(),
+            size: size(px(700.), px(500.)),
+        };
+        let (window, _) = gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            cx,
+            |_, cx| cx.new(|_| Empty),
+        )
+        .unwrap();
+        window.downcast::<Root>().unwrap()
+    })
 }
 
 struct Empty;
@@ -251,4 +255,84 @@ async fn failure_stays_open_and_shows_the_text(cx: &mut TestAppContext) {
     })
     .unwrap();
     assert_eq!(ran.get(), 1);
+}
+
+struct Gate {
+    open: Cell<bool>,
+    waker: std::cell::RefCell<Option<std::task::Waker>>,
+}
+
+#[gpui_kit::test]
+async fn dismissing_while_busy_is_refused_and_completion_closes_only_its_dialog(
+    cx: &mut TestAppContext,
+) {
+    let gate = Rc::new(Gate {
+        open: Cell::new(false),
+        waker: Default::default(),
+    });
+    let handle = open_window(cx);
+    let g = gate.clone();
+    cx.update_window(handle.into(), move |_, window, cx| {
+        confirm_danger::open(
+            DangerOptions {
+                title: "Delete".into(),
+                consequences: vec![],
+                expected: "books".into(),
+                action_label: "Delete".into(),
+                prod: false,
+            },
+            move |_, cx| {
+                let g = g.clone();
+                cx.spawn(async move |_| {
+                    std::future::poll_fn(|c| {
+                        if g.open.get() {
+                            std::task::Poll::Ready(())
+                        } else {
+                            *g.waker.borrow_mut() = Some(c.waker().clone());
+                            std::task::Poll::Pending
+                        }
+                    })
+                    .await;
+                    Ok(())
+                })
+            },
+            window,
+            cx,
+        );
+    })
+    .unwrap();
+    shown(cx, handle, "danger.ok", true).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.input("books", cx);
+        window.render_frame(cx);
+        window.click("danger.ok", cx);
+        window.render_frame(cx);
+        window.press("escape", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("danger.ok").is_some(), "Esc is refused");
+        assert_eq!(window.find("danger.cancel").disabled(), Some(true));
+    })
+    .unwrap();
+    gate.open.set(true);
+    if let Some(w) = gate.waker.borrow_mut().take() {
+        w.wake();
+    }
+    shown(cx, handle, "danger.ok", false).await;
+    // A dialog opened afterwards stays open: nothing else is pending.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.open_dialog(cx, |d, _, _| d.title("second"));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.has_active_dialog(cx));
+    })
+    .unwrap();
 }

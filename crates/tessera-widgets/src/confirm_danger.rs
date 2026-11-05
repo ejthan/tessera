@@ -71,7 +71,8 @@ pub fn open(
         if first_build.replace(false) {
             input.read(cx).focus_handle(cx).focus(window, cx);
         }
-        let (ok_focus_, footer_) = (ok_focus.clone(), footer.clone());
+        let (ok_focus_, footer_, footer_cancel) =
+            (ok_focus.clone(), footer.clone(), footer.clone());
         let label = t!("danger.input_label", name = expected).to_string();
         dialog
             .title(
@@ -80,6 +81,9 @@ pub fn open(
                     .child(title.clone())
                     .when(prod, |row| row.child(prod_badge())),
             )
+            // While the task runs Esc, the backdrop and the close button do nothing, so the
+            // completion cannot close a dialog that opened in the meantime.
+            .on_cancel(move |_, _, cx| !footer_cancel.read(cx).busy)
             // Enter dispatches the dialog's Confirm: it only acts on the focused action button.
             .on_ok(move |_, window, cx| {
                 if ok_focus_.is_focused(window) {
@@ -183,6 +187,7 @@ impl Render for Footer {
                     .child(
                         Button::new("danger.cancel")
                             .label(t!("common.cancel").to_string())
+                            .disabled(self.busy)
                             .children(Kbd::binding_for_action(&Cancel, Some("Dialog"), window))
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
