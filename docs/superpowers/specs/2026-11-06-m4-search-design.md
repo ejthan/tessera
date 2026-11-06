@@ -123,7 +123,7 @@ D34. `Client` gains a private `read_post: bool`, false everywhere except a clone
 | `FULL_BODY_MAX` | 32 MiB | Largest body kept whole (D42) |
 | `FULL_BODY_BUDGET` | 64 MiB | All full bodies together (D42) |
 | `HIGHLIGHT_MAX` | 32 KiB | Above this `BodyView` shows plain text (§6.2). Measured in Task 12, below |
-| `VIEW_MAX` | 512 KiB | Above this `BodyView` shows the start and offers Copy all (§6.2). Measured in Task 12, below |
+| `VIEW_MAX` | 512 KiB | Above this `BodyView` pages in chunks of at most this, with Copy all (§6.2). Measured in Task 12, below |
 | `PALETTE_LIMIT` | 100 rows | One render of the list |
 
 Task 12 lowered `HIGHLIGHT_MAX` from 1 MiB and `VIEW_MAX` from 8 MiB. The kit does its layout and highlighting on the UI thread before the first frame. Measured with a release build on an Apple M3 Max, pretty-printed JSON at about 18 bytes a line, calling `Window::draw` in a real window that was not on screen, so without GPU present: time to build the editor plus its first draw, warm.
@@ -375,9 +375,9 @@ context = "Workbench"
 
 ### 5.10 The request log keeps full bodies
 
-D42. `Body` gains `pub full: Option<Arc<str>>`, set by `Body::new` when the text is over `BODY_LIMIT` and at most `FULL_BODY_MAX`. Clones stay cheap, `Debug` keeps printing lengths. A client built with `without_response_bodies` builds no `Body`, so document pages keep nothing (D24).
+D42. The console holds at most `FULL_BODY_MAX` of an answer as well, and says inline when it cut one. `Body` gains `pub full: Option<Arc<str>>`, set by `Body::new` when the text is over `BODY_LIMIT` and at most `FULL_BODY_MAX`. Clones stay cheap, `Debug` keeps printing lengths. A client built with `without_response_bodies` builds no `Body`, so document pages keep nothing (D24).
 
-`RequestLog::push` takes `full` out of the entry's bodies into its own `VecDeque<(u64, BodyPart, Arc<str>)>`, evicting the oldest past `FULL_BODY_BUDGET`. `pub fn full_body(&self, id: u64, part: BodyPart) -> Option<Arc<str>>` reads it. So the budget bounds this memory, and an evicted entry says so.
+`RequestLog::push` takes `full` out of the entry's bodies into its own `VecDeque<(u64, BodyPart, Arc<str>)>`, evicting the oldest past `FULL_BODY_BUDGET`, and releases an entry's full bodies when the ring drops it. `pub fn full_body(&self, id: u64, part: BodyPart) -> Option<Arc<str>>` reads it. So the budget bounds this memory, and an evicted entry says so.
 
 Refetching on demand was rejected: a second `GET` is a different answer and a write cannot be repeated. A file on disk was rejected too: §9 keeps bodies in memory only.
 
@@ -399,8 +399,8 @@ fn clear(&mut self, window, cx);
 fn shown(&self) -> Shown;   // Highlighted, Plain, Cut { shown, total }
 ```
 
-- Formatting runs through `cx.background_spawn`: `serde_json` pretty print up to 32 MiB, so a compact body is cut as lines, then the cut at `VIEW_MAX`.
-- Up to `HIGHLIGHT_MAX` it shows highlighted. Up to `VIEW_MAX` it shows plain, without a language, which the kit draws unhighlighted. Above that it shows the first `VIEW_MAX` bytes on a char boundary, plain, with "Showing 8.0 MB of 41.2 MB" and Copy all.
+- Formatting runs once through `cx.background_spawn`: `serde_json` pretty print up to 32 MiB, so a compact body pages by lines, then the chunks. Turning a page rebuilds only the editor.
+- Up to `HIGHLIGHT_MAX` it shows highlighted. Up to `VIEW_MAX` it shows plain, without a language, which the kit draws unhighlighted. Above that it pages: chunks of at most `VIEW_MAX` bytes that end on a line end where the chunk holds one, else on a char boundary, plain, with "Chunk 3 of 14, 6.8 MB in all", Previous and Next (`alt-cmd-[`, `alt-cmd-]`, Ctrl+Alt+[ and ]) and Copy all. The whole body is viewable.
 - Pinned facts: `gpui-base-0.9.0/src/input/base/state.rs` says the editor handles "large text up to about 50K lines", and `default_value` and `set_value` build the rope on the UI thread. Hence the limits, and Task 12 measures them (§12).
 - `JsonEditor` gains `JsonEditor::plain(text, window, cx)`, without `.language("json")`, read-only.
 
@@ -526,7 +526,7 @@ Tabs above the toolbar edit `drafts`. ⌘T adds a copy of the active draft, up t
 
 ### 7.9 Full view in the request log
 
-`request_detail::Detail` learns whether a cut body has its whole text (`full_body`). The section then has "Show full body" (⇧⌘B in a new `RequestLog` key context on the panel). It opens a dialog with a `BodyView`, redacted through `redact::json` on the background executor, with the environment named in the title. When the text was evicted, the same place says "Full body no longer kept. The log keeps the last 64 MiB."
+`request_detail::Detail` learns whether a cut body has its whole text (`full_body`). The section then has "Show full body" (⇧⌘B in a new `RequestLog` key context on the panel). It opens a dialog with a `BodyView`, redacted through `redact::json` on the background executor, with the environment named in the title. The dialog owns the view, so closing it frees the text. When the text was evicted, the same place says "Full body no longer kept. The log keeps the last 64 MiB."; a body over `FULL_BODY_MAX` says it was too large to keep instead.
 
 ### 7.10 Command palette
 
@@ -581,6 +581,10 @@ Global unless a context is named. The new contexts are `WORKBENCH` ("Workbench")
 | Favorite (`CONSOLE`) | ⌘D | Ctrl+D |
 | Add query row (`CONSOLE`) | ⇧⌘A | Ctrl+Shift+A |
 | Reveal (`CONSOLE`) | ⌥⌘K | Ctrl+Alt+K |
+| Response body / headers (`CONSOLE`) | ⌘3 / ⌘4 | Ctrl+3 / Ctrl+4 |
+| Stop waiting (`CONSOLE`) | ⌥⌘. | Ctrl+Alt+. |
+| Remove body file (`CONSOLE`) | ⌥⌘O | Ctrl+Alt+O |
+| Previous / next chunk (`BodyView`, `CONSOLE`, `WORKBENCH`) | ⌥⌘[ / ⌥⌘] | Ctrl+Alt+[ / ] |
 | Full body (`REQUEST_LOG`) | ⇧⌘B | Ctrl+Shift+B |
 
 Checked against `gpui-base-0.9.0/src/input/base/state.rs`: Ctrl+Y is the kit's redo in an input, which is why history is not ⌘Y. ⌥⌘I is the kit's inspector, which is why Instant is ⌥⌘L. `ctrl-shift-e` is bound there on macOS only, and that is a different chord from ⇧⌘E.

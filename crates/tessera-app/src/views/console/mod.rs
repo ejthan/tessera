@@ -16,7 +16,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
 };
@@ -26,25 +26,27 @@ use gpui_kit::{
     Subscription, Task, WeakEntity, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
-use tessera_client::{Client, Error, Method, READ_METHODS, RawBody, RawRequest};
+use tessera_client::{Client, Error, FULL_BODY_MAX, Method, READ_METHODS, RawBody, RawRequest};
 use tessera_core::openapi::path_candidates;
 use tessera_core::raw::{
-    OutcomeNote, PathError, RAW_FILE_MAX, RawDanger, outcome_note, parse_path, query_rows,
-    raw_danger, raw_query,
+    OutcomeNote, PathError, RAW_FILE_MAX, RawDanger, cap_body, outcome_note, parse_path,
+    query_rows, raw_danger, raw_query,
 };
 use tessera_core::search::history::{HistoryEntry, HistoryItem, raw_entry};
 use tessera_core::{curl, redact};
 use tessera_widgets::confirm_danger::DangerOptions;
 use tessera_widgets::{
-    BodyView, CompletionInput, CompletionInputEvent, JsonEditor, confirm, confirm_danger,
+    BodyView, CompletionInput, CompletionInputEvent, JsonEditor, NextChunk, PreviousChunk, confirm,
+    confirm_danger,
 };
 
 use self::list::RequestList;
+use super::dock::view_tab;
 use super::env_badge;
 use super::request_detail::size;
 use crate::actions::{
     AddQueryRow, AttachFile, CONSOLE, CopyCurl, FavoriteRequest, LoadQuery, OpenHistory,
-    RevealSecrets, SendRequest,
+    RemoveBodyFile, RevealSecrets, SendRequest, ShowResponseBody, ShowResponseHeaders, StopWaiting,
 };
 use crate::connection::{ConnectionState, long_error_text};
 use crate::runtime::Tokio;
@@ -78,7 +80,11 @@ struct Answer {
     duration: Duration,
     headers: Vec<(String, String)>,
     note: Option<OutcomeNote>,
-    /// As the server sent it.
+    /// Bytes the server sent.
+    size: usize,
+    /// The text was cut at `FULL_BODY_MAX`.
+    cut: bool,
+    /// As the server sent it, up to `FULL_BODY_MAX`.
     text: Arc<str>,
     /// With secrets masked.
     masked: Arc<str>,
@@ -88,6 +94,8 @@ struct Answer {
 struct Worked {
     answer: tessera_client::RawResponse,
     note: Option<OutcomeNote>,
+    /// The length before the cut, if the body was cut.
+    cut_from: Option<usize>,
     masked: String,
 }
 
@@ -136,6 +144,8 @@ pub struct ConsoleView {
     /// A write waits for its answer. Send stays busy.
     writing: bool,
     file_task: Option<Task<()>>,
+    /// The check of the body before a send; a newer send replaces it.
+    prepare_task: Option<Task<()>>,
     list: RequestList,
     focus_handle: FocusHandle,
     _subscriptions: [Subscription; 4],
@@ -209,6 +219,7 @@ impl ConsoleView {
             reading: false,
             writing: false,
             file_task: None,
+            prepare_task: None,
             list,
             focus_handle: cx.focus_handle(),
         };
@@ -263,6 +274,11 @@ impl ConsoleView {
     /// Replaces the body in the editor.
     pub fn set_body(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.body.update(cx, |b, cx| b.set_text(text, window, cx));
+    }
+
+    /// Bytes of the answer the console holds.
+    pub fn answer_len(&self) -> Option<usize> {
+        Some(self.answer.as_ref()?.text.len())
     }
 
     /// The view of the answer.
@@ -344,47 +360,58 @@ impl ConsoleView {
         Ok((path, query))
     }
 
-    /// The form as a request that may go out, or what stops it.
-    fn request(&self, cx: &App) -> Result<RawRequest, SharedString> {
-        let (path, query) = self.target(cx)?;
-        let text = self.body_text(cx);
-        let masked = match &self.file {
-            Some(file) if text.is_some() => file.masked,
-            _ => text.as_deref().is_some_and(redact::text_has_mask),
-        };
-        if masked {
-            return Err(t!("console.masked_body").to_string().into());
-        }
-        let from_file = self.file.is_some();
-        let text_kind = self.kind.read(cx).selected_index(cx).map(|i| i.row) == Some(KIND_TEXT);
-        let body = text.map(|text| {
-            if from_file || text_kind {
-                RawBody::Text(text.to_string())
-            } else {
-                RawBody::Json(text.to_string())
-            }
-        });
-        Ok(RawRequest {
-            method: self.method(cx),
-            path,
-            query,
-            body,
-        })
-    }
-
-    /// Sends the form: masked body, unlock, confirmation, each stopping on failure.
+    /// Sends the form: masked body, unlock, confirmation, each stopping on failure. The body
+    /// can be large, so its check and its copy run off the UI thread.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.writing {
             return;
         }
         self.error = None;
-        let request = match self.request(cx) {
-            Ok(request) => request,
+        let (path, query) = match self.target(cx) {
+            Ok(target) => target,
             Err(error) => {
                 self.error = Some(error);
                 return cx.notify();
             }
         };
+        let method = self.method(cx);
+        let text = self.body_text(cx);
+        let file_mask = self.file.as_ref().map(|file| file.masked);
+        let text_kind = self.kind.read(cx).selected_index(cx).map(|i| i.row) == Some(KIND_TEXT);
+        let as_text = file_mask.is_some() || text_kind;
+        let check = cx.background_spawn(async move {
+            let text = text?;
+            let masked = file_mask.unwrap_or_else(|| redact::text_has_mask(&text));
+            Some(if masked {
+                Err(())
+            } else if as_text {
+                Ok(RawBody::Text(text.to_string()))
+            } else {
+                Ok(RawBody::Json(text.to_string()))
+            })
+        });
+        self.prepare_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let body = check.await.transpose();
+            this.update_in(cx, |this, window, cx| match body {
+                Ok(body) => {
+                    let request = RawRequest {
+                        method,
+                        path,
+                        query,
+                        body,
+                    };
+                    this.send_checked(request, window, cx);
+                }
+                Err(()) => {
+                    this.error = Some(t!("console.masked_body").to_string().into());
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    fn send_checked(&mut self, request: RawRequest, window: &mut Window, cx: &mut Context<Self>) {
         if READ_METHODS.contains(&request.method) {
             return self.go(request, window, cx);
         }
@@ -410,7 +437,13 @@ impl ConsoleView {
             self.error = Some(t!("status.not_connected").to_string().into());
             return cx.notify();
         };
-        let target = format!("{} {}", request.method, full_path(&client, &request.path));
+        let query = request.query.as_ref().map(|q| format!("?{q}"));
+        let target = format!(
+            "{} {}{}",
+            request.method,
+            full_path(&client, &request.path),
+            query.unwrap_or_default()
+        );
         let title = t!("console.confirm.title", method = request.method).to_string();
         let action = t!("console.confirm.send").to_string();
         let this = cx.entity().downgrade();
@@ -495,13 +528,15 @@ impl ConsoleView {
         cx.spawn_in(window, async move |this, cx| {
             let answer = call.await;
             let worked = match answer {
-                Ok(answer) => Ok(cx
+                Ok(mut answer) => Ok(cx
                     .background_spawn(async move {
                         let note = outcome_note(&path, answer.status, &answer.body);
+                        let cut_from = cap_body(&mut answer.body, FULL_BODY_MAX);
                         let masked = redact::json(&answer.body);
                         Worked {
                             answer,
                             note,
+                            cut_from,
                             masked,
                         }
                     })
@@ -549,6 +584,7 @@ impl ConsoleView {
             let Worked {
                 answer,
                 note,
+                cut_from,
                 masked,
             } = worked;
             let masked: Arc<str> = masked.into();
@@ -559,6 +595,8 @@ impl ConsoleView {
                 duration: answer.duration,
                 headers: answer.headers,
                 note,
+                size: cut_from.unwrap_or(answer.body.len()),
+                cut: cut_from.is_some(),
                 text: answer.body.into(),
                 masked,
             });
@@ -674,10 +712,7 @@ impl ConsoleView {
             let read = read.await.map_err(|e| e.to_string()).and_then(|r| r);
             this.update(cx, |this, cx| {
                 match read {
-                    Ok((text, masked)) => {
-                        let text = text.into();
-                        this.file = Some(FileBody { name, text, masked });
-                    }
+                    Ok((text, masked)) => this.file = Some(FileBody { name, text, masked }),
                     Err(error) => this.error = Some(error.into()),
                 }
                 cx.notify();
@@ -707,22 +742,22 @@ impl ConsoleView {
         let full = full_path(&client, &path);
         let method = self.method(cx);
         let file = self.file.as_ref().filter(|_| self.has_body(cx));
+        let note = file.map(|f| t!("console.curl_file", name = f.name).to_string());
         let body = self.body_text(cx).filter(|_| file.is_none());
-        let command = curl::request(
-            client.base_url(),
-            &method,
-            &full,
-            query.as_deref(),
-            body.as_deref(),
-        );
-        let text = match file {
-            Some(file) => {
-                let note = t!("console.curl_file", name = file.name).to_string();
-                format!(": {}\n{command}", curl::quote(&note))
+        let base = client.base_url().clone();
+        // Masking the body can take long.
+        let command = cx.background_spawn(async move {
+            let command = curl::request(&base, &method, &full, query.as_deref(), body.as_deref());
+            match note {
+                Some(note) => format!(": {}\n{command}", curl::quote(&note)),
+                None => command,
             }
-            None => command,
-        };
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        });
+        cx.spawn(async move |_, cx| {
+            let text = command.await;
+            cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(text)));
+        })
+        .detach();
     }
 
     /// The form as history and favorites keep it.
@@ -841,6 +876,7 @@ impl ConsoleView {
                         .ghost()
                         .small()
                         .label(t!("console.stop_waiting").to_string())
+                        .children(Kbd::binding_for_action(&StopWaiting, Some(CONSOLE), window))
                         .on_click(cx.listener(|this, _, _, cx| this.stop_waiting(cx))),
                 )
             })
@@ -910,6 +946,11 @@ impl ConsoleView {
                             .ghost()
                             .small()
                             .label(t!("console.file.remove").to_string())
+                            .children(Kbd::binding_for_action(
+                                &RemoveBodyFile,
+                                Some(CONSOLE),
+                                window,
+                            ))
                             .on_click(cx.listener(|this, _, _, cx| this.remove_file(cx))),
                     ),
             ),
@@ -999,7 +1040,7 @@ impl ConsoleView {
                 "console.status",
                 status = a.status,
                 ms = a.duration.as_millis() as u64,
-                size = size(a.text.len() as u64)
+                size = size(a.size as u64)
             )
             .to_string();
             let color = if a.status >= 400 { danger } else { foreground };
@@ -1008,6 +1049,10 @@ impl ConsoleView {
         let outcome = self.answer.as_ref().and_then(|a| a.note).map(|note| {
             let text = t!("console.outcome", failed = note.failed, total = note.total);
             Self::line("console.outcome", text.to_string().into(), warning)
+        });
+        let cut_note = self.answer.as_ref().filter(|a| a.cut).map(|a| {
+            let text = t!("console.cut", total = size(a.size as u64)).to_string();
+            Self::line("console.cut", text.into(), warning)
         });
         let answer = self.answer.as_ref();
         let headers = answer.into_iter().flat_map(|a| &a.headers).map(|(k, v)| {
@@ -1029,6 +1074,7 @@ impl ConsoleView {
             .size_full()
             .children(status)
             .children(outcome)
+            .children(cut_note)
             .child(
                 h_flex()
                     .flex_none()
@@ -1041,8 +1087,20 @@ impl ConsoleView {
                             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                                 this.show_tab(*ix == 1, cx);
                             }))
-                            .child(Tab::new().child(body_tab))
-                            .child(Tab::new().child(headers_tab)),
+                            .child(view_tab(
+                                "console.tab.body",
+                                body_tab.into(),
+                                &ShowResponseBody,
+                                CONSOLE,
+                                window,
+                            ))
+                            .child(view_tab(
+                                "console.tab.headers",
+                                headers_tab.into(),
+                                &ShowResponseHeaders,
+                                CONSOLE,
+                                window,
+                            )),
                     )
                     .child(
                         Button::new("console.reveal")
@@ -1063,6 +1121,7 @@ impl ConsoleView {
             .child(div().flex_1().min_h_0().map(|el| {
                 if self.on_headers {
                     el.id("console.headers")
+                        .test_support()
                         .overflow_y_scroll()
                         .p_1()
                         .children(headers.collect::<Vec<_>>())
@@ -1093,7 +1152,7 @@ fn dialog_send(
 }
 
 /// The text of the file at `path` and whether it holds a mask, or why it cannot be a body.
-fn read_body(path: &std::path::Path) -> Result<(String, bool), String> {
+fn read_body(path: &std::path::Path) -> Result<(Arc<str>, bool), String> {
     let shown = path.display().to_string();
     let failed = |e: std::io::Error| {
         t!(
@@ -1110,7 +1169,7 @@ fn read_body(path: &std::path::Path) -> Result<(String, bool), String> {
     let data = std::fs::read(path).map_err(failed)?;
     let text = String::from_utf8(data).map_err(|_| t!("console.file.not_utf8").to_string())?;
     let masked = redact::text_has_mask(&text);
-    Ok((text, masked))
+    Ok((text.into(), masked))
 }
 
 impl Focusable for ConsoleView {
@@ -1140,6 +1199,19 @@ impl Render for ConsoleView {
                 this.toggle_reveal(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CopyCurl, _, cx| this.copy_curl(cx)))
+            .on_action(cx.listener(|this, _: &StopWaiting, _, cx| this.stop_waiting(cx)))
+            .on_action(cx.listener(|this, _: &RemoveBodyFile, _, cx| this.remove_file(cx)))
+            .on_action(cx.listener(|this, _: &ShowResponseBody, _, cx| this.show_tab(false, cx)))
+            .on_action(cx.listener(|this, _: &ShowResponseHeaders, _, cx| {
+                this.show_tab(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousChunk, window, cx| {
+                this.response
+                    .update(cx, |r, cx| r.previous_chunk(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &NextChunk, window, cx| {
+                this.response.update(cx, |r, cx| r.next_chunk(window, cx));
+            }))
             .on_action(cx.listener(|this, _: &OpenHistory, window, cx| {
                 this.toggle_list(window, cx);
             }))

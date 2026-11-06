@@ -89,7 +89,7 @@ Run them single-threaded: two tests stop and restart ts3. `TESSERA_CLUSTER_URLS`
 
 ## Where the request log keeps bodies
 
-Everything stays in memory; nothing about a request reaches the disk. An entry holds its bodies cut to 1 MiB. A body up to 32 MiB also keeps its whole text beside the entries, 64 MiB over all of them, oldest out first, so the entry says "Full body no longer kept" once its text is gone. Document pages keep no response body at all. Show full (⇧⌘B / Ctrl+Shift+B in the log) masks the text on the background executor before it shows, and shows its first 512 KiB; Copy all takes the whole masked text.
+Everything stays in memory; nothing about a request reaches the disk. An entry holds its bodies cut to 1 MiB. A body up to 32 MiB also keeps its whole text beside the entries, 64 MiB over all of them, oldest out first, so the entry says "Full body no longer kept" once its text is gone. Document pages keep no response body at all. Show full (⇧⌘B / Ctrl+Shift+B in the log) masks the text on the background executor before it shows, and pages through it in chunks of 512 KiB; Copy all takes the whole masked text.
 
 ## Manual checks of the document browser (M3)
 

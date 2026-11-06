@@ -72,13 +72,9 @@ fn body_view_states(cx: &mut TestAppContext) {
     );
 
     let nine = line.repeat((9 << 20) / line.len());
-    let total = nine.len();
     assert_eq!(
         set(cx, handle, &view, nine.clone()),
-        Shown::Cut {
-            shown: VIEW_MAX,
-            total
-        }
+        Shown::Chunk { page: 1, pages: 18 }
     );
     cx.update(|cx| view.update(cx, |v, cx| v.copy_all(cx)));
     assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()), Some(nine));
@@ -91,11 +87,39 @@ fn body_view_states(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_cut_never_splits_a_character(cx: &mut TestAppContext) {
+fn paging_reaches_the_whole_body(cx: &mut TestAppContext) {
     let (handle, view) = open(cx);
     let text = "ä".repeat(VIEW_MAX);
-    let Shown::Cut { shown, .. } = set(cx, handle, &view, text.clone()) else {
-        panic!("expected a cut");
+    let Shown::Chunk { pages, .. } = set(cx, handle, &view, text.clone()) else {
+        panic!("expected chunks");
     };
-    assert!(shown <= VIEW_MAX && text.is_char_boundary(shown));
+    let mut seen = String::new();
+    for page in 1..=pages {
+        assert_eq!(
+            cx.update(|cx| view.read(cx).shown()),
+            Shown::Chunk { page, pages }
+        );
+        seen.push_str(&cx.update(|cx| view.read(cx).text(cx)).unwrap());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |v, cx| v.next_chunk(window, cx));
+        })
+        .unwrap();
+    }
+    assert_eq!(seen, text, "every chunk together is the body");
+    assert_eq!(
+        cx.update(|cx| view.read(cx).shown()),
+        Shown::Chunk { page: pages, pages },
+        "stops at the last"
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |v, cx| v.previous_chunk(window, cx));
+    })
+    .unwrap();
+    assert_eq!(
+        cx.update(|cx| view.read(cx).shown()),
+        Shown::Chunk {
+            page: pages - 1,
+            pages
+        }
+    );
 }

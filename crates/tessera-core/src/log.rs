@@ -139,7 +139,18 @@ impl RequestLog {
         };
         buf.push_back(entry);
         while buf.len() > cap {
-            buf.pop_front();
+            let Some(dropped) = buf.pop_front() else {
+                break;
+            };
+            let id = dropped.event.id;
+            let (full, bytes) = (&mut self.full, &mut self.full_bytes);
+            full.retain(|(owner, _, text)| {
+                let keep = *owner != id;
+                if !keep {
+                    *bytes -= text.len();
+                }
+                keep
+            });
         }
     }
 
@@ -376,6 +387,16 @@ pub(crate) mod tests {
             "over budget alone"
         );
         assert!(log.get(1).is_some(), "the entry itself stays");
+    }
+
+    #[test]
+    fn the_ring_releases_the_full_bodies_of_what_it_drops() {
+        let mut log = RequestLog::new(1, 1);
+        log.push(with_full(1, &"first".into()));
+        log.push(with_full(2, &"second".into()));
+        assert!(log.full_body(1, BodyPart::Response).is_none());
+        assert!(log.full_body(2, BodyPart::Response).is_some());
+        assert_eq!(log.full_bytes, "second".len());
     }
 
     #[test]

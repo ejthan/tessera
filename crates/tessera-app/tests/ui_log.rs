@@ -10,6 +10,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
 use secrecy::SecretString;
@@ -17,7 +18,7 @@ use tessera_app::connection::{ConnectorGlobal, tokio_connector};
 use tessera_app::runtime::Tokio;
 use tessera_app::state::AppState;
 use tessera_app::views::root::RootView;
-use tessera_client::{Body, Method, Origin, RequestEvent};
+use tessera_client::{Body, FULL_BODY_MAX, Method, Origin, RequestEvent};
 use tessera_core::log::{BodyPart, FULL_BODY_BUDGET, Filter, LogEntry};
 use tessera_core::profile::{Node, Profile, Protocol};
 use tessera_core::secrets::{MemoryStore, SecretStore};
@@ -26,6 +27,10 @@ use uuid::Uuid;
 
 use common::*;
 
+#[cfg(target_os = "macos")]
+const NEXT_CHUNK: &str = "alt-cmd-]";
+#[cfg(not(target_os = "macos"))]
+const NEXT_CHUNK: &str = "ctrl-alt-]";
 #[cfg(target_os = "macos")]
 const SHOW_FULL_BODY: &str = "cmd-shift-b";
 #[cfg(not(target_os = "macos"))]
@@ -366,13 +371,69 @@ async fn show_full_body_opens_the_view_masked(cx: &mut TestAppContext) {
         .update(cx, |root, _, cx| {
             let view = root.view().clone().downcast::<RootView>().unwrap();
             let log = view.read(cx).log_panel().read(cx);
-            let body = log.full_view().unwrap().read(cx);
-            body.text(cx).unwrap_or_default()
+            let body = log.full_view().unwrap();
+            body.read(cx).text(cx).unwrap_or_default()
         })
         .unwrap();
     assert!(text.contains("\"n\": 1"), "{text}");
     assert!(!text.contains("sk-secret-tail"), "{text}");
     assert!(text.contains("••••"), "{text}");
+
+    cx.update_window(handle.into(), |_, window, cx| window.close_dialog(cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    cx.run_until_parked();
+    let held = handle
+        .update(cx, |root, _, cx| {
+            let view = root.view().clone().downcast::<RootView>().unwrap();
+            view.read(cx).log_panel().read(cx).full_view().is_some()
+        })
+        .unwrap();
+    assert!(!held, "closing the dialog frees the text");
+}
+
+#[gpui_kit::test]
+async fn full_view_pages_to_the_end_of_the_body(cx: &mut TestAppContext) {
+    let (handle, state, _rt) = open_log(cx);
+    let line = "plain line of a long body\n";
+    let full = format!("{}the last line", line.repeat((3 << 20) / line.len()));
+    send(cx, &state, vec![cut_entry(7, Some(&full))]);
+    wait_for_element(cx, handle, row(7), true).await;
+    select_row(cx, handle, 7);
+    wait_for_element(cx, handle, "log.detail.full.response".to_string(), true).await;
+    pressed_full_body(cx, handle);
+    wait_for_label(cx, handle, "body.chunk".into(), "Chunk 1 of 7").await;
+    for _ in 0..6 {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.press(NEXT_CHUNK, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+    wait_for_label(cx, handle, "body.chunk".into(), "Chunk 7 of 7").await;
+    let text = handle
+        .update(cx, |root, _, cx| {
+            let view = root.view().clone().downcast::<RootView>().unwrap();
+            let body = view.read(cx).log_panel().read(cx).full_view().unwrap();
+            body.read(cx).text(cx).unwrap_or_default()
+        })
+        .unwrap();
+    assert!(text.ends_with("the last line"), "{}", text.len());
+}
+
+#[gpui_kit::test]
+async fn too_large_a_body_says_so_and_not_that_it_went(cx: &mut TestAppContext) {
+    let (handle, state, _rt) = open_log(cx);
+    let mut e = cut_entry(7, None);
+    e.event.response_body.as_mut().unwrap().original_len = FULL_BODY_MAX + 1;
+    send(cx, &state, vec![e]);
+    wait_for_element(cx, handle, row(7), true).await;
+    select_row(cx, handle, 7);
+    wait_for_label(cx, handle, "log.detail.full_too_large".into(), "32 MiB").await;
+    wait_for_element(cx, handle, "log.detail.full_gone".to_string(), false).await;
 }
 
 #[gpui_kit::test]

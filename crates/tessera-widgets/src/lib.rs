@@ -10,7 +10,7 @@ pub mod field_type_select;
 pub mod filter_input;
 pub mod json_editor;
 
-pub use body_view::{BodyView, Shown};
+pub use body_view::{BODY_VIEW, BodyView, NextChunk, PreviousChunk, Shown};
 pub use completion_input::{CompletionInput, CompletionInputEvent};
 pub use field_type_select::{FieldTypeChanged, FieldTypeSelect, field_type_description};
 pub use filter_input::{FacetFetch, FilterField, FilterInput, FilterInputEvent};

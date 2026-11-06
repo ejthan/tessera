@@ -158,6 +158,16 @@ pub fn raw_danger(method: &Method, path: &str, prod: bool) -> RawDanger {
     by_env(RawDanger::None, RawDanger::Medium)
 }
 
+/// Cuts `body` to at most `max` bytes on a char boundary, and gives its length before, if it did.
+pub fn cap_body(body: &mut String, max: usize) -> Option<usize> {
+    let total = body.len();
+    (total > max).then(|| {
+        body.truncate(body.floor_char_boundary(max));
+        body.shrink_to_fit();
+        total
+    })
+}
+
 /// A failure inside a successful answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutcomeNote {
@@ -376,6 +386,15 @@ mod tests {
             outcome_note("multi_search", 200, r#"{"results":[{"hits":[]}]}"#),
             Option::None
         );
+    }
+
+    #[test]
+    fn cap_body_cuts_on_a_char_boundary() {
+        let mut body = "éé".to_string();
+        assert_eq!(cap_body(&mut body, 3), Some(4));
+        assert_eq!(body, "é");
+        assert_eq!(cap_body(&mut body, 2), None);
+        assert_eq!(body, "é");
     }
 
     #[test]

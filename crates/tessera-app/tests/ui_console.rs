@@ -53,6 +53,23 @@ const OPEN_CONSOLE: &str = "cmd-shift-y";
 #[cfg(not(target_os = "macos"))]
 const OPEN_CONSOLE: &str = "ctrl-shift-y";
 
+#[cfg(target_os = "macos")]
+const SHOW_BODY: &str = "cmd-3";
+#[cfg(not(target_os = "macos"))]
+const SHOW_BODY: &str = "ctrl-3";
+#[cfg(target_os = "macos")]
+const SHOW_HEADERS: &str = "cmd-4";
+#[cfg(not(target_os = "macos"))]
+const SHOW_HEADERS: &str = "ctrl-4";
+#[cfg(target_os = "macos")]
+const STOP: &str = "alt-cmd-.";
+#[cfg(not(target_os = "macos"))]
+const STOP: &str = "ctrl-alt-.";
+#[cfg(target_os = "macos")]
+const REMOVE_FILE: &str = "alt-cmd-o";
+#[cfg(not(target_os = "macos"))]
+const REMOVE_FILE: &str = "ctrl-alt-o";
+
 struct Fixture {
     handle: WindowHandle<Root>,
     state: Entity<AppState>,
@@ -311,6 +328,24 @@ async fn prod_post_asks(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn the_confirmation_names_the_query(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, prod()).await;
+    f.form(cx, "DELETE", "collections/books/documents", "");
+    f.press(cx, ADD_ROW);
+    f.fill(cx, "console.query.0.key", "filter_by");
+    f.fill(cx, "console.query.0.value", "a:1");
+    f.click(cx, "console.send");
+    let line = f.text_of(cx, "danger.consequence.0");
+    assert!(line.contains("?filter_by=a%3A1"), "{line}");
+    f.click(cx, "danger.cancel");
+
+    f.form(cx, "POST", "collections", "{}");
+    f.click(cx, "console.send");
+    let body = f.text_of(cx, "confirm.body");
+    assert!(body.contains("?filter_by=a%3A1"), "{body}");
+}
+
+#[gpui_kit::test]
 async fn dev_post_does_not_ask(cx: &mut TestAppContext) {
     let f = Fixture::new(cx).await;
     f.send(cx, "POST", "collections", r#"{"name":"a"}"#);
@@ -557,6 +592,37 @@ async fn sidebar_row_and_shortcut_open_the_tab(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn a_huge_answer_is_cut_and_says_so(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    let line = "a line of the export\n";
+    let lines = (tessera_client::FULL_BODY_MAX + line.len()) / line.len();
+    f.answer(200, &line.repeat(lines));
+    f.send(cx, "GET", "collections/c/documents/export", "");
+    let note = f.text_of(cx, "console.cut");
+    assert!(note.contains("32"), "{note}");
+    let view = f.view(cx);
+    let held = cx.update(|cx| view.read(cx).answer_len());
+    assert_eq!(held, Some(tessera_client::FULL_BODY_MAX));
+    assert!(f.text_of(cx, "console.status").contains("32"));
+}
+
+#[gpui_kit::test]
+async fn tabs_and_stop_have_shortcuts(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.send(cx, "GET", "health", "");
+    f.press(cx, SHOW_HEADERS);
+    assert!(f.has(cx, "console.headers"));
+    f.press(cx, SHOW_BODY);
+    assert!(!f.has(cx, "console.headers"));
+
+    let gate = f.search.hold_next();
+    f.send(cx, "POST", "collections", "{}");
+    f.press(cx, STOP);
+    assert!(!f.disabled(cx, "console.send"));
+    gate.send(()).unwrap();
+}
+
+#[gpui_kit::test]
 async fn path_menu_offers_routes_and_enter_sends(cx: &mut TestAppContext) {
     let f = Fixture::new(cx).await;
     let view = f.view(cx);
@@ -605,8 +671,11 @@ async fn a_body_file_goes_out_as_text(cx: &mut TestAppContext) {
     });
     wait_for_element(cx, f.handle, "console.file".to_string(), true).await;
     f.click(cx, "console.send");
+    wait_for_element(cx, f.handle, "console.status".to_string(), true).await;
     assert_eq!(
         f.calls()[0].body,
         Some(RawBody::Text("{\"n\":1}\n{\"n\":2}".into()))
     );
+    f.press(cx, REMOVE_FILE);
+    assert!(!f.has(cx, "console.file"));
 }

@@ -189,8 +189,11 @@ async fn raw_never_leaves_the_node() {
 }
 
 /// `Url::join` collapses these, on any base path, so they would address another resource.
-const TRAVERSAL: [&str; 14] = [
+const TRAVERSAL: [&str; 17] = [
     "..",
+    " ../keys",
+    "../keys ",
+    " %2e%2e/keys",
     "../keys",
     "./keys",
     "a/../keys",

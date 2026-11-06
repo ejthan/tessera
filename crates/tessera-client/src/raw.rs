@@ -96,9 +96,13 @@ fn has_dot_segment(path: &str) -> bool {
 fn check_path(base: &Url, path: &str) -> Result<(), Error> {
     let invalid = || Error::InvalidUrl(base.to_string());
     // On an `http` node `join` reads `http:x` as relative but `https:x` as the host `x`, and
-    // it strips tabs and line breaks, which this check must not depend on.
+    // it strips tabs, line breaks and edge spaces, which this check must not depend on.
     let first = path.split(['/', '\\', '?', '#']).next().unwrap_or_default();
-    if first.contains(':') || path.chars().any(char::is_control) || has_dot_segment(path) {
+    if first.contains(':')
+        || path.chars().any(char::is_control)
+        || path.trim() != path
+        || has_dot_segment(path)
+    {
         return Err(invalid());
     }
     check_stays_on_node(base, &base.join(path).map_err(|_| invalid())?)

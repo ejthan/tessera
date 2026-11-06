@@ -3,6 +3,8 @@
 //! The request log panel in the bottom dock: filters, the table of requests and the detail
 //! of the selected one.
 
+use std::cell::Cell;
+
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
@@ -17,10 +19,10 @@ use gpui_kit::component::{
 use gpui_kit::{
     App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, ParentElement as _, Render, SharedString, Stateful, Styled as _, Subscription,
-    Task, Window, div, prelude::*, px,
+    Task, WeakEntity, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
-use tessera_client::Method;
+use tessera_client::{FULL_BODY_MAX, Method};
 use tessera_core::log::{BodyPart, Filter, LogEntry};
 use tessera_core::{curl, redact};
 use tessera_widgets::BodyView;
@@ -254,8 +256,8 @@ pub struct RequestLogPanel {
     selected: Option<u64>,
     detail: Option<Detail>,
     detail_task: Option<Task<()>>,
-    /// The dialog's view of a full body.
-    full_view: Option<Entity<BodyView>>,
+    /// The dialog's view of a full body. The dialog owns it, so closing frees the text.
+    full_view: Option<WeakEntity<BodyView>>,
     full_task: Option<Task<()>>,
     /// What the rows were built from; an unchanged stamp skips the rebuild.
     stamp: Option<Stamp>,
@@ -423,9 +425,9 @@ impl RequestLogPanel {
         cx.notify();
     }
 
-    /// The dialog's view of a full body, once one was opened.
-    pub fn full_view(&self) -> Option<&Entity<BodyView>> {
-        self.full_view.as_ref()
+    /// The dialog's view of a full body, while the dialog is open.
+    pub fn full_view(&self) -> Option<Entity<BodyView>> {
+        self.full_view.as_ref()?.upgrade()
     }
 
     /// Opens the selected entry's response if its full text is kept, else its request.
@@ -434,8 +436,12 @@ impl RequestLogPanel {
             return;
         };
         let log = self.state.read(cx).log();
-        let kept = |part: &&BodyPart| log.full_body(detail.id, **part).is_some();
-        if let Some(part) = detail.cut.iter().find(kept).copied() {
+        let kept = detail
+            .cut
+            .iter()
+            .map(|(part, _)| *part)
+            .find(|part| log.full_body(detail.id, *part).is_some());
+        if let Some(part) = kept {
             self.open_full(part, window, cx);
         }
     }
@@ -466,8 +472,9 @@ impl RequestLogPanel {
             .to_string(),
         );
         let view = cx.new(|cx| BodyView::new(window, cx));
-        self.full_view = Some(view.clone());
-        let target = view.clone();
+        self.full_view = Some(view.downgrade());
+        let target = view.downgrade();
+        // Once: paging walks this text and masks nothing again.
         self.full_task = Some(cx.spawn_in(window, async move |_, cx| {
             let masked = cx
                 .background_spawn(async move { redact::json(&text) })
@@ -477,7 +484,12 @@ impl RequestLogPanel {
                 .ok();
         }));
         let viewport = window.viewport_size();
-        window.open_dialog(cx, move |dialog, _, _| {
+        let first_build = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first_build.replace(false) {
+                // So its paging shortcuts work from the start.
+                view.read(cx).focus_handle(cx).focus(window, cx);
+            }
             dialog
                 .title(
                     div()
@@ -495,7 +507,7 @@ impl RequestLogPanel {
         });
     }
 
-    /// The Full body buttons of the selected entry, or the note that a text is gone.
+    /// The Full body buttons of the selected entry, or why a text is not there.
     fn full_body_bar(
         &self,
         window: &Window,
@@ -506,19 +518,30 @@ impl RequestLogPanel {
             return None;
         }
         let log = self.state.read(cx).log();
-        let parts: Vec<(BodyPart, bool)> = detail
+        let kept: Vec<BodyPart> = detail
             .cut
             .iter()
-            .map(|part| (*part, log.full_body(detail.id, *part).is_some()))
+            .map(|(part, _)| *part)
+            .filter(|part| log.full_body(detail.id, *part).is_some())
             .collect();
-        let gone = parts.iter().any(|(_, kept)| !kept);
-        let note = SharedString::from(t!("log.detail.full_gone").to_string());
+        let missing = detail.cut.iter().filter(|(part, _)| !kept.contains(part));
+        let too_large = missing.clone().any(|(_, len)| *len > FULL_BODY_MAX);
+        let gone = missing.into_iter().any(|(_, len)| *len <= FULL_BODY_MAX);
         let muted = cx.theme().muted_foreground;
-        let first_kept = parts.iter().find(|(_, kept)| *kept).map(|(part, _)| *part);
-        let buttons = parts
-            .into_iter()
-            .filter(|(_, kept)| *kept)
-            .map(|(part, _)| {
+        let note = move |id: &'static str, text: String| {
+            let text = SharedString::from(text);
+            div()
+                .id(id)
+                .test_support()
+                .aria_label(text.clone())
+                .text_color(muted)
+                .child(text)
+        };
+        let buttons: Vec<_> = kept
+            .iter()
+            .enumerate()
+            .map(|(index, part)| {
+                let part = *part;
                 let (id, label) = match part {
                     BodyPart::Response => {
                         ("log.detail.full.response", t!("log.detail.show_response"))
@@ -526,7 +549,7 @@ impl RequestLogPanel {
                     BodyPart::Request => ("log.detail.full.request", t!("log.detail.show_request")),
                 };
                 // The shortcut opens the first one, so only that one shows it.
-                let kbd = (first_kept == Some(part))
+                let kbd = (index == 0)
                     .then(|| Kbd::binding_for_action(&ShowFullBody, Some(REQUEST_LOG), window))
                     .flatten();
                 Button::new(id)
@@ -537,8 +560,8 @@ impl RequestLogPanel {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_full(part, window, cx);
                     }))
-            });
-        let buttons: Vec<_> = buttons.collect();
+            })
+            .collect();
         Some(
             h_flex()
                 .flex_none()
@@ -550,14 +573,16 @@ impl RequestLogPanel {
                 .text_xs()
                 .children(buttons)
                 .when(gone, |el| {
-                    el.child(
-                        div()
-                            .id("log.detail.full_gone")
-                            .test_support()
-                            .aria_label(note.clone())
-                            .text_color(muted)
-                            .child(note),
-                    )
+                    el.child(note(
+                        "log.detail.full_gone",
+                        t!("log.detail.full_gone").to_string(),
+                    ))
+                })
+                .when(too_large, |el| {
+                    el.child(note(
+                        "log.detail.full_too_large",
+                        t!("log.detail.full_too_large").to_string(),
+                    ))
                 }),
         )
     }

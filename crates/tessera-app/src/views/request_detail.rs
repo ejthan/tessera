@@ -18,8 +18,8 @@ use super::request_log::path_and_query;
 pub struct Detail {
     /// Event id of the entry.
     pub id: u64,
-    /// The bodies shown cut, which may have their whole text in the log.
-    pub cut: Vec<BodyPart>,
+    /// The bodies shown cut with their lengths; the log may have their whole text.
+    pub cut: Vec<(BodyPart, usize)>,
     sections: Vec<(SharedString, SharedString)>,
     /// All sections as one text, for assistive technology.
     label: SharedString,
@@ -30,13 +30,14 @@ impl Detail {
     /// [`redact::key`].
     pub fn new(entry: &LogEntry) -> Self {
         let e = &entry.event;
-        let is_cut =
-            |body: &Option<Body>| body.as_ref().is_some_and(|b| b.original_len > b.text.len());
         let cut = [
-            (BodyPart::Response, is_cut(&e.response_body)),
-            (BodyPart::Request, is_cut(&e.request_body)),
+            (BodyPart::Response, &e.response_body),
+            (BodyPart::Request, &e.request_body),
         ];
-        let cut = cut.iter().filter(|(_, cut)| *cut).map(|(part, _)| *part);
+        let cut = cut.into_iter().filter_map(|(part, body)| {
+            let body = body.as_ref().filter(|b| b.original_len > b.text.len())?;
+            Some((part, body.original_len))
+        });
         // Built as text: `Url` would percent-encode the mask in the query.
         let url = format!(
             "{}{}",
