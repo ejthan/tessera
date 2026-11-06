@@ -10,11 +10,18 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{Local, NaiveDate, TimeZone as _};
+use gpui_kit::component::dock::DockPlacement;
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
 use serde_json::Map;
 use tessera_app::state::{AppState, ResourceKind};
-use tessera_client::ApiKey;
+use tessera_app::views::dock::ResourcePanel;
+use tessera_app::views::resources::ResourceView;
+use tessera_app::views::resources::key_dialog::KeyDialog;
+use tessera_app::views::resources::keys::KeysView;
+use tessera_app::views::root::RootView;
+use tessera_client::{ApiKey, NewKey};
 use tessera_core::profile::{Environment, Profile};
 
 use common::*;
@@ -130,6 +137,33 @@ impl Fixture {
         self.settle(cx);
     }
 
+    fn view(&self, cx: &mut TestAppContext) -> Entity<KeysView> {
+        let panel = self
+            .handle
+            .update(cx, |root, _, cx| {
+                let view = root.view().clone().downcast::<RootView>().unwrap();
+                let area = view.read(cx).dock().read(cx);
+                area.layout(DockPlacement::Center)
+                    .unwrap()
+                    .panels()
+                    .filter_map(|id| area.panel(id)?.view().downcast::<ResourcePanel>().ok())
+                    .next()
+                    .unwrap()
+            })
+            .unwrap();
+        cx.update(|cx| {
+            let ResourceView::Keys(view) = panel.read(cx).view() else {
+                panic!("not the keys view");
+            };
+            view.clone()
+        })
+    }
+
+    fn dialog(&self, cx: &mut TestAppContext) -> Entity<KeyDialog> {
+        let view = self.view(cx);
+        cx.update(|cx| view.read(cx).dialog().unwrap().clone())
+    }
+
     fn calls(&self) -> Vec<String> {
         self.admin.calls.lock().unwrap().clone()
     }
@@ -233,4 +267,185 @@ async fn read_only_delete_asks_to_unlock(cx: &mut TestAppContext) {
     f.click(cx, "keys.delete");
     assert!(f.has(cx, "danger.input"), "the unlock dialog opens");
     assert_eq!(f.calls(), ["keys"]);
+}
+
+fn open_form(f: &Fixture, cx: &mut TestAppContext) {
+    f.click(cx, "keys.new");
+    assert!(f.has(cx, "keys.form.description"));
+}
+
+fn sent(f: &Fixture) -> Vec<NewKey> {
+    f.admin.created.lock().unwrap().clone()
+}
+
+/// Opens the form, names the key and saves it as a search-only key.
+fn create(f: &Fixture, cx: &mut TestAppContext) {
+    open_form(f, cx);
+    f.fill(cx, "keys.form.description", "new key");
+    f.click(cx, "keys.template.search_only");
+    f.click(cx, "keys.form.save");
+}
+
+#[gpui_kit::test]
+async fn template_search_only_fills_the_matrix(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    create(&f, cx);
+    assert_eq!(
+        sent(&f),
+        [NewKey {
+            description: "new key".into(),
+            actions: vec!["documents:search".into()],
+            collections: vec!["*".into()],
+            expires_at: None,
+        }]
+    );
+}
+
+#[gpui_kit::test]
+async fn wildcard_warns(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    open_form(&f, cx);
+    assert!(!f.has(cx, "keys.wildcard_warning"));
+    f.click(cx, "keys.wildcard");
+    assert!(f.has(cx, "keys.wildcard_warning"));
+    f.click(cx, "keys.template.search_only");
+    assert!(!f.has(cx, "keys.wildcard_warning"));
+    f.click(cx, "keys.template.admin");
+    assert!(f.has(cx, "keys.wildcard_warning"));
+}
+
+#[gpui_kit::test]
+async fn empty_description_stays_in_the_form_and_sends_nothing(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    open_form(&f, cx);
+    f.click(cx, "keys.template.search_only");
+    f.click(cx, "keys.form.save");
+    assert!(f.label(cx, "keys.problem.0").contains("description"));
+    assert!(f.has(cx, "keys.form.description"));
+    assert!(sent(&f).is_empty());
+}
+
+fn pick_day(f: &Fixture, cx: &mut TestAppContext, day: NaiveDate) {
+    let dialog = f.dialog(cx);
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        let state = dialog.read(cx).date().clone();
+        let at = day.and_hms_opt(0, 0, 0).unwrap();
+        state.update(cx, |s, cx| s.set_date_time(at, window, cx));
+    })
+    .unwrap();
+    f.settle(cx);
+}
+
+#[gpui_kit::test]
+async fn past_date_is_refused(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    open_form(&f, cx);
+    f.fill(cx, "keys.form.description", "new key");
+    f.click(cx, "keys.template.search_only");
+    pick_day(&f, cx, NaiveDate::from_ymd_opt(2001, 1, 1).unwrap());
+    f.click(cx, "keys.form.save");
+    assert!(f.label(cx, "keys.problem.0").contains("past"));
+    assert!(sent(&f).is_empty());
+}
+
+#[gpui_kit::test]
+async fn date_means_the_end_of_that_day(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    open_form(&f, cx);
+    f.fill(cx, "keys.form.description", "new key");
+    f.click(cx, "keys.template.search_only");
+    let day = NaiveDate::from_ymd_opt(2099, 6, 15).unwrap();
+    pick_day(&f, cx, day);
+    f.click(cx, "keys.form.save");
+    let end = day.and_hms_opt(23, 59, 59).unwrap();
+    let want = Local.from_local_datetime(&end).earliest().unwrap();
+    assert_eq!(sent(&f)[0].expires_at, Some(want.timestamp()));
+}
+
+#[gpui_kit::test]
+async fn create_sends_the_chosen_actions(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    open_form(&f, cx);
+    f.fill(cx, "keys.form.description", "writer");
+    f.click(cx, "keys.action.documents:upsert");
+    f.click(cx, "keys.action.aliases:list");
+    f.click(cx, "keys.action.aliases:list");
+    f.click(cx, "keys.all_collections");
+    f.fill(cx, "keys.form.collections", "org_.*\nbooks\n");
+    f.click(cx, "keys.form.save");
+    let key = &sent(&f)[0];
+    assert_eq!(key.actions, ["documents:upsert"]);
+    assert_eq!(key.collections, ["org_.*", "books"]);
+}
+
+#[gpui_kit::test]
+async fn a_running_create_keeps_the_form_open(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    *f.admin.hold_create.lock().unwrap() = true;
+    create(&f, cx);
+    cx.update_window(f.handle.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+    assert!(f.has(cx, "keys.form.description"));
+}
+
+#[gpui_kit::test]
+async fn a_failed_create_stays_in_the_form(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    *f.admin.fail.lock().unwrap() = Some((400, "no such thing".into()));
+    create(&f, cx);
+    assert!(f.label(cx, "keys.form.error").contains("no such thing"));
+    assert!(f.has(cx, "keys.form.description"));
+    assert!(!f.has(cx, "keys.reveal_copy"));
+}
+
+#[gpui_kit::test]
+async fn reveal_shows_masked_and_copy_gives_the_value(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    create(&f, cx);
+    assert!(!f.has(cx, "keys.form.description"));
+    assert!(f.has(cx, "keys.reveal_warning"));
+    assert!(!f.label(cx, "keys.reveal_value").contains(VALUE));
+    f.click(cx, "keys.reveal_copy");
+    let copied = cx.update(|cx| cx.read_from_clipboard()).unwrap();
+    assert_eq!(copied.text().as_deref(), Some(VALUE));
+}
+
+#[gpui_kit::test]
+async fn reveal_ignores_escape(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    create(&f, cx);
+    assert!(f.has(cx, "keys.reveal_copy"));
+    cx.update_window(f.handle.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+    assert!(f.has(cx, "keys.reveal_copy"));
+}
+
+#[gpui_kit::test]
+async fn done_closes_the_reveal_and_selects_the_key(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    create(&f, cx);
+    let view = f.view(cx);
+    let reveal = cx.update(|cx| view.read(cx).reveal().unwrap().clone());
+    assert!(reveal.upgrade().is_some());
+    f.click(cx, "keys.reveal_done");
+    assert!(!f.has(cx, "keys.reveal_copy"));
+    assert!(
+        reveal.upgrade().is_none(),
+        "the value is gone with the dialog"
+    );
+    assert!(f.has(cx, "keys.row.77"));
+    assert!(
+        f.label(cx, "keys.detail.actions")
+            .contains("documents:search")
+    );
+}
+
+#[gpui_kit::test]
+async fn read_only_save_asks_to_unlock(cx: &mut TestAppContext) {
+    let mut profile = Profile::new("test", vec![node()]);
+    profile.read_only = true;
+    let f = Fixture::with(cx, profile, vec![]).await;
+    create(&f, cx);
+    assert!(f.has(cx, "danger.input"));
+    assert!(sent(&f).is_empty());
 }

@@ -16,15 +16,17 @@ use tessera_core::keys::{Expiry, expiry};
 use tessera_core::redact;
 use tessera_widgets::json_editor::JsonEditor;
 
+use super::key_dialog::{KeyDialog, RevealDialog};
 use super::{
     Danger, ErrorSlot, ListRow, ResourceColumn, ResourceList, client_of, confirm_write,
-    empty_state, list_error_text, list_toolbar, notice, report_to, row_button,
+    empty_state, list_error_text, notice, report_to, row_button, toolbar,
 };
 use crate::actions::{
-    DeleteResource, FocusResourceFilter, NextControl, PreviousControl, ReloadResource,
+    DeleteResource, FocusResourceFilter, NewResource, NextControl, PreviousControl, ReloadResource,
 };
 use crate::admin::AdminBackendGlobal;
 use crate::connection::{ConnectionState, error_text};
+use crate::state::AppState;
 
 /// Where the empty state points to.
 const DOCS_URL: &str = "https://typesense.org/docs/30.2/api/api-keys.html";
@@ -76,6 +78,7 @@ fn row(key: &ApiKey, now: Timestamp) -> ListRow {
 /// The content of a keys tab.
 pub struct KeysView {
     connection: Entity<ConnectionState>,
+    state: Entity<AppState>,
     list: Entity<ResourceList>,
     keys: Vec<ApiKey>,
     /// The first answer arrived.
@@ -87,6 +90,10 @@ pub struct KeysView {
     detail: Entity<JsonEditor>,
     /// Why the last write failed.
     error: Option<SharedString>,
+    /// The form opened last.
+    dialog: Option<Entity<KeyDialog>>,
+    /// The reveal opened last, weak: the dialog alone holds the value.
+    reveal: Option<WeakEntity<RevealDialog>>,
     focus_handle: FocusHandle,
     _subscription: Subscription,
 }
@@ -95,6 +102,7 @@ impl KeysView {
     /// The keys of `connection`; loads them.
     pub fn new(
         connection: Entity<ConnectionState>,
+        state: Entity<AppState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -104,6 +112,7 @@ impl KeysView {
         });
         let mut this = Self {
             connection,
+            state,
             list,
             keys: Vec::new(),
             loaded: false,
@@ -112,11 +121,40 @@ impl KeysView {
             followed: None,
             detail: cx.new(|cx| JsonEditor::new("", true, window, cx)),
             error: None,
+            dialog: None,
+            reveal: None,
             focus_handle: cx.focus_handle(),
             _subscription: subscription,
         };
         this.reload(cx);
         this
+    }
+
+    /// The form opened last.
+    pub fn dialog(&self) -> Option<&Entity<KeyDialog>> {
+        self.dialog.as_ref()
+    }
+
+    /// The reveal opened last.
+    pub fn reveal(&self) -> Option<&WeakEntity<RevealDialog>> {
+        self.reveal.as_ref()
+    }
+
+    pub(super) fn set_reveal(&mut self, reveal: WeakEntity<RevealDialog>) {
+        self.reveal = Some(reveal);
+    }
+
+    /// The reveal of key `id` closed: shows it in the list.
+    pub(super) fn created(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.list
+            .update(cx, |l, cx| l.select(Some(id.to_string()), cx));
+        self.reload(cx);
+    }
+
+    fn ask_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (connection, state) = (self.connection.clone(), self.state.clone());
+        let this = cx.entity().downgrade();
+        self.dialog = Some(KeyDialog::open(connection, state, this, window, cx));
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
@@ -270,11 +308,11 @@ impl Render for KeysView {
         let none = self.selected(cx).is_none();
         let left = v_flex()
             .size_full()
-            .child(list_toolbar(
+            .child(toolbar(
                 "keys",
                 &self.list,
                 &self.focus_handle,
-                None,
+                locked,
                 window,
                 cx,
             ))
@@ -305,6 +343,7 @@ impl Render for KeysView {
         div()
             .track_focus(&self.focus_handle)
             .size_full()
+            .on_action(cx.listener(|this, _: &NewResource, window, cx| this.ask_new(window, cx)))
             .on_action(cx.listener(|this, _: &DeleteResource, window, cx| {
                 this.ask_delete(window, cx);
             }))

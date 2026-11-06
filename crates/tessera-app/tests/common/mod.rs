@@ -1685,6 +1685,8 @@ pub struct FakeAdmin {
     pub fail_list: Mutex<Option<(u16, String)>>,
     /// Writes fail with this status and Typesense message.
     pub fail: Mutex<Option<(u16, String)>>,
+    /// `create_key` does not answer.
+    pub hold_create: Mutex<bool>,
     /// Every draft `create_key` got.
     pub created: Mutex<Vec<NewKey>>,
     /// Every `scoped_search`.
@@ -1724,7 +1726,11 @@ impl AdminBackend for FakeAdminBackend {
         if failed.is_none() {
             self.0.keys.lock().unwrap().push(created.clone());
         }
+        let hold = *self.0.hold_create.lock().unwrap();
         Box::pin(async move {
+            if hold {
+                std::future::pending::<()>().await;
+            }
             match failed {
                 Some(error) => Err(error),
                 None => Ok(CreatedKey {

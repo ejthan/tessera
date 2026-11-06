@@ -7,6 +7,7 @@ pub mod attachment;
 pub mod curation_dialog;
 pub mod curations;
 pub(crate) mod item_save;
+pub mod key_dialog;
 pub mod keys;
 pub mod name_dialog;
 pub mod presets;
@@ -85,7 +86,9 @@ impl ResourceView {
             ResourceKind::Curations => {
                 Self::Sets(cx.new(|cx| SetsView::new(SetKind::Curation, connection, window, cx)))
             }
-            ResourceKind::Keys => Self::Keys(cx.new(|cx| KeysView::new(connection, window, cx))),
+            ResourceKind::Keys => {
+                Self::Keys(cx.new(|cx| KeysView::new(connection, state, window, cx)))
+            }
         }
     }
 
@@ -357,18 +360,6 @@ pub(super) fn toolbar(
     window: &Window,
     cx: &App,
 ) -> impl IntoElement + use<> {
-    list_toolbar(prefix, list, focus, Some(locked), window, cx)
-}
-
-/// [`toolbar`] with New only where `new` holds whether it is locked.
-pub(super) fn list_toolbar(
-    prefix: &'static str,
-    list: &Entity<ResourceList>,
-    focus: &FocusHandle,
-    new: Option<bool>,
-    window: &Window,
-    cx: &App,
-) -> impl IntoElement + use<> {
     let (on_new, on_reload) = (focus.clone(), focus.clone());
     let filter_label = t!(format!("{prefix}.filter")).to_string();
     let new_id = SharedString::from(format!("{prefix}.new"));
@@ -391,7 +382,7 @@ pub(super) fn list_toolbar(
             ),
         )
         .child(div().flex_1())
-        .children(new.map(|locked| {
+        .child(
             Button::new(new_id.clone())
                 .primary()
                 .small()
@@ -402,8 +393,8 @@ pub(super) fn list_toolbar(
                     Some(RESOURCES),
                     window,
                 ))
-                .on_click(move |_, window, cx| on_new.dispatch_action(&NewResource, window, cx))
-        }))
+                .on_click(move |_, window, cx| on_new.dispatch_action(&NewResource, window, cx)),
+        )
         .child(
             Button::new(SharedString::from(format!("{prefix}.reload")))
                 .ghost()
