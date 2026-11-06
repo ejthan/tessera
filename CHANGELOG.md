@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Import preview and schema inference: `tessera-core` reads the first 1,000 rows of a file and proposes a schema (`int64` for integers, `float` when they mix with decimals, `string` with a note where types disagree, optional for keys that are sometimes missing, `enable_nested_fields` for objects, never `geopoint` on its own), skips keys the server would mishandle, and previews the first 20 rows checked against a schema with an estimate of how many documents the file holds.
 - Import and export readers: `tessera-core` reads JSON Lines, a JSON array or CSV as a stream of documents, detects the format from the name and first bytes, and never lets a line that is not UTF-8 or a record over 32 MiB reach the server, a stray CSV quote included. CSV cells follow the field types of the schema, a dotted header nests, and an empty cell leaves the key out.
 - Export groundwork: the client streams `documents/export` line by line with no total deadline, only a 120 s limit on silence, and logs one request per stream with its size, `cancelled` when it was dropped early. A line over 256 MiB or a body that breaks off is an error.
 - Import groundwork: the client sends one batch of documents to `documents/import` with an explicit action and `dirty_values` and returns one result per line, a line it cannot decode kept as a failure. The request log keeps no bodies of such a batch, says so in its detail and offers no curl command for it.

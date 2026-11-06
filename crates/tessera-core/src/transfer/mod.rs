@@ -4,6 +4,8 @@
 //! and preview. No UI; the readers are blocking and run off the async workers.
 
 pub mod csv_cells;
+pub mod infer;
+pub mod preview;
 pub mod source;
 
 /// Documents per import batch unless the user says otherwise.
