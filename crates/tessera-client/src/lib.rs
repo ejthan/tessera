@@ -14,6 +14,7 @@ mod raw;
 mod search;
 mod send;
 mod sets;
+mod stemming;
 mod stopwords;
 
 use std::fmt;
@@ -41,6 +42,7 @@ pub use search::{
 use secrecy::SecretString;
 use serde_json::{Value, json};
 pub use sets::{ItemSet, SetKind};
+pub use stemming::{StemmingDictionary, StemmingWord};
 pub use stopwords::StopwordSet;
 use url::Url;
 

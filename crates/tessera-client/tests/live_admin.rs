@@ -249,3 +249,109 @@ async fn live_aggregate_reaches_the_destination() {
     let _ = c.delete_collection(dest).await;
     assert!(hits > 0, "no aggregate reached the destination within 10 s");
 }
+
+// Stemming dictionaries.
+
+fn lines(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(w, r)| format!("{{\"word\":\"{w}\",\"root\":\"{r}\"}}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn roots(d: &tessera_client::StemmingDictionary) -> Vec<(String, String)> {
+    let mut v: Vec<_> = d
+        .words
+        .iter()
+        .map(|w| (w.word.clone(), w.root.clone()))
+        .collect();
+    v.sort();
+    v
+}
+
+fn pair(w: &str, r: &str) -> (String, String) {
+    (w.to_string(), r.to_string())
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_stemming_crud() {
+    let c = client();
+    let id = "tessera_it_stem_crud";
+    let _ = c.delete_stemming(id).await;
+    c.import_stemming(id, &lines(&[("people", "person"), ("mice", "mouse")]))
+        .await
+        .expect("import");
+    let first = c.stemming_dictionary(id).await;
+    c.import_stemming(id, &lines(&[("people", "human"), ("geese", "goose")]))
+        .await
+        .expect("merge");
+    let merged = c.stemming_dictionary(id).await;
+    let listed = c.stemming_dictionaries().await;
+    let deleted = c.delete_stemming(id).await;
+    let after = c.stemming_dictionaries().await;
+    let gone = c.stemming_dictionary(id).await;
+
+    assert_eq!(first.expect("get").id, id);
+    // Measured on 30.0 and 30.2: an import adds new words to an existing dictionary but keeps
+    // the root a word already has, whatever the docs and design 4.5 say. A new root needs a
+    // delete first, which `check_import` reports as a missing word.
+    assert_eq!(
+        roots(&merged.expect("merged")),
+        [
+            pair("geese", "goose"),
+            pair("mice", "mouse"),
+            pair("people", "person")
+        ]
+    );
+    assert!(listed.expect("list").iter().any(|d| d == id));
+    deleted.expect("delete");
+    assert!(!after.expect("list").iter().any(|d| d == id));
+    assert_eq!(status(&gone.expect_err("gone")), Some(404));
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_bad_line_keeps_the_lines_before_it() {
+    let c = client();
+    let id = "tessera_it_stem_bad";
+    let _ = c.delete_stemming(id).await;
+    let refused = c
+        .import_stemming(id, &format!("{}\nnot json", lines(&[("a", "b")])))
+        .await;
+    let stored = c.stemming_dictionary(id).await;
+    let _ = c.delete_stemming(id).await;
+    assert_eq!(status(&refused.expect_err("refused")), Some(400));
+    assert_eq!(
+        roots(&stored.expect("the first line was stored")),
+        [pair("a", "b")]
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_delete_of_an_unknown_id_answers_200() {
+    client()
+        .delete_stemming("tessera_it_stem_unknown")
+        .await
+        .expect("200 also for an unknown id");
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_odd_id_round_trips() {
+    let c = client();
+    let id = "a/b c";
+    let _ = c.delete_stemming(id).await;
+    let imported = c.import_stemming(id, &lines(&[("x", "y")])).await;
+    let read = c.stemming_dictionary(id).await;
+    let listed = c.stemming_dictionaries().await;
+    let deleted = c.delete_stemming(id).await;
+    imported.expect("import");
+    let read = read.expect("get");
+    assert_eq!(read.id, id);
+    assert_eq!(roots(&read), [pair("x", "y")]);
+    assert!(listed.expect("list").iter().any(|d| d == id));
+    deleted.expect("delete");
+}
