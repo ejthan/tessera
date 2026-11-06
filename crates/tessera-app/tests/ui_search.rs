@@ -597,8 +597,9 @@ async fn load_replaces_the_drafts(cx: &mut TestAppContext) {
     draft.params.insert("q".into(), "emma".into());
     let id = f.id;
     cx.update(|cx| {
-        f.state
-            .update(cx, |s, cx| s.open_search(id, Some(draft), cx))
+        f.state.update(cx, |s, cx| {
+            s.open_search(id, Some((vec![draft], false)), cx)
+        })
     });
     f.settle(cx);
     assert_eq!(f.panels(cx).len(), 1);
@@ -928,8 +929,9 @@ fn open_query_by(f: &Fixture, cx: &mut TestAppContext, collection: &str, field: 
     draft.params.insert("query_by".into(), field.into());
     let id = f.id;
     cx.update(|cx| {
-        f.state
-            .update(cx, |s, cx| s.open_search(id, Some(draft), cx))
+        f.state.update(cx, |s, cx| {
+            s.open_search(id, Some((vec![draft], false)), cx)
+        })
     });
     f.settle(cx);
 }

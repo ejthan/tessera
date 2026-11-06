@@ -13,7 +13,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, IntoElement,
+    Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
     prelude::*, px,
 };
@@ -26,7 +26,7 @@ use tessera_widgets::{JsonEditor, JsonEditorEvent, JsonMark, MarkSeverity};
 
 use super::copy::pretty;
 use super::review::{self, OnApply, ReviewData};
-use crate::actions::{INSPECTOR, RevertDocument, ReviewDocument, ToggleSaveMode};
+use crate::actions::{INSPECTOR, RevertDocument, ReviewDocument, ToggleSaveMode, gated};
 use crate::connection::{ConnectionState, error_text};
 use crate::documents::DocumentsBackendGlobal;
 use crate::views::env_badge;
@@ -599,6 +599,17 @@ impl Inspector {
         self.focus_handle.contains_focused(window, cx)
     }
 
+    /// What this pane disables or does not show now, for [`gated`].
+    fn gates(&self, cx: &App) -> [(bool, &'static dyn Action); 3] {
+        let no_review = self.check.blocked.is_some() || self.task.is_some() || self.base.is_none();
+        let existing = self.base.is_some() && self.mode != InspectorMode::New;
+        [
+            (no_review, &ReviewDocument),
+            (self.task.is_some() || !self.is_dirty(cx), &RevertDocument),
+            (!existing, &ToggleSaveMode),
+        ]
+    }
+
     /// The heading with the unsaved state and, once a document is there, how it is saved.
     fn header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
@@ -790,7 +801,7 @@ impl Render for Inspector {
         v_flex()
             .id("documents.inspector")
             .test_support()
-            .key_context(INSPECTOR)
+            .key_context(gated(INSPECTOR, &self.gates(cx)))
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &ReviewDocument, window, cx| this.review(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSaveMode, _, cx| this.toggle_save_mode(cx)))

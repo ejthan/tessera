@@ -4,6 +4,7 @@
 
 pub mod export;
 pub mod facet;
+pub mod fuzzy;
 pub mod history;
 pub mod params;
 pub mod results;

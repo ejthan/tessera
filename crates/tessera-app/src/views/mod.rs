@@ -13,6 +13,7 @@ pub mod import_dialog;
 pub mod metric_chart;
 pub mod node_card;
 pub mod overview;
+pub mod palette;
 pub mod request_detail;
 pub mod request_log;
 pub mod root;

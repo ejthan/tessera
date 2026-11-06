@@ -65,13 +65,13 @@ impl SearchWorkbench {
     }
 
     /// The draft's page, not the result's: a quick second Next goes on from the first.
-    fn page(&self) -> u64 {
+    pub(super) fn page(&self) -> u64 {
         let page = self.shown_param("page").parse();
         page.unwrap_or(1)
     }
 
     /// The last page of `result`. A union's `found` overstates, so a short page ends it.
-    fn last_page(&self, result: &SearchResult) -> u64 {
+    pub(super) fn last_page(&self, result: &SearchResult) -> u64 {
         let per_page = self.per_page();
         let pages = page_count(result.found, per_page);
         if pages > 0 && self.union_answer && (result.hits.len() as u64) < per_page {

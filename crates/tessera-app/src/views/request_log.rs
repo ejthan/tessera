@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use super::env_badge;
 use super::request_detail::{self, Detail};
-use crate::actions::{CopyAsCurl, REQUEST_LOG, ShowFullBody};
+use crate::actions::{CopyAsCurl, REQUEST_LOG, ShowFullBody, gated};
 use crate::state::AppState;
 
 /// Part of the window a full body's dialog takes.
@@ -313,6 +313,22 @@ impl RequestLogPanel {
         }
     }
 
+    /// Whether an entry is selected, so Copy as curl has something to copy.
+    pub fn has_selection(&self) -> bool {
+        self.selected.is_some()
+    }
+
+    /// The first cut body of the selected entry whose whole text is still kept.
+    fn kept_part(&self, cx: &App) -> Option<BodyPart> {
+        let detail = self.detail.as_ref()?;
+        let log = self.state.read(cx).log();
+        detail
+            .cut
+            .iter()
+            .map(|(part, _)| *part)
+            .find(|part| log.full_body(detail.id, *part).is_some())
+    }
+
     /// Open connections with their names, while there are several.
     fn connections(&self, cx: &App) -> Vec<(Uuid, String)> {
         let open = &self.state.read(cx).connections;
@@ -432,16 +448,7 @@ impl RequestLogPanel {
 
     /// Opens the selected entry's response if its full text is kept, else its request.
     pub fn show_full_body(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(detail) = &self.detail else {
-            return;
-        };
-        let log = self.state.read(cx).log();
-        let kept = detail
-            .cut
-            .iter()
-            .map(|(part, _)| *part)
-            .find(|part| log.full_body(detail.id, *part).is_some());
-        if let Some(part) = kept {
+        if let Some(part) = self.kept_part(cx) {
             self.open_full(part, window, cx);
         }
     }
@@ -775,6 +782,7 @@ impl Panel for RequestLogPanel {
 impl Render for RequestLogPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let full_body = self.full_body_bar(window, cx);
+        let no_full_body = self.kept_part(cx).is_none();
         let filters = self.render_filters(window, cx);
         let table = DataTable::new(&self.table)
             .xsmall()
@@ -784,7 +792,7 @@ impl Render for RequestLogPanel {
             .id("dock.bottom")
             .test_support()
             .track_focus(&self.focus_handle)
-            .key_context(REQUEST_LOG)
+            .key_context(gated(REQUEST_LOG, &[(no_full_body, &ShowFullBody)]))
             .size_full()
             .child(filters)
             .child(

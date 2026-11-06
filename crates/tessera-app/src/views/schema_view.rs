@@ -11,7 +11,7 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, IntoElement,
+    Action, App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, IntoElement,
     ParentElement as _, Render, SharedString, Stateful, Styled as _, Task, Window, div, prelude::*,
     px,
 };
@@ -323,6 +323,18 @@ impl SchemaView {
     /// The text of the JSON editor, for tests.
     pub fn editor_text(&self, cx: &App) -> String {
         self.editor.read(cx).text(cx)
+    }
+
+    /// What only a loaded schema can do, for [`gated`](crate::actions::gated). The documents
+    /// view has no handlers for these at all.
+    pub fn gates(&self, on_schema: bool) -> [(bool, &'static dyn Action); 4] {
+        let none = on_schema && self.loaded.is_none();
+        [
+            (none, &CloneCollection),
+            (none, &EditSchema),
+            (none, &TruncateCollection),
+            (none, &DeleteCollection),
+        ]
     }
 
     /// Opens the clone dialog for the loaded collection, unmasked; the dialog blanks the
