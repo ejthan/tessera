@@ -1289,6 +1289,8 @@ pub struct FakeRelevance {
     pub stored_target: Mutex<Option<String>>,
     /// Where `alias` says an alias points; `save_alias` moves it.
     pub alias_target: Mutex<Option<String>>,
+    /// `alias` answers 404.
+    pub alias_deleted: Mutex<bool>,
     /// Temp directories `copy_dir` made.
     pub copy_dirs: Mutex<Vec<PathBuf>>,
     /// The stopword sets on the server.
@@ -1602,9 +1604,15 @@ impl RelevanceBackend for FakeRelevanceBackend {
     ) -> tessera_app::collections::BoxFuture<Result<Alias, Error>> {
         self.0.record(format!("alias {name}"));
         let target = self.0.alias_target.lock().unwrap().clone();
-        let answer = self.0.outcome().map(|()| Alias {
-            name,
-            collection_name: target.unwrap_or_default(),
+        let deleted = *self.0.alias_deleted.lock().unwrap();
+        let answer = self.0.outcome().and_then(|()| {
+            if deleted {
+                return Err(http_error((404, "Not Found".into())));
+            }
+            Ok(Alias {
+                name,
+                collection_name: target.unwrap_or_default(),
+            })
         });
         Box::pin(async move { answer })
     }

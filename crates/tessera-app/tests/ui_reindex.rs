@@ -435,10 +435,24 @@ async fn a_failed_create_stays_on_the_first_step(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn a_short_export_warns_inline_and_goes_on(cx: &mut TestAppContext) {
+async fn a_short_export_stops_before_the_import(cx: &mut TestAppContext) {
     let f = Fixture::new(cx).await;
     f.start(cx);
     f.export_done(cx, 9);
+    assert!(f.transfer.imports.lock().unwrap().is_empty());
+    assert_eq!(f.step(cx), Step::Exporting(EXPORT));
+    assert!(f.text(cx, "reindex.stopped_detail").contains("9 of 10"));
+    assert!(!f.dir().exists());
+    assert!(f.has(cx, "reindex.delete_new"));
+    assert!(f.has(cx, "reindex.start_over"));
+    assert!(!f.has(cx, "reindex.warning"));
+}
+
+#[gpui_kit::test]
+async fn an_export_that_found_more_warns_and_goes_on(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.start(cx);
+    f.export_done(cx, 11);
     assert!(f.has(cx, "reindex.warning"));
     assert_eq!(f.step(cx), Step::Importing(IMPORT));
 }
@@ -663,6 +677,98 @@ async fn alias_moved_under_the_open_dialog_stops_the_switch(cx: &mut TestAppCont
     f.click(cx, "confirm.ok");
     assert!(f.text(cx, "reindex.error").contains("elsewhere"));
     assert!(!f.moved());
+}
+
+#[gpui_kit::test]
+async fn a_deleted_alias_refuses_the_start(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.data.data.lock().unwrap().as_mut().unwrap().1.clear();
+    f.start(cx);
+    assert!(f.text(cx, "reindex.error").contains(ALIAS));
+    assert_eq!(f.created(), 0);
+    assert_eq!(f.step(cx), Step::Schema);
+}
+
+#[gpui_kit::test]
+async fn an_alias_deleted_during_the_copy_leaves_a_way_out(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.start(cx);
+    f.export_done(cx, 10);
+    *f.relevance.alias_deleted.lock().unwrap() = true;
+    let target = f.target(cx);
+    f.set_count(&target, 10);
+    f.import_done(cx, IMPORT, 10, 0);
+    assert_eq!(f.step(cx), Step::Importing(IMPORT));
+    assert!(f.text(cx, "reindex.stopped").contains(&target));
+    assert!(f.text(cx, "reindex.stopped_detail").contains(ALIAS));
+    assert!(f.has(cx, "reindex.start_over"));
+    assert!(!f.has(cx, "reindex.switch"));
+
+    f.click(cx, "reindex.delete_new");
+    f.fill(cx, "danger.input", &target);
+    f.click(cx, "danger.ok");
+    assert_eq!(*f.data.deletes.lock().unwrap(), [target]);
+    assert_eq!(f.step(cx), Step::Schema);
+    assert!(!f.moved());
+}
+
+#[gpui_kit::test]
+async fn a_failed_compare_leaves_a_way_out_and_can_be_repeated(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.start(cx);
+    f.export_done(cx, 10);
+    *f.relevance.fail.lock().unwrap() = Some((503, "not ready".into()));
+    let target = f.target(cx);
+    f.set_count(&target, 10);
+    f.import_done(cx, IMPORT, 10, 0);
+    assert!(f.text(cx, "reindex.stopped_detail").contains("not ready"));
+    assert!(f.has(cx, "reindex.delete_new"));
+    assert!(f.has(cx, "reindex.start_over"));
+
+    *f.relevance.fail.lock().unwrap() = None;
+    f.click(cx, "reindex.compare_again");
+    assert!(matches!(f.step(cx), Step::Compare(c) if c.equal()));
+    assert!(!f.has(cx, "reindex.stopped"));
+}
+
+#[gpui_kit::test]
+async fn a_new_collection_that_serves_by_now_is_not_deleted(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.copied(cx, 9);
+    let target = f.target(cx);
+    f.click(cx, "reindex.delete_new");
+    f.fill(cx, "danger.input", &target);
+    *f.relevance.alias_target.lock().unwrap() = Some(target.clone());
+    f.click(cx, "danger.ok");
+    assert!(f.text(cx, "danger.error").contains(&target));
+    assert!(f.data.deletes.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn an_old_collection_that_serves_again_is_not_deleted(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.copied(cx, 10);
+    f.switch(cx);
+    f.click(cx, "reindex.delete_old");
+    f.fill(cx, "danger.input", "products");
+    *f.relevance.alias_target.lock().unwrap() = Some("products".into());
+    f.click(cx, "danger.ok");
+    assert!(f.text(cx, "danger.error").contains("products"));
+    assert!(f.data.deletes.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn an_old_collection_is_kept_when_the_new_one_lost_documents_by_now(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.copied(cx, 10);
+    f.switch(cx);
+    f.click(cx, "reindex.delete_old");
+    f.fill(cx, "danger.input", "products");
+    let target = f.target(cx);
+    f.set_count(&target, 9);
+    f.click(cx, "danger.ok");
+    assert!(f.has(cx, "danger.error"));
+    assert!(f.data.deletes.lock().unwrap().is_empty());
 }
 
 #[gpui_kit::test]

@@ -104,9 +104,17 @@ struct Imported {
 
 /// The server's state right before a step that depends on it.
 struct Fresh {
-    alias: Alias,
+    /// `None` once someone else deleted it.
+    alias: Option<Alias>,
     source: u64,
     target: u64,
+}
+
+impl Fresh {
+    fn points_to(&self, collection: &str) -> bool {
+        let alias = self.alias.as_ref();
+        alias.is_some_and(|a| a.collection_name == collection)
+    }
 }
 
 /// One reindex of one alias. It lives in the connection, so closing the tab loses nothing.
@@ -142,7 +150,7 @@ impl ReindexState {
         cx: &mut Context<Self>,
     ) -> Self {
         let jobs = cx.global::<JobsGlobal>().0.clone();
-        cx.on_release(|this: &mut Self, cx| this.release_dir(cx))
+        cx.on_release(|this: &mut Self, cx| this.release_dir(cx).detach())
             .detach();
         let subscriptions = [
             // Here, not on a view: the copy goes on with the tab closed.
@@ -150,14 +158,14 @@ impl ReindexState {
                 this.job_finished(event.0, &jobs, cx);
             }),
             // The job is told first: on Windows a file still open only leaves the directory
-            // behind. Waiting for it could outlast the time a quit gets.
+            // behind. Waiting for it could outlast the time a quit gets, so what a quit cuts
+            // short stays for the sweep at a later start.
             cx.on_app_quit(|this: &mut Self, cx| {
                 if let Step::Exporting(id) | Step::Importing(id) = this.step {
                     let jobs = cx.global::<JobsGlobal>().0.clone();
                     jobs.update(cx, |jobs, cx| jobs.stop(id, cx));
                 }
-                let dir = this.dir.take();
-                async move { drop(dir) }
+                this.release_dir(cx)
             }),
         ];
         let mut this = Self {
@@ -219,10 +227,9 @@ impl ReindexState {
     }
 
     /// Off the GPUI thread: this deletes a file of the size of the export.
-    fn release_dir(&mut self, cx: &App) {
-        if let Some(dir) = self.dir.take() {
-            cx.background_spawn(async move { drop(dir) }).detach();
-        }
+    fn release_dir(&mut self, cx: &App) -> Task<()> {
+        let dir = self.dir.take();
+        cx.background_spawn(async move { drop(dir) })
     }
 
     fn not_connected(&mut self, cx: &mut Context<Self>) {
@@ -512,8 +519,8 @@ impl ReindexState {
         }
         let source = self.source_name().to_string();
         let current = aliases.iter().find(|a| a.name == self.alias);
-        if let Some(alias) = current.filter(|a| a.collection_name != source) {
-            let text = moved_text(alias);
+        if current.is_none_or(|a| a.collection_name != source) {
+            let text = self.moved_text(current);
             return self.fail(text, cx);
         }
         let count = collections.iter().find(|c| c.name == source);
@@ -676,7 +683,7 @@ impl ReindexState {
 
     /// Why the copy ended, in full; the directory goes. Nothing moved.
     fn stop(&mut self, text: SharedString, cx: &mut Context<Self>) {
-        self.release_dir(cx);
+        self.release_dir(cx).detach();
         self.stopped = Some(text);
         cx.notify();
     }
@@ -706,6 +713,14 @@ impl ReindexState {
         match (self.step, numbers) {
             (Step::Exporting(_), Live::Export(progress)) => {
                 let expected = self.plan.as_ref().map_or(0, |p| p.source.num_documents);
+                if progress.docs < expected {
+                    let text = t!(
+                        "reindex.export_short",
+                        docs = grouped(progress.docs),
+                        expected = grouped(expected)
+                    );
+                    return self.stop(text.to_string().into(), cx);
+                }
                 if progress.docs != expected {
                     let text = t!(
                         "jobs.export_mismatch",
@@ -721,7 +736,7 @@ impl ReindexState {
                 self.start_import(Source::File(path), ReadOptions::new(Format::Jsonl), cx);
             }
             (Step::Importing(_), _) => {
-                self.release_dir(cx);
+                self.release_dir(cx).detach();
                 let progress = outcome.unwrap_or_default();
                 self.imported = Some(Imported {
                     job: id,
@@ -735,25 +750,57 @@ impl ReindexState {
         }
     }
 
+    /// Someone else moved or deleted the alias; overwriting that would lose their change.
+    fn moved_text(&self, alias: Option<&Alias>) -> String {
+        match alias {
+            Some(alias) => t!(
+                "reindex.alias_moved",
+                alias = alias.name,
+                target = alias.collection_name
+            ),
+            None => t!("reindex.alias_gone", alias = self.alias),
+        }
+        .to_string()
+    }
+
     /// Reads the alias and both collections. `Err` when the connection is gone.
     fn fresh(
         &self,
+        cx: &App,
+    ) -> Result<impl Future<Output = Result<Fresh, Error>> + use<>, SharedString> {
+        self.read_server(true, cx)
+    }
+
+    /// [`Self::fresh`]. Without `source` the old collection stays unread and counts 0: a delete
+    /// of the new collection must work whatever became of the old one.
+    fn read_server(
+        &self,
+        source: bool,
         cx: &App,
     ) -> Result<impl Future<Output = Result<Fresh, Error>> + use<>, SharedString> {
         let Some(client) = self.client(cx) else {
             return Err(gone());
         };
         let backend = cx.global::<CollectionsBackendGlobal>().0.clone();
-        let source = backend.get(client.clone(), self.source_name().to_string());
+        let old = source.then(|| backend.get(client.clone(), self.source_name().to_string()));
         let target = backend.get(client.clone(), self.target.clone());
         let alias = cx
             .global::<RelevanceBackendGlobal>()
             .0
             .alias(client, self.alias.clone());
         Ok(async move {
+            let alias = match alias.await {
+                Ok(alias) => Some(alias),
+                Err(Error::Http { status: 404, .. }) => None,
+                Err(e) => return Err(e),
+            };
+            let source = match old {
+                Some(old) => old.await?.num_documents,
+                None => 0,
+            };
             Ok(Fresh {
-                alias: alias.await?,
-                source: source.await?.num_documents,
+                alias,
+                source,
                 target: target.await?.num_documents,
             })
         })
@@ -777,6 +824,16 @@ impl ReindexState {
         connection.map_or_else(gone, |c| long_error_text(e, &c.read(cx).profile).into())
     }
 
+    /// A copy without a compare counts as stopped, so that it can be abandoned.
+    fn compare_failed(&mut self, text: SharedString, cx: &mut Context<Self>) {
+        if matches!(self.step, Step::Importing(_)) {
+            self.stopped = Some(text);
+        } else {
+            self.error = Some(text);
+        }
+        cx.notify();
+    }
+
     /// Reads both sides and shows the compare.
     pub fn compare(&mut self, cx: &mut Context<Self>) {
         if self.imported.is_none() {
@@ -784,7 +841,7 @@ impl ReindexState {
         }
         let fresh = match self.fresh(cx) {
             Ok(fresh) => fresh,
-            Err(text) => return self.fail(text, cx),
+            Err(text) => return self.compare_failed(text, cx),
         };
         self.busy = true;
         self.error = None;
@@ -793,11 +850,15 @@ impl ReindexState {
             this.update(cx, |this, cx| {
                 this.busy = false;
                 match fresh {
+                    Ok(fresh) if fresh.alias.is_none() => {
+                        this.compare_failed(this.moved_text(None).into(), cx);
+                    }
                     Ok(fresh) => {
                         this.old_count = fresh.source;
+                        this.stopped = None;
                         this.step = Step::Compare(this.compared(&fresh));
                     }
-                    Err(e) => this.error = Some(this.profile_text(&e, cx)),
+                    Err(e) => this.compare_failed(this.profile_text(&e, cx), cx),
                 }
                 cx.notify();
             })
@@ -809,8 +870,8 @@ impl ReindexState {
 
     /// Whether the switch may go on, on what the server says now.
     fn may_switch(&self, fresh: &Fresh) -> Result<Compared, SharedString> {
-        if fresh.alias.collection_name != self.source_name() {
-            return Err(moved_text(&fresh.alias).into());
+        if !fresh.points_to(self.source_name()) {
+            return Err(self.moved_text(fresh.alias.as_ref()).into());
         }
         let compared = self.compared(fresh);
         if !compared.equal() {
@@ -867,7 +928,7 @@ impl ReindexState {
     }
 
     fn confirm_switch(&mut self, fresh: &Fresh, window: &mut Window, cx: &mut Context<Self>) {
-        if fresh.alias.collection_name == self.source_name() {
+        if fresh.points_to(self.source_name()) {
             self.step = Step::Compare(self.compared(fresh));
         }
         if let Err(text) = self.may_switch(fresh) {
@@ -990,10 +1051,10 @@ impl ReindexState {
             this.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match fresh {
-                    Ok(fresh) if fresh.alias.collection_name == this.target => {
+                    Ok(fresh) if fresh.points_to(&this.target) => {
                         this.confirm_switch_back(&fresh, window, cx);
                     }
-                    Ok(fresh) => this.fail(moved_text(&fresh.alias), cx),
+                    Ok(fresh) => this.fail(this.moved_text(fresh.alias.as_ref()), cx),
                     Err(e) => {
                         let text = this.profile_text(&e, cx);
                         this.fail(text, cx);
@@ -1045,8 +1106,8 @@ impl ReindexState {
             let fresh = fresh.await;
             let checked = this.update(cx, |this, cx| {
                 let fresh = fresh.map_err(|e| this.profile_text(&e, cx))?;
-                if fresh.alias.collection_name != target {
-                    return Err(SharedString::from(moved_text(&fresh.alias)));
+                if !fresh.points_to(&target) {
+                    return Err(SharedString::from(this.moved_text(fresh.alias.as_ref())));
                 }
                 Ok(fresh)
             });
@@ -1124,7 +1185,7 @@ impl ReindexState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let fresh = match self.fresh(cx) {
+        let fresh = match self.read_server(old, cx) {
             Ok(fresh) => fresh,
             Err(text) => return self.fail(text, cx),
         };
@@ -1159,25 +1220,14 @@ impl ReindexState {
         let Some(connection) = self.connection.upgrade() else {
             return;
         };
-        let serving = fresh.alias.collection_name == self.target;
-        let (name, documents) = if old {
-            if !serving {
-                return self.fail(moved_text(&fresh.alias), cx);
-            }
-            if fresh.target < fresh.source {
-                let text = t!(
-                    "reindex.counts_changed",
-                    expected = grouped(fresh.source),
-                    target = grouped(fresh.target)
-                );
-                return self.fail(text.to_string(), cx);
-            }
-            (self.source_name().to_string(), fresh.source)
-        } else {
-            if serving {
-                return self.fail(moved_text(&fresh.alias), cx);
-            }
-            (self.target.clone(), fresh.target)
+        let (name, documents) = match self.may_delete(old, fresh) {
+            Ok(found) => found,
+            Err(text) => return self.fail(text, cx),
+        };
+        let this = cx.entity().downgrade();
+        let check = move |cx: &mut App| {
+            let task = this.update(cx, |this, cx| this.recheck_delete(old, cx));
+            task.unwrap_or_else(|_| Task::ready(Err(gone())))
         };
         let this = cx.entity().downgrade();
         let after = move |cx: &mut App| {
@@ -1190,12 +1240,53 @@ impl ReindexState {
             })
             .ok();
         };
-        collection_danger::delete_then(state, connection, name, documents, after, window, cx);
+        collection_danger::delete_then(
+            state, connection, name, documents, check, after, window, cx,
+        );
+    }
+
+    /// What may be deleted and its count, on what the server says now.
+    fn may_delete(&self, old: bool, fresh: &Fresh) -> Result<(String, u64), SharedString> {
+        let serving = fresh.points_to(&self.target);
+        if old {
+            if !serving {
+                return Err(self.moved_text(fresh.alias.as_ref()).into());
+            }
+            if fresh.target < fresh.source {
+                let text = t!(
+                    "reindex.counts_changed",
+                    expected = grouped(fresh.source),
+                    target = grouped(fresh.target)
+                );
+                return Err(text.to_string().into());
+            }
+            Ok((self.source_name().to_string(), fresh.source))
+        } else if serving {
+            Err(self.moved_text(fresh.alias.as_ref()).into())
+        } else {
+            Ok((self.target.clone(), fresh.target))
+        }
+    }
+
+    /// Reads once more, since the dialog may have stood open. Runs on with the tab closed.
+    fn recheck_delete(&self, old: bool, cx: &mut Context<Self>) -> Task<Result<(), SharedString>> {
+        let fresh = match self.read_server(old, cx) {
+            Ok(fresh) => fresh,
+            Err(text) => return Task::ready(Err(text)),
+        };
+        cx.spawn(async move |this, cx| {
+            let fresh = fresh.await;
+            this.update(cx, |this, cx| {
+                let fresh = fresh.map_err(|e| this.profile_text(&e, cx))?;
+                this.may_delete(old, &fresh).map(drop)
+            })
+            .map_err(|_| gone())?
+        })
     }
 
     /// Back to step one, with a new name. A new collection that was kept stays.
     pub fn start_over(&mut self, cx: &mut Context<Self>) {
-        self.release_dir(cx);
+        self.release_dir(cx).detach();
         self.step = Step::Schema;
         self.plan = None;
         self.imported = None;
@@ -1206,7 +1297,7 @@ impl ReindexState {
 
     /// Ends the assistant and forgets it.
     pub fn finish(&mut self, cx: &mut Context<Self>) {
-        self.release_dir(cx);
+        self.release_dir(cx).detach();
         self.step = Step::Done;
         if let Some(connection) = self.connection.upgrade() {
             let alias = self.alias.clone();
@@ -1225,16 +1316,6 @@ fn gone() -> SharedString {
 
 /// The file inside the temp directory.
 const DOCUMENTS: &str = "documents.jsonl";
-
-/// Someone else moved the alias; overwriting that would lose their change.
-fn moved_text(alias: &Alias) -> String {
-    t!(
-        "reindex.alias_moved",
-        alias = alias.name,
-        target = alias.collection_name
-    )
-    .to_string()
-}
 
 impl ErrorSlot for ReindexState {
     fn error_slot(&mut self) -> &mut Option<SharedString> {
@@ -1664,12 +1745,16 @@ impl ReindexView {
                     .map(|text| notice("reindex.job", text.into(), muted)),
             )
             .children(r.stopped.clone().map(|text| {
-                let moved = t!(
-                    "reindex.stopped",
-                    alias = r.alias,
-                    source = r.source_name(),
-                    target = r.target
-                );
+                let moved = if r.imported.is_some() {
+                    t!("reindex.compare_failed", target = r.target)
+                } else {
+                    t!(
+                        "reindex.stopped",
+                        alias = r.alias,
+                        source = r.source_name(),
+                        target = r.target
+                    )
+                };
                 v_flex()
                     .child(notice("reindex.stopped", moved.to_string().into(), danger))
                     .child(notice("reindex.stopped_detail", text, danger))

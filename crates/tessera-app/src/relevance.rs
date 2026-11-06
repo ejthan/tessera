@@ -2,8 +2,10 @@
 
 //! Aliases, stopwords and presets: the backend seam the resource views run through.
 
-use std::path::PathBuf;
+use std::fs::Metadata;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use gpui_kit::Global;
 use serde_json::Value;
@@ -307,7 +309,7 @@ impl RelevanceBackend for TokioBackend {
         self.run(async {
             let made = tokio::task::spawn_blocking(|| {
                 let mut builder = tempfile::Builder::new();
-                builder.prefix("tessera-reindex-");
+                builder.prefix(COPY_PREFIX);
                 // A temp directory takes the default mode, and this one holds every document.
                 #[cfg(unix)]
                 {
@@ -328,6 +330,65 @@ impl RelevanceBackend for TokioBackend {
 /// The real backend, on the tokio runtime.
 pub fn tokio_backend(handle: Handle) -> Arc<dyn RelevanceBackend> {
     Arc::new(TokioBackend(handle))
+}
+
+/// What a reindex copy's temp directory is named after.
+const COPY_PREFIX: &str = "tessera-reindex-";
+
+/// How old a copy must be to go.
+///
+/// shortcut: the directory's own time, which an export running in a second instance for over a
+/// day does not touch; that copy would fail and stop. Read the file's time if that ever matters.
+const STALE_COPY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Removes the copies a crash left in the temp directory; each holds every document of its
+/// collection. Blocks, so it does not run on the GPUI thread.
+pub fn sweep_copies() {
+    let root = std::env::temp_dir();
+    let swept = mine(&root).and_then(|mine| remove_stale_copies(&root, SystemTime::now(), mine));
+    if let Err(e) = swept {
+        tracing::warn!("the sweep of old reindex copies failed: {e}");
+    }
+}
+
+/// Whether this user owns an entry of `root`. std cannot name the user, but what this process
+/// makes is owned by it.
+#[cfg(unix)]
+fn mine(root: &Path) -> std::io::Result<impl Fn(&Metadata) -> bool + use<>> {
+    use std::os::unix::fs::MetadataExt as _;
+    let uid = tempfile::tempfile_in(root)?.metadata()?.uid();
+    Ok(move |entry: &Metadata| entry.uid() == uid)
+}
+
+/// The temp directory itself is per user here.
+#[cfg(not(unix))]
+fn mine(_: &Path) -> std::io::Result<impl Fn(&Metadata) -> bool + use<>> {
+    Ok(|_: &Metadata| true)
+}
+
+fn remove_stale_copies(
+    root: &Path,
+    now: SystemTime,
+    mine: impl Fn(&Metadata) -> bool,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(root)?.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(COPY_PREFIX) {
+            continue;
+        }
+        // Not followed: a link named like a copy is not a directory here.
+        let Ok(found) = entry.metadata() else {
+            continue;
+        };
+        let age = found.modified().ok();
+        let age = age.and_then(|at| now.duration_since(at).ok());
+        if found.is_dir() && mine(&found) && age.is_some_and(|age| age > STALE_COPY) {
+            let path = entry.path();
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                tracing::warn!("{} could not be removed: {e}", path.display());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -454,6 +515,40 @@ mod tests {
         }
         drop(dir);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn only_old_copies_of_this_user_are_swept() {
+        let root = tempfile::tempdir().unwrap();
+        let make = |name: &str| {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(path.join("documents.jsonl"), "{}").unwrap();
+            path
+        };
+        let (copy, other) = (make("tessera-reindex-old"), make("something-else"));
+        let file = root.path().join("tessera-reindex-file");
+        std::fs::write(&file, "kept").unwrap();
+        #[cfg(unix)]
+        let link = {
+            let link = root.path().join("tessera-reindex-link");
+            std::os::unix::fs::symlink(&other, &link).unwrap();
+            link
+        };
+
+        let later = SystemTime::now() + 2 * STALE_COPY;
+        let mine = || mine(root.path()).unwrap();
+        remove_stale_copies(root.path(), SystemTime::now(), mine()).unwrap();
+        assert!(copy.exists(), "younger than a day");
+        remove_stale_copies(root.path(), later, |_| false).unwrap();
+        assert!(copy.exists(), "someone else's");
+
+        remove_stale_copies(root.path(), later, mine()).unwrap();
+        assert!(!copy.exists());
+        assert!(other.join("documents.jsonl").exists());
+        assert!(file.exists());
+        #[cfg(unix)]
+        assert!(link.symlink_metadata().is_ok());
     }
 
     #[tokio::test]

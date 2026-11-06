@@ -17,6 +17,9 @@ use crate::state::AppState;
 /// What a caller runs after the delete.
 type After = dyn Fn(&mut App);
 
+/// What a caller checks right before the delete; `Err` says why it must not go on.
+type Check = dyn Fn(&mut App) -> Task<Result<(), SharedString>>;
+
 /// Which of the two actions.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -41,6 +44,7 @@ pub fn truncate(
         connection,
         name,
         documents,
+        no_check(),
         after,
         window,
         cx,
@@ -64,18 +68,22 @@ pub fn delete(
         connection,
         name,
         documents,
+        no_check(),
         after,
         window,
         cx,
     );
 }
 
-/// [`delete`], then `after` once the collection is gone.
+/// [`delete`], which `check` can still refuse at the confirm, then `after` once the collection
+/// is gone.
+#[allow(clippy::too_many_arguments)]
 pub fn delete_then(
     state: Entity<AppState>,
     connection: Entity<ConnectionState>,
     name: String,
     documents: u64,
+    check: impl Fn(&mut App) -> Task<Result<(), SharedString>> + 'static,
     after: impl Fn(&mut App) + 'static,
     window: &mut Window,
     cx: &mut App,
@@ -87,10 +95,15 @@ pub fn delete_then(
         connection,
         name,
         documents,
+        Rc::new(check),
         after,
         window,
         cx,
     );
+}
+
+fn no_check() -> Rc<Check> {
+    Rc::new(|_| Task::ready(Ok(())))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -100,6 +113,7 @@ fn prepare(
     connection: Entity<ConnectionState>,
     name: String,
     documents: u64,
+    check: Rc<Check>,
     after: Rc<After>,
     window: &mut Window,
     cx: &mut App,
@@ -114,7 +128,9 @@ fn prepare(
             let Some(client) = client(&connection, cx) else {
                 let detail = t!("status.not_connected").to_string();
                 let lines = lines(kind, &name, documents, Ok(&[]), Some(detail));
-                return open(kind, state, connection, name, lines, after, window, cx);
+                return open(
+                    kind, state, connection, name, lines, check, after, window, cx,
+                );
             };
             let list = cx.global::<CollectionsBackendGlobal>().0.list(client);
             connection.update(cx, |c, _| c.danger_loading = true);
@@ -146,7 +162,9 @@ fn prepare(
                                 lines(kind, &name, documents, aliases, Some(detail))
                             }
                         };
-                        open(kind, state, connection, name, lines, after, window, cx);
+                        open(
+                            kind, state, connection, name, lines, check, after, window, cx,
+                        );
                     })
                     .ok();
                 })
@@ -218,6 +236,7 @@ fn open(
     connection: Entity<ConnectionState>,
     name: String,
     consequences: Vec<SharedString>,
+    check: Rc<Check>,
     after: Rc<After>,
     window: &mut Window,
     cx: &mut App,
@@ -248,14 +267,16 @@ fn open(
             };
             let backend = cx.global::<CollectionsBackendGlobal>().0.clone();
             let profile = profile.clone();
-            let run: crate::collections::BoxFuture<Result<(), Error>> = match kind {
-                Kind::Truncate => {
-                    let fut = backend.truncate(client, name.clone());
-                    Box::pin(async move { fut.await.map(drop) })
-                }
-                Kind::Delete => backend.delete(client, name.clone()),
-            };
+            let checked = check(cx);
             cx.spawn(async move |cx| {
+                checked.await?;
+                let run: crate::collections::BoxFuture<Result<(), Error>> = match kind {
+                    Kind::Truncate => {
+                        let fut = backend.truncate(client, name.clone());
+                        Box::pin(async move { fut.await.map(drop) })
+                    }
+                    Kind::Delete => backend.delete(client, name.clone()),
+                };
                 match run.await {
                     // Already gone is what the user wanted; DELETE is retried on another node
                     // after a network error, so the retry can find it deleted.
