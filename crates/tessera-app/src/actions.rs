@@ -69,6 +69,7 @@ gpui_kit::actions!(
         BulkContinue,
         OpenSearchTab,
         OpenConsoleTab,
+        ShowFullBody,
         SendRequest,
         AddQueryRow,
         AttachFile,
@@ -148,6 +149,8 @@ const WORKBENCH_INPUT: &str = "Workbench > Input";
 pub const CONDITION_ROW: &str = "ConditionRow";
 /// The value input of that row.
 const CONDITION_INPUT: &str = "ConditionRow > Input";
+/// Key context of the request log panel.
+pub const REQUEST_LOG: &str = "RequestLog";
 /// Key context of the raw console.
 pub const CONSOLE: &str = "Console";
 /// Key context of an input in the console, where ⌘↩ / Ctrl+↩ still sends.
@@ -316,6 +319,10 @@ const UPDATE_QUERY: &str = "cmd-shift-u";
 #[cfg(not(target_os = "macos"))]
 const UPDATE_QUERY: &str = "ctrl-shift-u";
 #[cfg(target_os = "macos")]
+const SHOW_FULL_BODY: &str = "cmd-shift-b";
+#[cfg(not(target_os = "macos"))]
+const SHOW_FULL_BODY: &str = "ctrl-shift-b";
+#[cfg(target_os = "macos")]
 const OPEN_CONSOLE: &str = "cmd-shift-y";
 #[cfg(not(target_os = "macos"))]
 const OPEN_CONSOLE: &str = "ctrl-shift-y";
@@ -483,6 +490,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SAVE, AddField, Some(SCHEMA_LAST_FIELD)),
         KeyBinding::new(OPEN_SEARCH, OpenSearchTab, None),
         KeyBinding::new(OPEN_CONSOLE, OpenConsoleTab, None),
+        KeyBinding::new(SHOW_FULL_BODY, ShowFullBody, Some(REQUEST_LOG)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(CONSOLE)),
         KeyBinding::new(SAVE, SendRequest, Some(CONSOLE)),
         KeyBinding::new(SAVE, SendRequest, Some(CONSOLE_INPUT)),

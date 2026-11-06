@@ -154,6 +154,11 @@ impl RootView {
         Some(connection_tab(self.dock.read(cx), self.active?)?.connection(cx))
     }
 
+    /// The request log panel.
+    pub fn log_panel(&self) -> &Entity<RequestLogPanel> {
+        &self.log
+    }
+
     /// The dock area, for tests that rearrange panels as a user would by dragging.
     pub fn dock(&self) -> &Entity<DockArea> {
         &self.dock

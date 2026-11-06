@@ -8,7 +8,7 @@ use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::{App, IntoElement, ParentElement as _, SharedString, Styled as _, div, prelude::*};
 use rust_i18n::t;
 use tessera_client::Body;
-use tessera_core::log::LogEntry;
+use tessera_core::log::{BodyPart, LogEntry};
 use tessera_core::redact;
 
 use super::request_log::path_and_query;
@@ -18,6 +18,8 @@ use super::request_log::path_and_query;
 pub struct Detail {
     /// Event id of the entry.
     pub id: u64,
+    /// The bodies shown cut, which may have their whole text in the log.
+    pub cut: Vec<BodyPart>,
     sections: Vec<(SharedString, SharedString)>,
     /// All sections as one text, for assistive technology.
     label: SharedString,
@@ -28,6 +30,13 @@ impl Detail {
     /// [`redact::key`].
     pub fn new(entry: &LogEntry) -> Self {
         let e = &entry.event;
+        let is_cut =
+            |body: &Option<Body>| body.as_ref().is_some_and(|b| b.original_len > b.text.len());
+        let cut = [
+            (BodyPart::Response, is_cut(&e.response_body)),
+            (BodyPart::Request, is_cut(&e.request_body)),
+        ];
+        let cut = cut.iter().filter(|(_, cut)| *cut).map(|(part, _)| *part);
         // Built as text: `Url` would percent-encode the mask in the query.
         let url = format!(
             "{}{}",
@@ -79,6 +88,7 @@ impl Detail {
             .join("\n\n");
         Self {
             id: e.id,
+            cut: cut.collect(),
             sections: sections
                 .into_iter()
                 .map(|(h, text)| (h.to_string().into(), text.into()))
@@ -183,6 +193,7 @@ mod tests {
                 request_body: Some(Body {
                     text: r#"{"value":"secret"}"#.into(),
                     original_len: 18,
+                    full: None,
                 }),
                 response_body: None,
                 status: None,

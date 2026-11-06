@@ -122,9 +122,25 @@ D34. `Client` gains a private `read_post: bool`, false everywhere except a clone
 | `RAW_FILE_MAX` | 64 MiB | A console body from a file is held in memory |
 | `FULL_BODY_MAX` | 32 MiB | Largest body kept whole (D42) |
 | `FULL_BODY_BUDGET` | 64 MiB | All full bodies together (D42) |
-| `HIGHLIGHT_MAX` | 1 MiB | Above this `BodyView` shows plain text (§6.2) |
-| `VIEW_MAX` | 8 MiB | Above this `BodyView` shows the start and offers Copy all (§6.2) |
+| `HIGHLIGHT_MAX` | 32 KiB | Above this `BodyView` shows plain text (§6.2). Measured in Task 12, below |
+| `VIEW_MAX` | 512 KiB | Above this `BodyView` shows the start and offers Copy all (§6.2). Measured in Task 12, below |
 | `PALETTE_LIMIT` | 100 rows | One render of the list |
+
+Task 12 lowered `HIGHLIGHT_MAX` from 1 MiB and `VIEW_MAX` from 8 MiB. The kit does its layout and highlighting on the UI thread before the first frame. Measured with a release build on an Apple M3 Max, pretty-printed JSON at about 18 bytes a line, calling `Window::draw` in a real window that was not on screen, so without GPU present: time to build the editor plus its first draw, warm.
+
+| Bytes | Plain | Highlighted | Scroll p95, plain / highlighted |
+|---|---|---|---|
+| 32 KiB | 3.0 ms | 11.2 ms | 1.5 / 2.4 ms |
+| 64 KiB | 3.7 ms | 20.5 ms | 1.5 / 2.4 ms |
+| 128 KiB | 4.8 ms | 30.7 ms | 1.8 / 2.4 ms |
+| 256 KiB | 10.1 ms | 32.2 ms | 1.8 / 2.2 ms |
+| 512 KiB | 11.6 ms | 72.6 ms | 1.9 / 1.9 ms |
+| 1 MiB | 21.1 ms | 109.4 ms | 1.6 / 1.1 ms |
+| 2 MiB | 28.4 ms | 210.6 ms | 2.9 / 1.8 ms |
+| 4 MiB | 52.1 ms | not run | 4.3 ms |
+| 8 MiB | 91.3 ms | not run | 3.9 ms |
+
+With the new limits, an 8 MiB body through `BodyView` has a first draw of 6.6 ms, and draws stay at 1.7 ms p95 while scrolling. The first editor of a process costs about 10 ms more, cold. A single line of 512 KiB that is not JSON takes 21 ms once. These runs are not the reference machine; NF4's manual check with the overlay still stands.
 
 ### 4.5 Raw requests
 
@@ -383,7 +399,7 @@ fn clear(&mut self, window, cx);
 fn shown(&self) -> Shown;   // Highlighted, Plain, Cut { shown, total }
 ```
 
-- Formatting runs through `cx.background_spawn`: `serde_json` pretty print when the text is under `VIEW_MAX`.
+- Formatting runs through `cx.background_spawn`: `serde_json` pretty print up to 32 MiB, so a compact body is cut as lines, then the cut at `VIEW_MAX`.
 - Up to `HIGHLIGHT_MAX` it shows highlighted. Up to `VIEW_MAX` it shows plain, without a language, which the kit draws unhighlighted. Above that it shows the first `VIEW_MAX` bytes on a char boundary, plain, with "Showing 8.0 MB of 41.2 MB" and Copy all.
 - Pinned facts: `gpui-base-0.9.0/src/input/base/state.rs` says the editor handles "large text up to about 50K lines", and `default_value` and `set_value` build the rope on the UI thread. Hence the limits, and Task 12 measures them (§12).
 - `JsonEditor` gains `JsonEditor::plain(text, window, cx)`, without `.language("json")`, read-only.

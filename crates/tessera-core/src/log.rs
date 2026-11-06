@@ -5,13 +5,24 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use tessera_client::{Method, Origin, RequestEvent};
+use tessera_client::{Body, Method, Origin, RequestEvent};
 use uuid::Uuid;
 
 /// Capacity of the buffer for [`Origin::User`] entries.
 pub const USER_CAP: usize = 5000;
 /// Capacity of the buffer for [`Origin::Polling`] entries.
 pub const POLLING_CAP: usize = 500;
+/// Bytes of full bodies kept, over all entries (64 MiB).
+pub const FULL_BODY_BUDGET: usize = 64 << 20;
+
+/// Which body of a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyPart {
+    /// What was sent.
+    Request,
+    /// What came back.
+    Response,
+}
 
 /// One logged request with the connection it belongs to.
 #[derive(Debug, Clone)]
@@ -61,13 +72,26 @@ impl Filter {
     }
 }
 
-/// Bounded log of requests; the oldest entry of a full buffer is dropped first.
-#[derive(Debug)]
+/// Bounded log of requests; the oldest entry of a full buffer is dropped first. Full bodies
+/// live apart under [`FULL_BODY_BUDGET`], so that budget alone bounds their memory.
 pub struct RequestLog {
     user: VecDeque<LogEntry>,
     polling: VecDeque<LogEntry>,
     user_cap: usize,
     polling_cap: usize,
+    full: VecDeque<(u64, BodyPart, Arc<str>)>,
+    full_bytes: usize,
+}
+
+// Lengths only: a full body can hold a key.
+impl std::fmt::Debug for RequestLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestLog")
+            .field("user", &self.user.len())
+            .field("polling", &self.polling.len())
+            .field("full_bytes", &self.full_bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for RequestLog {
@@ -84,11 +108,31 @@ impl RequestLog {
             polling: VecDeque::new(),
             user_cap,
             polling_cap,
+            full: VecDeque::new(),
+            full_bytes: 0,
+        }
+    }
+
+    /// Moves the full body of `body` out of the entry, evicting the oldest past the budget.
+    fn keep_full(&mut self, id: u64, part: BodyPart, body: Option<&mut Body>) {
+        let Some(full) = body.and_then(|b| b.full.take()) else {
+            return;
+        };
+        self.full_bytes += full.len();
+        self.full.push_back((id, part, full));
+        while self.full_bytes > FULL_BODY_BUDGET {
+            let Some((.., oldest)) = self.full.pop_front() else {
+                break;
+            };
+            self.full_bytes -= oldest.len();
         }
     }
 
     /// Adds an entry to the buffer of its origin, evicting that buffer's oldest if full.
-    pub fn push(&mut self, entry: LogEntry) {
+    pub fn push(&mut self, mut entry: LogEntry) {
+        let id = entry.event.id;
+        self.keep_full(id, BodyPart::Request, entry.event.request_body.as_mut());
+        self.keep_full(id, BodyPart::Response, entry.event.response_body.as_mut());
         let (buf, cap) = match entry.event.origin {
             Origin::User => (&mut self.user, self.user_cap),
             Origin::Polling => (&mut self.polling, self.polling_cap),
@@ -134,10 +178,18 @@ impl RequestLog {
             .chain(&self.polling)
             .find(|e| e.event.id == id)
     }
+
+    /// The whole text of a cut body, while the budget still holds it.
+    pub fn full_body(&self, id: u64, part: BodyPart) -> Option<Arc<str>> {
+        let kept = self.full.iter().find(|(i, p, _)| *i == id && *p == part);
+        kept.map(|(.., full)| full.clone())
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use std::time::{Duration, SystemTime};
 
     use super::*;
@@ -268,6 +320,69 @@ pub(crate) mod tests {
             log.push(e);
         }
         assert_eq!(ids(&log, &f), [1, 2, 3]);
+    }
+
+    fn with_full(id: u64, response: &Arc<str>) -> LogEntry {
+        let mut e = entry(id, Method::GET, Origin::User, Some(200));
+        let body = |full: &Arc<str>| Body {
+            text: "cut".into(),
+            original_len: full.len(),
+            full: Some(full.clone()),
+        };
+        e.event.response_body = Some(body(response));
+        e
+    }
+
+    #[test]
+    fn push_moves_full_bodies_out_of_the_entry() {
+        let mut log = RequestLog::default();
+        let full: Arc<str> = "whole".into();
+        let mut e = with_full(1, &full);
+        e.event.request_body = Some(Body {
+            text: "cut".into(),
+            original_len: 7,
+            full: Some("request".into()),
+        });
+        log.push(e);
+        let kept = log.get(1).unwrap();
+        assert!(kept.event.response_body.as_ref().unwrap().full.is_none());
+        assert!(kept.event.request_body.as_ref().unwrap().full.is_none());
+        assert_eq!(log.full_body(1, BodyPart::Response), Some(full));
+        assert_eq!(log.full_body(1, BodyPart::Request), Some("request".into()));
+        assert_eq!(log.full_body(2, BodyPart::Response), None);
+    }
+
+    #[test]
+    fn budget_evicts_the_oldest() {
+        let mut log = RequestLog::default();
+        let big: Arc<str> = "x".repeat(FULL_BODY_BUDGET / 2).into();
+        for id in 1..=3 {
+            log.push(with_full(id, &big));
+        }
+        assert!(log.full_body(1, BodyPart::Response).is_none());
+        assert!(log.full_body(2, BodyPart::Response).is_some());
+        assert!(log.full_body(3, BodyPart::Response).is_some());
+        assert_eq!(log.full_bytes, FULL_BODY_BUDGET);
+    }
+
+    #[test]
+    fn full_body_of_an_evicted_entry_is_none() {
+        let mut log = RequestLog::default();
+        log.push(with_full(1, &"short".into()));
+        log.push(with_full(2, &"x".repeat(FULL_BODY_BUDGET + 1).into()));
+        assert!(log.full_body(1, BodyPart::Response).is_none());
+        assert!(
+            log.full_body(2, BodyPart::Response).is_none(),
+            "over budget alone"
+        );
+        assert!(log.get(1).is_some(), "the entry itself stays");
+    }
+
+    #[test]
+    fn debug_prints_no_full_body() {
+        let mut log = RequestLog::default();
+        log.push(with_full(1, &"sk-secret-tail".into()));
+        assert!(!format!("{log:?}").contains("sk-secret-tail"));
     }
 
     #[test]

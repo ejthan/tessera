@@ -12,6 +12,9 @@ use url::Url;
 /// Bodies in a [`RequestEvent`] are cut to at most this many bytes (1 MiB).
 pub const BODY_LIMIT: usize = 1 << 20;
 
+/// Largest body a [`Body`] keeps whole (32 MiB).
+pub const FULL_BODY_MAX: usize = 32 << 20;
+
 /// Called once per request, after the response or error.
 pub type RequestHook = Arc<dyn Fn(&RequestEvent) + Send + Sync>;
 
@@ -58,6 +61,8 @@ pub struct Body {
     pub text: Arc<str>,
     /// Length in bytes before cutting.
     pub original_len: usize,
+    /// The whole text of a cut body up to [`FULL_BODY_MAX`]. The request log takes it out.
+    pub full: Option<Arc<str>>,
 }
 
 // Lengths only: a body can hold a created key's `value`.
@@ -66,6 +71,7 @@ impl std::fmt::Debug for Body {
         f.debug_struct("Body")
             .field("len", &self.text.len())
             .field("original_len", &self.original_len)
+            .field("full", &self.full.is_some())
             .finish()
     }
 }
@@ -75,6 +81,9 @@ impl Body {
         Self {
             text: Arc::from(&text[..text.floor_char_boundary(BODY_LIMIT)]),
             original_len: text.len(),
+            full: (BODY_LIMIT + 1..=FULL_BODY_MAX)
+                .contains(&text.len())
+                .then(|| Arc::from(text)),
         }
     }
 }
@@ -91,4 +100,34 @@ pub enum Origin {
 pub(crate) fn next_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_over_the_limit_keeps_the_full_text() {
+        let text = "é".repeat(BODY_LIMIT);
+        let body = Body::new(&text);
+        assert!(body.text.len() <= BODY_LIMIT);
+        assert_eq!(body.full.as_deref(), Some(text.as_str()));
+        assert!(Body::new(&"a".repeat(BODY_LIMIT)).full.is_none());
+    }
+
+    #[test]
+    fn body_over_32_mib_keeps_none() {
+        assert!(Body::new(&"a".repeat(FULL_BODY_MAX)).full.is_some());
+        let body = Body::new(&"a".repeat(FULL_BODY_MAX + 1));
+        assert!(body.full.is_none());
+        assert_eq!(body.original_len, FULL_BODY_MAX + 1);
+    }
+
+    #[test]
+    fn debug_prints_no_full_text() {
+        let body = Body::new(&format!("sk-secret-tail{}", "a".repeat(BODY_LIMIT)));
+        assert!(body.full.is_some());
+        let shown = format!("{body:?}");
+        assert!(!shown.contains("sk-secret-tail"), "{shown}");
+    }
 }

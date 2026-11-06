@@ -102,6 +102,7 @@ mod tests {
         Body {
             text: text.into(),
             original_len,
+            full: None,
         }
     }
 

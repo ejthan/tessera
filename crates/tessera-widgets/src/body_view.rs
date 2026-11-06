@@ -15,10 +15,14 @@ use rust_i18n::t;
 
 use crate::JsonEditor;
 
-/// Most bytes shown highlighted.
-pub const HIGHLIGHT_MAX: usize = 1 << 20;
-/// Most bytes shown at all, since the editor builds its rope on the UI thread.
-pub const VIEW_MAX: usize = 8 << 20;
+/// Most bytes shown highlighted. The kit highlights on the UI thread: measured on an M3 Max,
+/// 32 KiB take 11 ms before the first frame, 64 KiB 20 ms and 1 MiB 109 ms (design §4.4).
+pub const HIGHLIGHT_MAX: usize = 32 << 10;
+/// Most bytes shown at all. The kit lays the text out on the UI thread before the first frame:
+/// 512 KiB take 12 ms, 1 MiB 21 ms and 8 MiB 91 ms (design §4.4).
+pub const VIEW_MAX: usize = 512 << 10;
+/// Most bytes pretty printed, off the UI thread, so a compact body is cut as lines.
+const PRETTY_MAX: usize = 32 << 20;
 
 /// What [`BodyView`] shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,15 +42,21 @@ pub enum Shown {
     },
 }
 
-/// Pretty JSON when `text` is JSON small enough to show, else `text`.
+/// Pretty JSON when `text` is JSON that is not too large to format.
 fn pretty(text: &str) -> Option<String> {
-    if text.len() >= VIEW_MAX {
+    if text.len() > PRETTY_MAX {
         return None;
     }
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    serde_json::to_string_pretty(&value)
-        .ok()
-        .filter(|pretty| pretty.len() <= VIEW_MAX)
+    serde_json::to_string_pretty(&value).ok()
+}
+
+/// The start of `text` to show, formatted if it can be, and the length it was cut from.
+fn to_show(text: &str) -> (String, usize) {
+    let formatted = pretty(text);
+    let whole = formatted.as_deref().unwrap_or(text);
+    let shown = &whole[..whole.floor_char_boundary(VIEW_MAX)];
+    (shown.to_string(), whole.len())
 }
 
 fn megabytes(bytes: usize) -> String {
@@ -77,11 +87,7 @@ impl BodyView {
     /// Shows `text`, formatted off the UI thread.
     pub fn set_body(&mut self, text: Arc<str>, window: &mut Window, cx: &mut Context<Self>) {
         self.full = Some(text.clone());
-        let format = cx.background_spawn(async move {
-            let shown = pretty(&text)
-                .unwrap_or_else(|| text[..text.floor_char_boundary(VIEW_MAX)].to_string());
-            (shown, text.len())
-        });
+        let format = cx.background_spawn(async move { to_show(&text) });
         self.format_task = Some(cx.spawn_in(window, async move |this, cx| {
             let (text, total) = format.await;
             this.update_in(cx, |this, window, cx| {
@@ -175,5 +181,26 @@ impl Render for BodyView {
                     )
             }))
             .child(div().flex_1().min_h_0().children(self.editor.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_compact_body_is_cut_as_lines() {
+        let compact = format!("[{}1]", "1,".repeat(VIEW_MAX));
+        let (shown, total) = to_show(&compact);
+        assert!(shown.len() <= VIEW_MAX);
+        assert!(shown.lines().count() > 1000);
+        assert!(total > compact.len());
+    }
+
+    #[test]
+    fn text_that_is_not_json_is_cut_on_a_char_boundary() {
+        let (shown, total) = to_show(&"é".repeat(VIEW_MAX));
+        assert!(shown.len() <= VIEW_MAX && shown.chars().all(|c| c == 'é'));
+        assert_eq!(total, 2 * VIEW_MAX);
     }
 }

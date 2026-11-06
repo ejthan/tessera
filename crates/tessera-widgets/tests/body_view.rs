@@ -67,7 +67,7 @@ fn body_view_states(cx: &mut TestAppContext) {
 
     let line = "not json at all\n";
     assert_eq!(
-        set(cx, handle, &view, line.repeat((2 << 20) / line.len())),
+        set(cx, handle, &view, line.repeat(VIEW_MAX / 2 / line.len())),
         Shown::Plain
     );
 

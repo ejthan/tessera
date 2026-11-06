@@ -16,14 +16,20 @@ use secrecy::SecretString;
 use tessera_app::connection::{ConnectorGlobal, tokio_connector};
 use tessera_app::runtime::Tokio;
 use tessera_app::state::AppState;
+use tessera_app::views::root::RootView;
 use tessera_client::{Body, Method, Origin, RequestEvent};
-use tessera_core::log::{Filter, LogEntry};
+use tessera_core::log::{BodyPart, FULL_BODY_BUDGET, Filter, LogEntry};
 use tessera_core::profile::{Node, Profile, Protocol};
 use tessera_core::secrets::{MemoryStore, SecretStore};
 use tessera_core::store::ConnectionsFile;
 use uuid::Uuid;
 
 use common::*;
+
+#[cfg(target_os = "macos")]
+const SHOW_FULL_BODY: &str = "cmd-shift-b";
+#[cfg(not(target_os = "macos"))]
+const SHOW_FULL_BODY: &str = "ctrl-shift-b";
 
 /// A `tracing` writer into a shared buffer.
 #[derive(Clone, Default)]
@@ -271,6 +277,7 @@ async fn detail_shows_redacted_body(cx: &mut TestAppContext) {
     e.response_body = Some(Body {
         text: r#"{"api_key":"sk"}"#.into(),
         original_len: 3_565_158,
+        full: None,
     });
     send(cx, &state, vec![entry(e)]);
     wait_for_element(cx, handle, row(3), true).await;
@@ -320,6 +327,86 @@ async fn detail_says_when_the_body_was_not_kept(cx: &mut TestAppContext) {
     .await;
 }
 
+/// An entry whose response was cut at 16 bytes, with `full` as its whole text.
+fn cut_entry(id: u64, full: Option<&str>) -> LogEntry {
+    let mut e = event(id, Method::GET, "/keys", Some(200), Origin::User);
+    e.response_body = Some(Body {
+        text: r#"{"value":"sk-sec"#.into(),
+        original_len: 1 << 21,
+        full: full.map(Into::into),
+    });
+    entry(e)
+}
+
+fn select_row(cx: &mut TestAppContext, handle: WindowHandle<Root>, id: u64) {
+    cx.update_window(handle.into(), |_, window, cx| window.click(row(id), cx))
+        .unwrap();
+}
+
+fn pressed_full_body(cx: &mut TestAppContext, handle: WindowHandle<Root>) {
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press(SHOW_FULL_BODY, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+async fn show_full_body_opens_the_view_masked(cx: &mut TestAppContext) {
+    let (handle, state, _rt) = open_log(cx);
+    let full = r#"{"value":"sk-secret-tail","n":1}"#;
+    send(cx, &state, vec![cut_entry(7, Some(full))]);
+    wait_for_element(cx, handle, row(7), true).await;
+    select_row(cx, handle, 7);
+    wait_for_element(cx, handle, "log.detail.full.response".to_string(), true).await;
+    pressed_full_body(cx, handle);
+    wait_for_element(cx, handle, "log.full.title".to_string(), true).await;
+    let text = handle
+        .update(cx, |root, _, cx| {
+            let view = root.view().clone().downcast::<RootView>().unwrap();
+            let log = view.read(cx).log_panel().read(cx);
+            let body = log.full_view().unwrap().read(cx);
+            body.text(cx).unwrap_or_default()
+        })
+        .unwrap();
+    assert!(text.contains("\"n\": 1"), "{text}");
+    assert!(!text.contains("sk-secret-tail"), "{text}");
+    assert!(text.contains("••••"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn evicted_body_says_so(cx: &mut TestAppContext) {
+    let (handle, state, _rt) = open_log(cx);
+    let big = "x".repeat(FULL_BODY_BUDGET);
+    send(cx, &state, vec![cut_entry(7, Some("short"))]);
+    send(cx, &state, vec![cut_entry(8, Some(&big))]);
+    wait_for_element(cx, handle, row(8), true).await;
+    let log = state.read_with(cx, |s, _| s.log().full_body(7, BodyPart::Response));
+    assert!(log.is_none());
+    select_row(cx, handle, 7);
+    wait_for_label(cx, handle, "log.detail.full_gone".into(), "last 64 MiB").await;
+    pressed_full_body(cx, handle);
+    wait_for_element(cx, handle, "log.full.title".to_string(), false).await;
+}
+
+#[gpui_kit::test]
+async fn uncut_body_has_no_button(cx: &mut TestAppContext) {
+    let (handle, state, _rt) = open_log(cx);
+    let mut e = event(9, Method::GET, "/health", Some(200), Origin::User);
+    e.response_body = Some(Body {
+        text: "{}".into(),
+        original_len: 2,
+        full: None,
+    });
+    send(cx, &state, vec![entry(e)]);
+    wait_for_element(cx, handle, row(9), true).await;
+    select_row(cx, handle, 9);
+    wait_for_label(cx, handle, "log.detail".into(), "Response body").await;
+    wait_for_element(cx, handle, "log.detail.full.response".to_string(), false).await;
+    wait_for_element(cx, handle, "log.detail.full_gone".to_string(), false).await;
+}
+
 #[gpui_kit::test]
 async fn copy_as_curl_uses_placeholder(cx: &mut TestAppContext) {
     let (handle, state, _rt) = open_log(cx);
@@ -328,6 +415,7 @@ async fn copy_as_curl_uses_placeholder(cx: &mut TestAppContext) {
     e.request_body = Some(Body {
         text: r#"{"description":"x","value":"sk-secret"}"#.into(),
         original_len: 40,
+        full: None,
     });
     send(cx, &state, vec![entry(e)]);
     wait_for_element(cx, handle, row(4), true).await;
