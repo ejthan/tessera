@@ -2,6 +2,7 @@
 
 //! App-wide actions and their key bindings.
 
+use gpui_kit::base::actions::{SelectDown, SelectUp};
 use gpui_kit::component::dock::{ClosePanel, ToggleZoom};
 use gpui_kit::{App, KeyBinding, NoAction};
 
@@ -129,6 +130,8 @@ const WORKBENCH_INPUT: &str = "Workbench > Input";
 pub const CONDITION_ROW: &str = "ConditionRow";
 /// The value input of that row.
 const CONDITION_INPUT: &str = "ConditionRow > Input";
+/// Key context of the hit list.
+pub const SEARCH_HITS: &str = "SearchHits";
 /// Key context of a focused `query_by` chip.
 pub const CHIP: &str = "SearchChip";
 
@@ -423,6 +426,9 @@ pub fn bind_keys(cx: &mut App) {
         // Deeper than Run, so in the row ⌘↩ adds the condition.
         KeyBinding::new(SAVE, AddCondition, Some(CONDITION_ROW)),
         KeyBinding::new(SAVE, AddCondition, Some(CONDITION_INPUT)),
+        // Only here: an input keeps its arrows.
+        KeyBinding::new("up", SelectUp, Some(SEARCH_HITS)),
+        KeyBinding::new("down", SelectDown, Some(SEARCH_HITS)),
         KeyBinding::new("alt-left", MoveChipLeft, Some(CHIP)),
         KeyBinding::new("alt-right", MoveChipRight, Some(CHIP)),
         KeyBinding::new("delete", RemoveChip, Some(CHIP)),

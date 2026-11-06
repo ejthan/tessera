@@ -958,6 +958,7 @@ pub const SHOW_JSON: &str = key("cmd-2", "ctrl-2");
 pub const SHOW_HITS: &str = key("cmd-3", "ctrl-3");
 pub const SHOW_RAW: &str = key("cmd-4", "ctrl-4");
 pub const TOGGLE_INSTANT: &str = key("cmd-alt-l", "ctrl-alt-l");
+pub const NEXT_PAGE: &str = key("cmd-alt-down", "ctrl-alt-down");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 pub fn fake_connector(

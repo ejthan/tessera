@@ -32,6 +32,7 @@ use tessera_core::search::params::{
 use tessera_core::search::sort::{SortRow, parse_sort, sort_text};
 use tessera_widgets::{FilterField, FilterInput, FilterInputEvent};
 
+use super::value_text;
 use crate::actions::{AddCondition, CHIP, CONDITION_ROW, MoveChipLeft, MoveChipRight, RemoveChip};
 use crate::connection::ConnectionState;
 use crate::views::documents::{facet_fetch, filter_fields};
@@ -79,14 +80,6 @@ impl Render for DragChip {
             .text_sm()
             .bg(cx.theme().secondary)
             .child(self.name.clone())
-    }
-}
-
-fn value_text(value: Option<&Value>) -> String {
-    match value {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => String::new(),
     }
 }
 

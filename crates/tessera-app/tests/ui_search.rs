@@ -631,3 +631,229 @@ async fn a_sort_the_rows_cannot_hold_is_left_to_json(cx: &mut TestAppContext) {
     assert!(f.has(cx, "search.sort.json_only"));
     assert_eq!(f.params(cx)["sort_by"], "a:asc,b:asc,c:asc,d:asc");
 }
+
+/// Two hits, a mark on the first, and facets with a value no filter can hold.
+fn results_body() -> String {
+    json!({
+        "found": 25, "out_of": 100, "page": 1, "search_time_ms": 3,
+        "hits": [
+            {"document": {"id": "d1", "title": "Dune"},
+             "highlight": {"title": {"snippet": "<mark>Du</mark>ne", "matched_tokens": ["Du"]}},
+             "text_match": 578, "text_match_info": {"score": "578", "tokens_matched": 1}},
+            {"document": {"id": "d2", "title": "Emma"}, "curated": true}
+        ],
+        "facet_counts": [{"field_name": "genre", "sampled": true, "counts": [
+            {"value": "crime", "count": 3},
+            {"value": "drama", "count": 2},
+            {"value": "a`b", "count": 1}
+        ]}]
+    })
+    .to_string()
+}
+
+impl Fixture {
+    /// Runs a search answered with `body`.
+    fn run_with(&self, cx: &mut TestAppContext, body: String) {
+        *self.search.body.lock().unwrap() = body;
+        self.run(cx);
+    }
+
+    fn detail_text(&self, cx: &mut TestAppContext) -> Option<String> {
+        let workbench = self.workbench(cx);
+        cx.update(|cx| {
+            let hits = workbench.read(cx).hits().read(cx);
+            Some(hits.detail()?.read(cx).text(cx))
+        })
+    }
+
+    fn filter_text(&self, cx: &mut TestAppContext) -> String {
+        let workbench = self.workbench(cx);
+        cx.update(|cx| {
+            let filter = workbench.read(cx).form().read(cx).filter().read(cx);
+            filter.value(cx)
+        })
+    }
+
+    fn last_call(&self) -> SearchCall {
+        self.search.calls().last().unwrap().clone()
+    }
+}
+
+#[gpui_kit::test]
+async fn hits_show_marks_and_score(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.run_with(cx, results_body());
+    let row = f.text_of(cx, "search.hit.0");
+    assert!(row.contains("d1"), "{row}");
+    assert!(row.contains("Dune"), "{row}");
+    assert!(!row.contains("mark"), "{row}");
+    assert!(row.contains("578"), "{row}");
+    let row = f.text_of(cx, "search.hit.1");
+    assert!(row.contains("Curated"), "{row}");
+}
+
+#[gpui_kit::test]
+async fn selecting_a_hit_shows_document_and_match_info(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.run_with(cx, results_body());
+    assert_eq!(f.detail_text(cx), None);
+
+    f.click(cx, "search.hit.0");
+    assert!(f.detail_text(cx).unwrap().contains("\"Dune\""));
+    assert!(
+        f.text_of(cx, "search.match_info")
+            .contains("tokens_matched")
+    );
+
+    f.press(cx, "down");
+    assert!(f.detail_text(cx).unwrap().contains("\"Emma\""));
+    assert!(!f.has(cx, "search.match_info"));
+    f.press(cx, "down");
+    assert!(
+        f.detail_text(cx).unwrap().contains("\"Emma\""),
+        "stops at the end"
+    );
+    f.press(cx, "up");
+    assert!(f.detail_text(cx).unwrap().contains("\"Dune\""));
+
+    f.run(cx);
+    assert_eq!(f.detail_text(cx), None, "a new result starts unselected");
+}
+
+#[gpui_kit::test]
+async fn facet_click_writes_the_filter_and_runs(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.run_with(cx, results_body());
+    assert!(f.has(cx, "search.facet.genre.sampled"));
+    f.click(cx, "search.facet.genre.crime");
+    assert_eq!(f.params(cx)["filter_by"], "genre:=`crime`");
+    assert_eq!(f.filter_text(cx), "genre:=`crime`");
+    assert_eq!(f.last_call().param("filter_by"), Some("genre:=`crime`"));
+    assert_eq!(f.search.calls().len(), 2);
+    assert_eq!(
+        f.act(cx, |window, _| window
+            .find("search.facet.genre.crime")
+            .checked()),
+        Some(true)
+    );
+
+    f.click(cx, "search.facet.genre.crime");
+    assert!(
+        !f.params(cx).contains_key("filter_by"),
+        "the key goes when empty"
+    );
+    assert_eq!(f.filter_text(cx), "");
+    assert_eq!(f.last_call().param("filter_by"), None);
+}
+
+#[gpui_kit::test]
+async fn second_value_makes_a_list(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.run_with(cx, results_body());
+    f.click(cx, "search.facet.genre.crime");
+    f.click(cx, "search.facet.genre.drama");
+    assert_eq!(f.params(cx)["filter_by"], "genre:=[`crime`,`drama`]");
+}
+
+#[gpui_kit::test]
+async fn a_facet_click_goes_back_to_the_first_page(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.run_with(cx, results_body());
+    f.click(cx, "search.page.next");
+    assert_eq!(f.params(cx)["page"], 2);
+    f.click(cx, "search.facet.genre.crime");
+    assert!(!f.params(cx).contains_key("page"));
+}
+
+#[gpui_kit::test]
+async fn a_facet_click_shows_in_json_mode(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.run_with(cx, results_body());
+    f.press(cx, SHOW_JSON);
+    f.click(cx, "search.facet.genre.crime");
+    let json: Value = serde_json::from_str(&f.json_text(cx)).unwrap();
+    assert_eq!(json["filter_by"], "genre:=`crime`");
+}
+
+#[gpui_kit::test]
+async fn unwritable_value_is_disabled(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.run_with(cx, results_body());
+    assert!(f.disabled(cx, "search.facet.genre.a`b"));
+    assert!(f.has(cx, "search.facet.genre.a`b.note"));
+    let calls = f.search.calls().len();
+    f.click(cx, "search.facet.genre.a`b");
+    assert!(!f.params(cx).contains_key("filter_by"));
+    assert_eq!(f.search.calls().len(), calls);
+}
+
+#[gpui_kit::test]
+async fn groups_draw_headings(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    let body = json!({
+        "found": 2, "found_docs": 9, "out_of": 100, "page": 1, "search_time_ms": 3,
+        "grouped_hits": [
+            {"group_key": ["crime"], "found": 7, "hits": [{"document": {"id": "a"}}]},
+            {"group_key": ["drama"], "found": 2, "hits": [{"document": {"id": "b"}}]}
+        ]
+    });
+    f.run_with(cx, body.to_string());
+    let heading = f.text_of(cx, "search.group.0");
+    assert!(
+        heading.contains("crime") && heading.contains('7'),
+        "{heading}"
+    );
+    assert!(f.text_of(cx, "search.hit.1").contains('a'));
+    assert!(f.text_of(cx, "search.group.2").contains("drama"));
+    assert!(f.text_of(cx, "search.status").contains('9'));
+
+    // Headings are not selectable: Down steps over them.
+    f.click(cx, "search.hit.1");
+    f.press(cx, "down");
+    assert!(f.detail_text(cx).unwrap().contains("\"b\""));
+}
+
+#[gpui_kit::test]
+async fn next_page_writes_page_and_runs(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.run_with(cx, results_body());
+    assert!(f.disabled(cx, "search.page.previous"));
+    f.click(cx, "search.page.next");
+    assert_eq!(f.params(cx)["page"], 2);
+    assert_eq!(f.last_call().param("page"), Some("2"));
+    assert_eq!(f.search.calls().len(), 2);
+    let workbench = f.workbench(cx);
+    let page = cx.update(|cx| workbench.read(cx).form().read(cx).input_text("page", cx));
+    assert_eq!(page, "2");
+
+    *f.search.body.lock().unwrap() = results_body().replace("\"page\":1", "\"page\":2");
+    f.press(cx, NEXT_PAGE);
+    assert_eq!(f.last_call().param("page"), Some("3"));
+}
+
+#[gpui_kit::test]
+async fn next_is_disabled_on_the_last_page(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.press(cx, SHOW_JSON);
+    f.set_json(cx, r#"{"q": "*", "per_page": 25}"#);
+    f.press(cx, SHOW_FORM);
+    f.run_with(cx, results_body());
+    assert!(f.disabled(cx, "search.page.next"));
+    let calls = f.search.calls().len();
+    f.press(cx, NEXT_PAGE);
+    assert_eq!(f.search.calls().len(), calls);
+}
+
+#[gpui_kit::test]
+async fn no_hits_says_what_was_searched(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.fill(cx, "search.param.q", "zzz");
+    f.run_with(cx, search_body(0));
+    let text = f.text_of(cx, "search.no_hits");
+    assert!(text.contains("No documents match"), "{text}");
+    assert!(text.contains("zzz"), "{text}");
+}

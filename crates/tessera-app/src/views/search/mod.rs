@@ -3,6 +3,8 @@
 //! The search tab of a connection: a draft on the left, its result on the right.
 
 pub mod form;
+pub mod hits;
+mod results;
 
 use std::time::Duration;
 
@@ -32,10 +34,11 @@ use tessera_core::search::results::SearchResult;
 use tessera_widgets::{BodyView, JsonEditor, JsonEditorEvent};
 
 use self::form::{FormEvent, SearchForm};
+use self::hits::HitsView;
 use super::dock::view_tab;
-use super::overview::grouped;
 use crate::actions::{
-    FocusQuery, RunSearch, ShowForm, ShowHits, ShowJson, ShowRawResult, ToggleInstant, WORKBENCH,
+    FocusQuery, NextResultPage, PreviousResultPage, RunSearch, ShowForm, ShowHits, ShowJson,
+    ShowRawResult, ToggleInstant, WORKBENCH,
 };
 use crate::connection::{ConnectionState, error_text};
 use crate::search::{SearchAnswer, SearchBackendGlobal};
@@ -77,6 +80,15 @@ fn tags(params: &Map<String, Value>) -> (String, String) {
     )
 }
 
+/// A parameter as text; a number or boolean reads as in JSON.
+fn value_text(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
 fn param_error_text(error: &ParamError) -> String {
     match error {
         ParamError::BadKey(key) => t!("search.param_error.bad_key", key = key),
@@ -104,6 +116,7 @@ pub struct SearchWorkbench {
     /// The collection list this view took last.
     list_loaded: Option<std::time::Instant>,
     schema: Option<Collection>,
+    hits: Entity<HitsView>,
     raw: Entity<BodyView>,
     result: Option<SearchResult>,
     error: Option<SharedString>,
@@ -131,6 +144,7 @@ impl SearchWorkbench {
         let draft = SearchDraft::new("");
         let json = cx.new(|cx| JsonEditor::new(&params_text(&draft.params), false, window, cx));
         let collection = cx.new(|cx| SelectState::new(Vec::new(), None, window, cx));
+        let hits = cx.new(HitsView::new);
         let raw = cx.new(|cx| BodyView::new(window, cx));
         let instant = !connection.read(cx).profile.environment.is_prod();
         if connection.read(cx).collection_cache.collections.is_none() {
@@ -178,6 +192,7 @@ impl SearchWorkbench {
             collection,
             list_loaded: None,
             schema: None,
+            hits,
             raw,
             result: None,
             error: None,
@@ -237,6 +252,11 @@ impl SearchWorkbench {
     /// The JSON editor.
     pub fn json(&self) -> &Entity<JsonEditor> {
         &self.json
+    }
+
+    /// The hit list.
+    pub fn hits(&self) -> &Entity<HitsView> {
+        &self.hits
     }
 
     /// The Raw tab's view.
@@ -307,17 +327,8 @@ impl SearchWorkbench {
         }
     }
 
-    fn set_param(
-        &mut self,
-        key: &str,
-        value: Option<Value>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn put_param(&mut self, key: &str, value: Option<Value>) {
         let params = &mut self.drafts[self.active].params;
-        if params.get(key) == value.as_ref() {
-            return;
-        }
         match value {
             Some(value) => {
                 params.insert(key.to_string(), value);
@@ -326,7 +337,37 @@ impl SearchWorkbench {
                 params.shift_remove(key);
             }
         }
-        self.changed(window, cx);
+    }
+
+    fn set_param(
+        &mut self,
+        key: &str,
+        value: Option<Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.draft().params.get(key) != value.as_ref() {
+            self.put_param(key, value);
+            self.changed(window, cx);
+        }
+    }
+
+    /// Writes `edits`, as a click outside the editors does, and runs. Not over JSON text that
+    /// does not parse: showing the map would replace it.
+    fn write_and_run(
+        &mut self,
+        edits: &[(&str, Option<Value>)],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.json_error.is_some() {
+            return;
+        }
+        for (key, value) in edits {
+            self.put_param(key, value.clone());
+        }
+        self.sync_editors(window, cx);
+        self.run(window, cx);
     }
 
     fn json_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -440,6 +481,8 @@ impl SearchWorkbench {
         match answer {
             Ok(answer) => {
                 self.error = None;
+                self.hits
+                    .update(cx, |h, cx| h.set_result(&answer.result, cx));
                 self.result = Some(answer.result);
                 self.raw
                     .update(cx, |r, cx| r.set_body(answer.text, window, cx));
@@ -621,27 +664,16 @@ impl SearchWorkbench {
             }))
     }
 
-    fn status(&self) -> Option<SharedString> {
-        let result = self.result.as_ref()?;
-        Some(
-            t!(
-                "search.status",
-                found = grouped(result.found),
-                out_of = grouped(result.out_of),
-                ms = result.search_time_ms
-            )
-            .to_string()
-            .into(),
-        )
-    }
-
     fn result_pane(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let danger = cx.theme().danger;
         let on_raw = self.view == ResultView::Raw;
         let dimmed = self.error.is_some();
+        let facets = self.facet_panel(cx);
+        let pager = self.pager(window, cx);
+        let no_hits = self.no_hits(cx);
         v_flex()
             .size_full()
-            .children(self.status().map(|status| {
+            .children(self.result.as_ref().map(results::status).map(|status| {
                 div()
                     .id("search.status")
                     .test_support()
@@ -699,8 +731,18 @@ impl SearchWorkbench {
                     .test_support()
                     .flex_1()
                     .min_h_0()
+                    .flex()
                     .when(dimmed, |el| el.opacity(0.5))
-                    .when(on_raw, |el| el.child(self.raw.clone())),
+                    .child(v_flex().flex_1().min_w_0().h_full().map(|el| {
+                        if on_raw {
+                            el.child(div().flex_1().min_h_0().child(self.raw.clone()))
+                        } else {
+                            el.children(no_hits)
+                                .child(div().flex_1().min_h_0().child(self.hits.clone()))
+                                .children(pager)
+                        }
+                    }))
+                    .children(facets),
             )
     }
 }
@@ -735,6 +777,12 @@ impl Render for SearchWorkbench {
             }))
             .on_action(cx.listener(|this, _: &ToggleInstant, _, cx| this.toggle_instant(cx)))
             .on_action(cx.listener(|this, _: &FocusQuery, window, cx| this.focus_query(window, cx)))
+            .on_action(cx.listener(|this, _: &NextResultPage, window, cx| {
+                this.turn_page(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousResultPage, window, cx| {
+                this.turn_page(-1, window, cx);
+            }))
             .size_full()
             .child(toolbar)
             .children(self.instant_note(cx))
