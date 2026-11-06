@@ -25,7 +25,7 @@ use super::env_badge;
 use super::import_dialog::ImportDialog;
 use crate::actions::{
     ConnectSelected, DeleteConnection, DisconnectSelected, EditConnection, ExportProfiles,
-    ImportProfiles, NewConnection, OpenAliases, OpenConsoleTab, OpenCurations, OpenLink,
+    ImportProfiles, NewConnection, OpenAliases, OpenConsoleTab, OpenCurations, OpenKeys, OpenLink,
     OpenPresetsTab, OpenSearchTab, OpenStopwords, OpenSynonyms, SIDEBAR_ENTRY,
     SIDEBAR_ENTRY_BUTTON, SIDEBAR_LINK, ToggleReopenLast,
 };
@@ -605,6 +605,7 @@ fn resource_shortcut(kind: ResourceKind, window: &Window) -> Option<Kbd> {
         ResourceKind::Curations => Kbd::global_binding_for_action(&OpenCurations, window),
         ResourceKind::Stopwords => Kbd::global_binding_for_action(&OpenStopwords, window),
         ResourceKind::Presets => Kbd::global_binding_for_action(&OpenPresetsTab, window),
+        ResourceKind::Keys => Kbd::global_binding_for_action(&OpenKeys, window),
     }
 }
 

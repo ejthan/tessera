@@ -127,6 +127,7 @@ gpui_kit::actions!(
         OpenCurations,
         OpenStopwords,
         OpenPresetsTab,
+        OpenKeys,
         NewResource,
         EditResource,
         DeleteResource,
@@ -441,20 +442,28 @@ const OPEN_CONSOLE: &str = "cmd-shift-y";
 #[cfg(not(target_os = "macos"))]
 const OPEN_CONSOLE: &str = "ctrl-shift-y";
 #[cfg(target_os = "macos")]
-const OPEN_RESOURCES: [&str; 5] = [
+const OPEN_RESOURCES: [&str; 9] = [
     "alt-cmd-1",
     "alt-cmd-2",
     "alt-cmd-3",
     "alt-cmd-4",
     "alt-cmd-5",
+    "alt-cmd-6",
+    "alt-cmd-7",
+    "alt-cmd-8",
+    "alt-cmd-9",
 ];
 #[cfg(not(target_os = "macos"))]
-const OPEN_RESOURCES: [&str; 5] = [
+const OPEN_RESOURCES: [&str; 9] = [
     "ctrl-alt-1",
     "ctrl-alt-2",
     "ctrl-alt-3",
     "ctrl-alt-4",
     "ctrl-alt-5",
+    "ctrl-alt-6",
+    "ctrl-alt-7",
+    "ctrl-alt-8",
+    "ctrl-alt-9",
 ];
 #[cfg(target_os = "macos")]
 const ADD_QUERY_ROW: &str = "cmd-shift-a";
@@ -621,6 +630,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     OpenCurations,
     OpenStopwords,
     OpenPresetsTab,
+    OpenKeys,
     NewResource,
     EditResource,
     DeleteResource,
@@ -891,6 +901,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_RESOURCES[2], OpenCurations, None),
         KeyBinding::new(OPEN_RESOURCES[3], OpenStopwords, None),
         KeyBinding::new(OPEN_RESOURCES[4], OpenPresetsTab, None),
+        KeyBinding::new(OPEN_RESOURCES[5], OpenKeys, None),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(RESOURCES)),
         KeyBinding::new(REVERT, ReindexAlias, Some(RESOURCES)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(REINDEX)),

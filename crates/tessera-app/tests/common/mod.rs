@@ -19,6 +19,7 @@ use gpui_kit::{
     WindowOptions, base::Root, px, size,
 };
 use secrecy::ExposeSecret as _;
+use tessera_app::admin::{AdminBackend, AdminBackendGlobal};
 use tessera_app::collections::{CollectionsBackend, CollectionsBackendGlobal};
 use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
 use tessera_app::documents::{DocumentsBackend, DocumentsBackendGlobal, PageResult};
@@ -34,9 +35,9 @@ use tessera_app::transfer::{FileStamp, TransferBackend, TransferBackendGlobal, f
 use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::root::RootView;
 use tessera_client::{
-    Alias, Client, ClientOptions, Collection, CollectionSummary, Debug, DocumentQuery, Error,
-    Health, ItemSet, KeyAccess, Metrics, NodeClient, Origin, SchemaChange, SetKind, Stats,
-    StopwordSet,
+    Alias, ApiKey, Client, ClientOptions, Collection, CollectionSummary, CreatedKey, Debug,
+    DocumentQuery, Error, Health, ItemSet, KeyAccess, Metrics, NewKey, NodeClient, Origin,
+    SchemaChange, SetKind, Stats, StopwordSet,
 };
 use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
@@ -202,6 +203,11 @@ fn install_poll_fakes(cx: &mut gpui_kit::App) {
     }
     if !cx.has_global::<RelevanceBackendGlobal>() {
         cx.set_global(RelevanceBackendGlobal(Arc::new(FakeRelevanceBackend(
+            Arc::default(),
+        ))));
+    }
+    if !cx.has_global::<AdminBackendGlobal>() {
+        cx.set_global(AdminBackendGlobal(Arc::new(FakeAdminBackend(
             Arc::default(),
         ))));
     }
@@ -1659,6 +1665,112 @@ pub fn fake_relevance(cx: &mut TestAppContext) -> Arc<FakeRelevance> {
     let fake = Arc::new(FakeRelevance::default());
     let installed = FakeRelevanceBackend(fake.clone());
     cx.update(|cx| cx.set_global(RelevanceBackendGlobal(Arc::new(installed))));
+    fake
+}
+
+/// The value every key [`FakeAdmin`] creates has.
+pub const VALUE: &str = "fakeKeyValueThatMustStaySecret";
+
+/// The key, collection and parameters of a `scoped_search`.
+pub type ScopedSearch = (String, String, Vec<(String, String)>);
+
+/// What a [`FakeAdminBackend`] answers and has been asked.
+#[derive(Default)]
+pub struct FakeAdmin {
+    /// Every call, in order, as `method arg…`.
+    pub calls: Mutex<Vec<String>>,
+    /// The keys on the server.
+    pub keys: Mutex<Vec<ApiKey>>,
+    /// `keys` fails with this status and Typesense message.
+    pub fail_list: Mutex<Option<(u16, String)>>,
+    /// Writes fail with this status and Typesense message.
+    pub fail: Mutex<Option<(u16, String)>>,
+    /// Every draft `create_key` got.
+    pub created: Mutex<Vec<NewKey>>,
+    /// Every `scoped_search`.
+    pub searches: Mutex<Vec<ScopedSearch>>,
+    /// `scoped_search` fails with this status and Typesense message.
+    pub fail_search: Mutex<Option<(u16, String)>>,
+}
+
+pub struct FakeAdminBackend(pub Arc<FakeAdmin>);
+
+impl AdminBackend for FakeAdminBackend {
+    fn keys(&self, _: Client) -> tessera_app::collections::BoxFuture<Result<Vec<ApiKey>, Error>> {
+        self.0.calls.lock().unwrap().push("keys".into());
+        let answer = match self.0.fail_list.lock().unwrap().clone() {
+            Some(fail) => Err(http_error(fail)),
+            None => Ok(self.0.keys.lock().unwrap().clone()),
+        };
+        Box::pin(async move { answer })
+    }
+
+    fn create_key(
+        &self,
+        _: Client,
+        key: NewKey,
+    ) -> tessera_app::collections::BoxFuture<Result<CreatedKey, Error>> {
+        self.0.created.lock().unwrap().push(key.clone());
+        let failed = self.0.fail.lock().unwrap().clone().map(http_error);
+        let created = ApiKey {
+            id: 77,
+            description: key.description,
+            actions: key.actions,
+            collections: key.collections,
+            expires_at: key.expires_at,
+            value_prefix: Some(VALUE[..4].to_string()),
+            extra: serde_json::Map::new(),
+        };
+        if failed.is_none() {
+            self.0.keys.lock().unwrap().push(created.clone());
+        }
+        Box::pin(async move {
+            match failed {
+                Some(error) => Err(error),
+                None => Ok(CreatedKey {
+                    key: created,
+                    value: VALUE.to_string().into(),
+                }),
+            }
+        })
+    }
+
+    fn delete_key(
+        &self,
+        _: Client,
+        id: u64,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("delete_key {id}"));
+        let failed = self.0.fail.lock().unwrap().clone().map(http_error);
+        if failed.is_none() {
+            self.0.keys.lock().unwrap().retain(|k| k.id != id);
+        }
+        Box::pin(async move { failed.map_or(Ok(()), Err) })
+    }
+
+    fn scoped_search(
+        &self,
+        _: Client,
+        key: secrecy::SecretString,
+        collection: String,
+        params: Vec<(String, String)>,
+    ) -> tessera_app::collections::BoxFuture<Result<String, Error>> {
+        let seen = (key.expose_secret().to_string(), collection, params);
+        self.0.searches.lock().unwrap().push(seen);
+        let failed = self.0.fail_search.lock().unwrap().clone().map(http_error);
+        Box::pin(async move { failed.map_or_else(|| Ok(search_body(2)), Err) })
+    }
+}
+
+/// Installs a [`FakeAdmin`].
+pub fn fake_admin(cx: &mut TestAppContext) -> Arc<FakeAdmin> {
+    let fake = Arc::new(FakeAdmin::default());
+    let installed = FakeAdminBackend(fake.clone());
+    cx.update(|cx| cx.set_global(AdminBackendGlobal(Arc::new(installed))));
     fake
 }
 

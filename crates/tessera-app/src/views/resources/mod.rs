@@ -7,6 +7,7 @@ pub mod attachment;
 pub mod curation_dialog;
 pub mod curations;
 pub(crate) mod item_save;
+pub mod keys;
 pub mod name_dialog;
 pub mod presets;
 pub mod reindex;
@@ -36,6 +37,7 @@ use tessera_widgets::confirm;
 use tessera_widgets::confirm_danger::{self, DangerOptions};
 
 use self::aliases::AliasesView;
+use self::keys::KeysView;
 use self::presets::PresetsView;
 use self::sets::SetsView;
 use self::stopwords::StopwordsView;
@@ -54,6 +56,8 @@ pub enum ResourceView {
     Presets(Entity<PresetsView>),
     /// See [`SetsView`].
     Sets(Entity<SetsView>),
+    /// See [`KeysView`].
+    Keys(Entity<KeysView>),
 }
 
 impl ResourceView {
@@ -81,6 +85,7 @@ impl ResourceView {
             ResourceKind::Curations => {
                 Self::Sets(cx.new(|cx| SetsView::new(SetKind::Curation, connection, window, cx)))
             }
+            ResourceKind::Keys => Self::Keys(cx.new(|cx| KeysView::new(connection, window, cx))),
         }
     }
 
@@ -91,6 +96,7 @@ impl ResourceView {
             Self::Stopwords(view) => view.clone().into(),
             Self::Presets(view) => view.clone().into(),
             Self::Sets(view) => view.clone().into(),
+            Self::Keys(view) => view.clone().into(),
         }
     }
 
@@ -101,6 +107,7 @@ impl ResourceView {
             Self::Stopwords(view) => view.focus_handle(cx),
             Self::Presets(view) => view.focus_handle(cx),
             Self::Sets(view) => view.focus_handle(cx),
+            Self::Keys(view) => view.focus_handle(cx),
         }
     }
 
@@ -111,6 +118,7 @@ impl ResourceView {
             Self::Stopwords(view) => view.read(cx).gates(cx),
             Self::Presets(view) => view.read(cx).gates(cx),
             Self::Sets(view) => view.read(cx).gates(cx),
+            Self::Keys(view) => view.read(cx).gates(cx),
         }
     }
 }
@@ -349,6 +357,18 @@ pub(super) fn toolbar(
     window: &Window,
     cx: &App,
 ) -> impl IntoElement + use<> {
+    list_toolbar(prefix, list, focus, Some(locked), window, cx)
+}
+
+/// [`toolbar`] with New only where `new` holds whether it is locked.
+pub(super) fn list_toolbar(
+    prefix: &'static str,
+    list: &Entity<ResourceList>,
+    focus: &FocusHandle,
+    new: Option<bool>,
+    window: &Window,
+    cx: &App,
+) -> impl IntoElement + use<> {
     let (on_new, on_reload) = (focus.clone(), focus.clone());
     let filter_label = t!(format!("{prefix}.filter")).to_string();
     let new_id = SharedString::from(format!("{prefix}.new"));
@@ -371,7 +391,7 @@ pub(super) fn toolbar(
             ),
         )
         .child(div().flex_1())
-        .child(
+        .children(new.map(|locked| {
             Button::new(new_id.clone())
                 .primary()
                 .small()
@@ -382,8 +402,8 @@ pub(super) fn toolbar(
                     Some(RESOURCES),
                     window,
                 ))
-                .on_click(move |_, window, cx| on_new.dispatch_action(&NewResource, window, cx)),
-        )
+                .on_click(move |_, window, cx| on_new.dispatch_action(&NewResource, window, cx))
+        }))
         .child(
             Button::new(SharedString::from(format!("{prefix}.reload")))
                 .ghost()
