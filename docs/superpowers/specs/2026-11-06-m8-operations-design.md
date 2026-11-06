@@ -1,12 +1,12 @@
 # M8 Operations and hardening: design
 
 - **Date:** 2026-11-06
-- **Status:** written autonomously (maintainer takes the recommendations), pending final review. **The live probes of §4.6 are open:** see the next paragraph
+- **Status:** written autonomously (maintainer takes the recommendations), pending final review. §4 is measured: the probes of §4.6 ran on 30.0 and 30.2 on 2026-11-06
 - **Product spec:** [`docs/spec.md`](../../spec.md) (M8 row in §14; §7.7, §7.18, §7.21, §8.1 to §8.3, §9, §10, §11, §12, §16)
 - **Previous milestone:** [M7 keys, analytics, AI design](2026-11-06-m7-keys-analytics-ai-design.md)
 - **UX mockups:** none for these screens; the layouts follow M6's resource tabs
 
-**How this was verified.** Nothing in §4 was probed on a server. While this design was written, the OrbStack VM behind Docker was stalled (kernel RCU stalls from 20:26 on 2026-11-06, the Docker socket answered no ping for the whole session, `localhost:18108` was down too). Restarting it would have hit the other project's server on port 8108, so it stayed as it was. Server behaviour here comes from the vendored OpenAPI file, the v30.2 docs, and the C++ source at tags `v30.0` and `v30.2` (`src/core_api.cpp`, `src/tsconfig.cpp`, `src/raft_server.cpp`). Each statement is marked **source**, **docs** or **expected**. Task 1 runs the probes of §4.6 before any UI is built, and a result that differs changes this design first. GPUI Kit APIs were read in the pinned source. `tracing-appender`, `tar` and `zstd` are not in the registry cache, so their APIs are unread: Tasks 5 and 9 read them after adding them.
+**How this was verified.** Server behaviour in §4 was measured with curl on throwaway 30.0 and 30.2 servers and on the compose cluster (§4.6). Statements still marked **source** or **docs** could not be provoked on a small server. Three results differ from what this design first assumed: a missing dictionary does not fail a create (P8), a missing parent directory does not fail a snapshot (P3), and a second snapshot was refused with a 500, not a 409 (P1). GPUI Kit APIs were read in the pinned source. `tracing-appender`, `tar` and `zstd` are not in the registry cache, so their APIs are unread: Tasks 5 and 9 read them after adding them.
 
 ## 1. Goal
 
@@ -85,7 +85,7 @@ New module `operations.rs`, and `update.rs` for the opt-in check.
 
 ### 4.1 Operations
 
-All of them run on one node, so they live on `NodeClient`. Nothing in the source replicates a snapshot, cache clear, compact or config change (**source**: the handlers call local objects). `write(Some(index), …)` pins the node, and a `POST` is not in `FAILOVER_METHODS`.
+All of them run on one node, so they live on `NodeClient`. Snapshot, compact, cache clear and config answer on a follower as on the leader, and nothing replicates them (**source**: the handlers call local objects). `write(Some(index), …)` pins the node, and a `POST` is not in `FAILOVER_METHODS`.
 
 ```rust
 impl NodeClient {
@@ -99,32 +99,34 @@ impl NodeClient {
 
 | Call | Request | Behaviour |
 |---|---|---|
-| `snapshot` | `POST operations/snapshot?snapshot_path=` | **source:** 201 `{"success":true}`, sent when the copy is done. 409 `Another snapshot is in progress.` 500 `{"success":false,…}` with the raft error or `Copy failed.` No check that the directory exists or is empty. **docs:** without a path the server compacts its Raft log and exports nothing, while the OpenAPI file calls the path required. So the client takes a path and core refuses an empty one (D87) |
-| `vote` | `POST operations/vote` | **source:** 200 `{"success":<bool>}`, no special case for a leader or a single node. **docs:** send to a follower, which becomes leader |
-| `compact_db` | `POST operations/db/compact` | **source:** 200, or 500 with `success:false` and `error`. **docs:** does not block, off-peak advised |
-| `clear_cache` | `POST operations/cache/clear` | **source:** 200 `{"success":true}`. Only the search response cache |
-| `set_config` | `POST config` | **source:** 201 `{"success":true}`, the OpenAPI file says 200. 400 `Bad JSON.` or the messages of §4.2 |
+| `snapshot` | `POST operations/snapshot?snapshot_path=` | 201 `{"success":true}` when the copy is done, and `<path>/state` holds `meta` and `snapshot`. Missing parents are created. A path that cannot be written, or that is a file: 500 `{"error":"Copy failed.","success":false}`. A snapshot already saving: 500 `{"error":"Is saving another snapshot","success":false}`. **source:** also 409 `Another snapshot is in progress.`, which three parallel requests did not reach. The directory is not checked: it merges, its files stay, and a second snapshot adds a `snapshot_N` beside the first. Without a path, with an empty one and with a relative one the answer is 201 too. **docs:** without a path the server compacts its Raft log and exports nothing, while the OpenAPI file calls the path required. So the client takes a path and core refuses an empty or relative one (D87) |
+| `vote` | `POST operations/vote` | 200 `{"success":false}` on a single node and on a leader. 200 `{"success":true}` on a follower, and the role moves seconds after the answer (P4) |
+| `compact_db` | `POST operations/db/compact` | 200 `{"success":true}`. **source:** 500 with `success:false` and `error`. **docs:** does not block, off-peak advised |
+| `clear_cache` | `POST operations/cache/clear` | 200 `{"success":true}`. Only the search response cache |
+| `set_config` | `POST config` | 201 `{"success":true}`, the OpenAPI file says 200. 400 `Bad JSON.` or the messages of §4.2 |
+
+A `documents:search` key gets 401 on all five.
 
 Any 2xx is accepted. A 2xx whose body says `success:false` is an error, except on `vote`, which returns it: a refused vote is a result, not a failure. `schema_changes` exists and stays; a `polling()` client keeps its requests in the polling buffer (D12).
 
 **source, a trap:** `get_schema_changes` calls `res->set_200` after its error path, so a failure can read as 200 with an odd body. The existing decode reports that as `Error::Decode`, which is fine.
 
-### 4.2 What `POST /config` does (source, same on `v30.0` and `v30.2`)
+### 4.2 What `POST /config` does (measured, same on 30.0 and 30.2)
 
-Eight keys, each checked only if present. An unknown key is ignored and answers success. Keys apply in order, so a later bad value leaves the earlier ones applied. There is no `GET /config`, and `update_config` writes nothing to disk.
+Eight keys, each checked only if present. An unknown key is ignored and answers 201, and so does `{}`. Keys apply in order, so a later bad value leaves the earlier ones applied (**source**). There is no `GET /config`, and a value does not survive a restart (P7).
 
 | Key | Type | Offered in Tessera |
 |---|---|---|
-| `log-slow-requests-time-ms` | integer, `-1` disables | yes |
-| `log-slow-searches-time-ms` | integer | yes |
+| `log-slow-requests-time-ms` | integer, `-1` disables, `0` logs every request, the server takes lower values too | yes |
+| `log-slow-searches-time-ms` | integer, as above | yes |
 | `enable-search-logging` | boolean | yes |
-| `cache-num-entries` | positive integer | yes |
-| `embedding-cache-num-entries` | positive integer | yes |
-| `healthy-read-lag` | positive integer | yes |
-| `healthy-write-lag` | positive integer | yes |
+| `cache-num-entries` | positive 32-bit integer | yes |
+| `embedding-cache-num-entries` | positive 32-bit integer | yes |
+| `healthy-read-lag` | positive 32-bit integer | yes |
+| `healthy-write-lag` | positive 32-bit integer | yes |
 | `skip-writes` | boolean | **no** (D86) |
 
-So a "verify" by reading back is impossible, and a 200 for a misspelled key proves nothing. Hence: a closed list of keys, one key per Apply so no partial state exists, the node named, and the form says the value cannot be read back and is expected to last until that node restarts.
+A wrong type answers 400 `Configuration `<key>` must be an integer.` or `must be a boolean.`, and 0, a negative or 2,147,483,648 on a positive key answers `must be a positive integer.` So a "verify" by reading back is impossible, and a 201 for a misspelled key proves nothing. Hence: a closed list of keys, one key per Apply so no partial state exists, the node named, and the form says the value cannot be read back and lasts until that node restarts.
 
 ### 4.3 What a backup reads
 
@@ -143,24 +145,24 @@ A one-off `reqwest::Client` with a 10 s timeout, a `User-Agent` of `tessera/<ver
 
 `Client::node(index)` exists. The Ops tab reads roles from `ConnectionState.nodes[i].debug`, as the overview does.
 
-### 4.6 Probes Task 1 must run first
+### 4.6 Probes (run on 2026-11-06)
 
-On a throwaway 30.2 and then 30.0 on 18208, `--tmpfs /data`, and the compose cluster on 18111-18113 for vote. Never 18108 for these, never 8108.
+On throwaway 30.0 and 30.2 servers. Vote by curl on the 30.2 compose cluster on 18111-18113, and the `cluster` test on both versions. Never on 18108 or 8108. Both versions answered alike.
 
-| # | Question | Design assumes | If different |
+| # | Question | Measured | Consequence |
 |---|---|---|---|
-| P1 | Snapshot into a new directory | 201, `<path>/state` appears | Record the shape |
-| P2 | Snapshot into a non-empty directory, twice into one path | Unknown: `butil::CopyDirectory` may merge | Reword the warning; refuse nothing, the client cannot see the disk |
-| P3 | Snapshot into an unwritable path, into a missing parent | 500 `Copy failed.`, possibly after a slow checkpoint | Keep the error inline |
-| P4 | Vote on a single node, on a leader, on a follower | Single: `false` or an error; follower: `true`, role moves | Adjust when the button is enabled (§7.3) |
-| P5 | Which node do vote and snapshot answer on when the key is read-only scoped | Refused like any write | None |
-| P6 | Each key of §4.2, a bad value, an unknown key | §4.2 | Update the catalog |
-| P7 | `log-slow-requests-time-ms` after a container restart with a kept data dir | Back to its start value | Reword the note |
-| P8 | Does a `stem_dictionary` naming a missing dictionary fail a create? | Fails | If accepted, keep the warning and do not block |
-| P9 | Does a `reference` to a missing collection fail a create, and an import into it? | Create passes, import of a referencing document fails until the target has it | Order of §5.5 changes only if a create fails: then create in reference order and name cycles as blocked |
-| P10 | Import of documents that hold their embedding, for a field with `embed` | No provider call, the stored vector stays | If it calls the provider, say so in the restore plan and strip nothing |
-| P11 | A schema round trip through `SchemaDraft::from_collection` for nested fields, `.*`, `token_separators`, `metadata`, sets | Same as M2's clone and M6's reindex | Fix the draft |
-| P12 | Create with `synonym_sets` or `curation_sets` naming a missing set | Fails (D58 has `PATCH` at 404) | Order already avoids it |
+| P1 | Snapshot into a new directory | 201, `<path>/state/{meta,snapshot}`. Three at once: one 201, two 500 `Is saving another snapshot` | The refusal shows inline, whatever its status |
+| P2 | Snapshot into a non-empty directory, twice into one path | 201 both. It merges: other files stay, and the second snapshot lands beside the first in `state/snapshot` | The dialog says a used directory keeps its files and collects snapshots (§7.3). Nothing is refused |
+| P3 | Snapshot into an unwritable path, into a missing parent | Unwritable (`/proc/…`) or a file: 500 `Copy failed.` A missing parent is created: 201 | The error stays inline. The dialog does not say the directory must exist |
+| P4 | Vote on a single node, on a leader, on a follower | Single and leader: 200 `success:false`. Follower: 200 `success:true`, and it led between 4 and 8 s later | The button rule of D88 stands. The result says the election started, not that the role moved |
+| P5 | Operations with a `documents:search` key | 401 on all five | None |
+| P6 | Each key of §4.2, a bad value, an unknown key | §4.2 | The catalog stands, and `i32::MAX` is the upper bound |
+| P7 | `log-slow-requests-time-ms` after a container restart with a kept data dir | Back to its start value: at `0` every request logged `event=slow_request`, after the restart none did until it was set again | The note says "until that node restarts" |
+| P8 | Does a `stem_dictionary` naming a missing dictionary fail a create? | **No.** 201, the field reads `stem:true`, and an import passes | The warning stays and nothing blocks. §5.5 is unchanged |
+| P9 | Does a `reference` to a missing collection fail a create, and an import into it? | Create passes. An import line fails with `Referenced collection … not found.`, also on an optional field, and then with `Referenced document having id: … not found` until the target document exists. With `async_reference: true` the line passes | Order of §5.5 stands. A cycle fails line by line unless its fields are async |
+| P10 | Import of documents that hold their embedding, for a field with `embed` | No provider call, the vector stays. A create calls the provider once, a document without the vector calls it too. A vector of the wrong size: `Field … contains an invalid embedding.` A `GET` shows the key's first five characters and `*` | As designed. `blank_secrets` covers the shortened key |
+| P11 | A schema round trip through `SchemaDraft::from_collection` for nested fields, `.*`, `num_.*`, `token_separators`, `symbols_to_index`, `metadata`, sets, `reference`, `hnsw_params`, `vec_dist` | The clone equals the source in every attribute | None |
+| P12 | Create with `synonym_sets` or `curation_sets` naming a missing set | 404 `Synonym set … not found.`, `Curation set … not found.`, nothing created | Order already avoids it |
 
 ## 5. tessera-core
 
@@ -369,15 +371,15 @@ The node picker defaults to the active node and shows role and host. Each result
 
 | Operation | Confirmation | Consequences stated |
 |---|---|---|
-| Snapshot | Plain; typed on prod | The path is on the server, on this node; the disk needs room for the data; a directory in use may be overwritten; may take long |
-| Vote | Plain; typed on prod | The node named becomes leader; writes pause during the election; clients of the old leader retry |
+| Snapshot | Plain; typed on prod | The path is on the server, on this node; the disk needs room for the data; a used directory keeps its files and collects snapshots; may take long |
+| Vote | Plain; typed on prod | The node named becomes leader within seconds; writes pause during the election; clients of the old leader retry |
 | Compact | Plain | Disk and CPU load on this node; off-peak advised |
 | Clear cache | Plain | Search latency rises until the cache fills |
 | Config | None; plain on prod | Key, value, node; cannot be read back |
 
 Typed means the profile name, as for unlock. Everything goes through `ensure_writable` and `confirm_write`, and writes run detached.
 
-Vote is disabled with the reason when the node is the leader, or when the profile has one node, subject to P4. A snapshot with a bad path shows the problem inline and sends nothing. While a snapshot runs its button shows busy, and a 409 shows inline.
+Vote is disabled with the reason when the node is the leader, or when the profile has one node: both answer `success:false` (P4). Its result says the election started, because the role moves seconds after the answer. A snapshot with a bad path shows the problem inline and sends nothing. While a snapshot runs its button shows busy, and the server's refusal of a second one shows inline.
 
 Schema change polling runs only while the tab is the visible one and the window is visible, through `client.polling()`. The handle lives on the view, so closing stops it.
 
@@ -478,7 +480,7 @@ Already in CI with `deny.toml`. `multiple-versions = "warn"` stays, since GPUI p
 ## 9. Testing
 
 - **Unit:** `check_snapshot_path`, config parsing, `confirm_for`, `raw_danger`, `Manifest::check`, `allowed_path`, `unpack` against crafted archives (`../x`, an absolute path, a symbolic link, a hard link, a device, a duplicate, an unlisted file, more bytes than declared, manifest not first), `verify` with one flipped byte, `plan` for each `RowState`, reference order with a cycle, settings parsing and clamping, migrations with a fake list, `redact::line`, `transport_risks`.
-- **Wiremock:** each operation's path, query and status handling, `success:false`, 409; `latest_release` with 200, 404 and a 2 MiB body.
+- **Wiremock:** each operation's path, query and status handling, `success:false`, 409, 500; `latest_release` with 200, 404 and a 2 MiB body.
 - **Live, both versions:** operations, a round trip of a backup into a second throwaway server, as a folder and as an archive, comparing sorted exports. **Cluster, nightly:** vote moves the leader.
 - **UI with fakes:** confirmations per D85, read-only guard, cancelling sends nothing, a blocked row, Replace, the banner, settings persistence, layout restore.
 - **Log test:** a subscriber built like `run`'s writes to a temp dir, an event holding a key in a URL and in JSON leaves no key in the file, and a filename matches `tessera.log.*`.
@@ -504,7 +506,7 @@ Task 5 reads whether `zstd` without default features still bundles its C sources
 
 ## 13. Risks
 
-1. **No probe ran.** §4 is read from source and docs. P2, P4, P8, P9 and P10 can change behaviour, and Task 1 can send this design back. Writing the design before the probes reverses the project's order, so PR A stops there if a probe disagrees.
+1. **A server can change what was measured.** §4 holds for 30.0 and 30.2. `live_operations` and `cluster` pin it, and CI runs them.
 2. **Restore into production.** A wrong plan writes to a live cluster. The plan is recomputed before the first write, a collection is never overwritten, and Replace is off and typed.
 3. **A backup is not a consistent snapshot.** Collections export one after another while writes go on. The dialog says so and points to Snapshot for a consistent copy.
 4. **Backups hold the documents in plain text,** and a reader of the file reads them all. Files are private to the user (0600, 0700), and the dialog says so. Provider keys are never in it: `blank_secrets` runs on every schema and a test proves it.

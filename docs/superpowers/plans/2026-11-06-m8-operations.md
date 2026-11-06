@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024, GPUI Kit 0.9.0 (gpui-pre 0.3.11), reqwest 0.13.5, tokio 1.54.1, tracing-subscriber 0.3.23, plus tracing-appender 0.2.5, tar 0.4.46, zstd 0.14.3, zeroize 1.9.1.
 
-**Spec:** [`docs/superpowers/specs/2026-11-06-m8-operations-design.md`](../specs/2026-11-06-m8-operations-design.md). Section numbers below refer to it. Read the section a task names first. **§4 was not probed on a server:** Task 1 does that, and PR A stops if a result disagrees with the design.
+**Spec:** [`docs/superpowers/specs/2026-11-06-m8-operations-design.md`](../specs/2026-11-06-m8-operations-design.md). Section numbers below refer to it. Read the section a task names first. §4 was measured by Task 1's probes.
 
 ## Global Constraints
 
@@ -78,7 +78,7 @@ pub async fn set_config(&self, key: &str, value: &Value) -> Result<(), Error>;
 
 **Tests:** wiremock for the method, path, encoded query, body, 201, `success:false`, 409 with the message kept in `Error::Http`, read-only refusal. Live (`#[ignore]`), on `TESSERA_IT_URL`: snapshot into `/tmp/tessera-it-<pid>`, compact, clear cache, each config key set back to its start value afterwards where the start value is known. `live_operations` must refuse to run when the URL's port is 18108 or 8108. Cluster: vote on a follower moves the leader within 30 s, then the test votes the first leader back.
 
-**CI:** add `live_operations` to `integration` and the vote test runs already through `cluster`.
+**CI:** add `live_operations` to `integration`, against a second service on 18208, because the first one is on 8108 and the test refuses that port. The vote test runs already through `cluster`.
 
 **Verify:** `TESSERA_IT_URL=http://localhost:18208 TESSERA_IT_KEY=xyz cargo test -p tessera-client --test live_operations -- --ignored`, on 30.2 and 30.0. Cluster: `cargo test -p tessera-client --test cluster -- --ignored --test-threads=1`.
 
@@ -114,7 +114,7 @@ pub async fn set_config(&self, key: &str, value: &Value) -> Result<(), Error>;
 - Rows as in design §7.2, each with explanation text, its button with `.danger()` for Snapshot, Compact and Vote, its result under it with node and time.
 - Snapshot: `check_snapshot_path` runs as the user types, the problem shows under the input, the button is disabled with it. The dialog states the path and node.
 - Confirmation by `confirm_for`: Typed through `confirm_write` with `typed: true`, `expected` the profile name; Plain with `typed: false`; None runs directly.
-- Vote disabled with a reason when the node's state is leader or the profile has one node. Adjust to what P4 measured.
+- Vote disabled with a reason when the node's state is leader or the profile has one node, both of which answer `success:false` (P4). Its result says the election started: the role moves seconds after the answer.
 - Runtime config: a `Select` over `CONFIG_KEYS`, a value input or a switch by kind, Apply, and always the line that the value cannot be read back and lasts until that node restarts (as P7 measured).
 - Schema changes: a table of collection, validated and altered docs, polled every 2 s while the tab shows, by a `Task` on the view, stopped with it. An empty list says nothing runs.
 - Each action sits behind `ensure_writable`, shows the lock while `writes_locked()`, and runs detached. A stale result after a node change still names its own node.
