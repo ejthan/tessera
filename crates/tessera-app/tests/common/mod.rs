@@ -32,7 +32,7 @@ use tessera_client::{
 };
 use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
-use tessera_core::search::results::parse_result;
+use tessera_core::search::results::{parse_multi, parse_result};
 use tessera_core::secrets::{MemoryStore, SecretStore};
 use tessera_core::store::{ConnectionsFile, StoreError};
 
@@ -779,6 +779,10 @@ pub struct FakeSearch {
     pub fail: Mutex<Option<(u16, String)>>,
     /// When set, the next answer waits until the sender fires or is dropped.
     pub hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Every multi-search, in order.
+    pub multi_calls: Mutex<Vec<tessera_client::MultiSearch>>,
+    /// The body of each multi-search answer; by default [`search_body`] of 12 per search.
+    pub multi_body: Mutex<Option<String>>,
 }
 
 impl FakeSearch {
@@ -793,6 +797,11 @@ impl FakeSearch {
     /// The searches asked so far.
     pub fn calls(&self) -> Vec<SearchCall> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// The multi-searches asked so far.
+    pub fn multi_calls(&self) -> Vec<tessera_client::MultiSearch> {
+        self.multi_calls.lock().unwrap().clone()
     }
 }
 
@@ -837,10 +846,35 @@ impl SearchBackend for FakeSearchBackend {
     fn multi(
         &self,
         _: Client,
-        _: tessera_client::MultiSearch,
-        _: Vec<(String, String)>,
+        request: tessera_client::MultiSearch,
+        tags: Vec<(String, String)>,
     ) -> tessera_app::collections::BoxFuture<Result<MultiAnswer, Error>> {
-        Box::pin(async { Err(http_error((500, "not faked".to_string()))) })
+        let fake = &self.0;
+        fake.multi_calls.lock().unwrap().push(request.clone());
+        let body = fake.multi_body.lock().unwrap().clone().unwrap_or_else(|| {
+            let results = vec![search_body(12); request.searches.len()].join(",");
+            if request.union {
+                search_body(12)
+            } else {
+                format!(r#"{{"results":[{results}]}}"#)
+            }
+        });
+        let fail = fake.fail.lock().unwrap().clone();
+        let hold = fake.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            if let Some(e) = fail {
+                return Err(http_error(e));
+            }
+            let (start, end) = &tags[0];
+            let result = parse_multi(&body, request.union, (start, end)).map_err(Error::Decode)?;
+            Ok(MultiAnswer {
+                text: body.into(),
+                result,
+            })
+        })
     }
 }
 
@@ -851,6 +885,8 @@ pub fn install_search_fake(cx: &mut TestAppContext) -> Arc<FakeSearch> {
         calls: Mutex::default(),
         fail: Mutex::default(),
         hold: Mutex::default(),
+        multi_calls: Mutex::default(),
+        multi_body: Mutex::default(),
     });
     let installed = FakeSearchBackend(fake.clone());
     cx.update(|cx| cx.set_global(SearchBackendGlobal(Arc::new(installed))));
@@ -958,6 +994,11 @@ pub const SHOW_JSON: &str = key("cmd-2", "ctrl-2");
 pub const SHOW_HITS: &str = key("cmd-3", "ctrl-3");
 pub const SHOW_RAW: &str = key("cmd-4", "ctrl-4");
 pub const TOGGLE_INSTANT: &str = key("cmd-alt-l", "ctrl-alt-l");
+pub const ADD_SEARCH: &str = key("cmd-t", "ctrl-t");
+pub const REMOVE_SEARCH: &str = key("cmd-shift-w", "ctrl-shift-w");
+pub const NEXT_SEARCH: &str = key("cmd-alt-right", "ctrl-alt-right");
+pub const PREVIOUS_SEARCH: &str = key("cmd-alt-left", "ctrl-alt-left");
+pub const TOGGLE_UNION: &str = key("cmd-shift-m", "ctrl-shift-m");
 pub const NEXT_PAGE: &str = key("cmd-alt-down", "ctrl-alt-down");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).

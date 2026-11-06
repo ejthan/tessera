@@ -8,8 +8,8 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
-    prelude::*, px,
+    App, Context, FontWeight, IntoElement, ParentElement as _, SharedString, Styled as _, Window,
+    div, prelude::*, px,
 };
 use rust_i18n::t;
 use serde_json::Value;
@@ -29,14 +29,14 @@ fn page_count(found: u64, per_page: u64) -> u64 {
     found.div_ceil(per_page.max(1))
 }
 
-/// The status line of `result`.
-pub(super) fn status(result: &SearchResult) -> SharedString {
+/// The status line of `result`. A union's `found` counts a document once per search.
+pub(super) fn status(result: &SearchResult, union: bool) -> SharedString {
     let (found, out_of, ms) = (
         grouped(result.found),
         grouped(result.out_of),
         result.search_time_ms,
     );
-    match result.found_docs {
+    let line = match result.found_docs {
         Some(docs) => t!(
             "search.status_groups",
             found = found,
@@ -45,26 +45,33 @@ pub(super) fn status(result: &SearchResult) -> SharedString {
             ms = ms
         ),
         None => t!("search.status", found = found, out_of = out_of, ms = ms),
+    };
+    if union {
+        let note = t!("search.union.before_duplicates");
+        return format!("{line} · {note}").into();
     }
-    .to_string()
-    .into()
+    line.to_string().into()
 }
 
 impl SearchWorkbench {
+    fn shown_param(&self, key: &str) -> String {
+        value_text(self.drafts[self.shown_draft()].params.get(key))
+    }
+
     fn per_page(&self) -> u64 {
-        let per_page = value_text(self.draft().params.get("per_page")).parse();
+        let per_page = self.shown_param("per_page").parse();
         per_page.unwrap_or(DEFAULT_PER_PAGE)
     }
 
     /// The draft's page, not the result's: a quick second Next goes on from the first.
     fn page(&self) -> u64 {
-        let page = value_text(self.draft().params.get("page")).parse();
+        let page = self.shown_param("page").parse();
         page.unwrap_or(1)
     }
 
     /// Writes `page` and runs, when `step` stays within the result.
     pub(super) fn turn_page(&mut self, step: i64, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(result) = &self.result else {
+        let Some(result) = self.result() else {
             return;
         };
         let pages = page_count(result.found, self.per_page());
@@ -78,14 +85,15 @@ impl SearchWorkbench {
         }
     }
 
-    fn field_type(&self, field: &str) -> String {
-        let schema = self.schema.iter().flat_map(|c| &c.fields);
-        let found = schema.into_iter().find(|f| f.name == field);
+    fn field_type(&self, field: &str, cx: &App) -> String {
+        let collection = &self.drafts[self.shown_draft()].collection;
+        let schema = self.schema_of(collection, cx).into_iter();
+        let found = schema.flat_map(|c| &c.fields).find(|f| f.name == field);
         found.map_or_else(|| "string".to_string(), |f| f.r#type.clone())
     }
 
     fn filter_text(&self) -> String {
-        value_text(self.draft().params.get("filter_by"))
+        self.shown_param("filter_by")
     }
 
     /// Adds `value` to the filter or takes it out, from the first page on, and runs.
@@ -96,7 +104,7 @@ impl SearchWorkbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let field_type = self.field_type(field);
+        let field_type = self.field_type(field, cx);
         let Some(filter) = toggle_facet(&self.filter_text(), field, &field_type, value) else {
             return;
         };
@@ -108,7 +116,7 @@ impl SearchWorkbench {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let field = facet.field.clone();
-        let field_type = self.field_type(&field);
+        let field_type = self.field_type(&field, cx);
         let filter = self.filter_text();
         let blocked = self.json_error.is_some();
         let sampled = facet.sampled.then(|| {
@@ -165,8 +173,9 @@ impl SearchWorkbench {
 
     /// The facet panel; `None` for a result without facets.
     pub(super) fn facet_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let facets = self.result.as_ref()?.facets.clone();
-        if facets.is_empty() {
+        // A union's counts mix searches, and a click could only reach one of them.
+        let facets = self.result()?.facets.clone();
+        if facets.is_empty() || self.union || self.union_answer {
             return None;
         }
         let sections: Vec<_> = facets.iter().map(|f| self.facet_section(f, cx)).collect();
@@ -191,7 +200,7 @@ impl SearchWorkbench {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
-        let result = self.result.as_ref()?;
+        let result = self.result()?;
         let page = self.page();
         let pages = page_count(result.found, self.per_page());
         if pages == 0 {
@@ -241,11 +250,11 @@ impl SearchWorkbench {
 
     /// Why the list is empty: nothing matched, or the page lies past the end.
     pub(super) fn no_hits(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let result = self.result.as_ref()?;
+        let result = self.result()?;
         if !result.hits.is_empty() || !result.groups.is_empty() {
             return None;
         }
-        let q = value_text(self.draft().params.get("q"));
+        let q = self.shown_param("q");
         let filter = self.filter_text();
         let (id, text) = if result.found > 0 {
             let found = grouped(result.found);

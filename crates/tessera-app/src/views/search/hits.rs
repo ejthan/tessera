@@ -184,6 +184,9 @@ impl HitsView {
                 if let Some(curated) = &curated {
                     label.push_str(&format!(" {curated}"));
                 }
+                if let Some(collection) = &hit.collection {
+                    label.push_str(&format!(" {collection}"));
+                }
                 v_flex()
                     .id(SharedString::from(format!("search.hit.{ix}")))
                     .test_support()
@@ -208,7 +211,8 @@ impl HitsView {
                             .text_color(muted)
                             .child(hit.id.to_string())
                             .children(hit.text_match.map(|score| score.to_string()))
-                            .children(curated),
+                            .children(curated)
+                            .children(hit.collection.clone()),
                     )
                     .children(lines.iter().map(|line| Self::line(line, cx)))
                     .into_any_element()

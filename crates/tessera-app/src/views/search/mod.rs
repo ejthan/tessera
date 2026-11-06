@@ -4,6 +4,7 @@
 
 pub mod form;
 pub mod hits;
+mod multi;
 mod results;
 
 use std::sync::Arc;
@@ -25,29 +26,35 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use serde_json::{Map, Value};
-use tessera_client::{Collection, Error};
+use tessera_client::{Client, Collection, Error};
 use tessera_core::profile::Node;
 use tessera_core::search::INSTANT_DEBOUNCE_MS;
 use tessera_core::search::params::{
     ParamError, SearchDraft, SideEffect, params_text, parse_params, side_effects, to_pairs,
 };
-use tessera_core::search::results::SearchResult;
+use tessera_core::search::results::{ItemError, MultiResult, SearchResult};
 use tessera_widgets::{BodyView, JsonEditor, JsonEditorEvent};
 
 use self::form::{FormEvent, SearchForm};
 use self::hits::HitsView;
+use self::multi::multi_request;
 use super::dock::view_tab;
 use super::env_badge;
 use crate::actions::{
-    FocusQuery, NextResultPage, PreviousResultPage, RunSearch, ShowForm, ShowHits, ShowJson,
-    ShowRawResult, ToggleInstant, WORKBENCH,
+    AddSearch, FocusQuery, NextResultPage, NextSearch, PreviousResultPage, PreviousSearch,
+    RemoveSearch, RunSearch, ShowForm, ShowHits, ShowJson, ShowRawResult, ToggleInstant,
+    ToggleUnion, WORKBENCH,
 };
+use crate::collections::BoxFuture;
 use crate::connection::{ConnectionState, error_text};
-use crate::search::{SearchAnswer, SearchBackendGlobal};
+use crate::search::SearchBackendGlobal;
 use crate::state::AppState;
 
 /// Width of the draft's side of the split.
 const DRAFT_WIDTH: f32 = 400.;
+
+/// A run's answer: the response text and what it means.
+type Answer = Result<(Arc<str>, MultiResult), Error>;
 
 /// How the draft is edited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +130,12 @@ pub struct SearchWorkbench {
     raw: Entity<BodyView>,
     /// The last response, until the Raw tab shows it.
     raw_pending: Option<Arc<str>>,
-    result: Option<SearchResult>,
+    /// The last answer, one entry per search or one for a union, in the order of `drafts`.
+    results: Vec<Result<SearchResult, ItemError>>,
+    /// The result tab asked for; see `shown`.
+    result_tab: usize,
+    /// `results` came from a union.
+    union_answer: bool,
     error: Option<SharedString>,
     running: bool,
     /// Identifies the newest run; an answer of an older one is dropped.
@@ -201,7 +213,9 @@ impl SearchWorkbench {
             hits,
             raw,
             raw_pending: None,
-            result: None,
+            results: Vec::new(),
+            result_tab: 0,
+            union_answer: false,
             error: None,
             running: false,
             generation: 0,
@@ -226,19 +240,36 @@ impl SearchWorkbench {
         if drafts.is_empty() {
             return;
         }
+        self.union = union && drafts.len() > 1;
         self.drafts = drafts;
         self.active = 0;
-        self.union = union;
         self.instant_task = None;
         // Its answer would show under drafts that did not ask for it.
+        self.drop_run();
+        self.results.clear();
+        self.result_tab = 0;
+        self.json_error = None;
+        self.sync_draft(window, cx);
+    }
+
+    fn drop_run(&mut self) {
         self.run_task = None;
         self.generation += 1;
         self.running = false;
-        self.json_error = None;
+    }
+
+    /// Shows the active draft in everything that follows it.
+    fn sync_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_collection(window, cx);
         self.sync_schema(window, cx);
         self.sync_editors(window, cx);
+        self.sync_paging_lock(cx);
         cx.notify();
+    }
+
+    fn sync_paging_lock(&self, cx: &mut Context<Self>) {
+        let locked = self.union && self.active > 0;
+        self.form.update(cx, |f, cx| f.lock_paging(locked, cx));
     }
 
     /// The drafts.
@@ -251,9 +282,14 @@ impl SearchWorkbench {
         self.union
     }
 
-    /// The last result; it stays while a newer run is going or failed.
+    /// The draft being edited.
+    pub fn active(&self) -> usize {
+        self.active
+    }
+
+    /// The result on screen; it stays while a newer run is going or failed.
     pub fn result(&self) -> Option<&SearchResult> {
-        self.result.as_ref()
+        self.results.get(self.shown())?.as_ref().ok()
     }
 
     /// The form.
@@ -312,17 +348,21 @@ impl SearchWorkbench {
             .update(cx, |s, cx| s.set_selected_value(&name, window, cx));
     }
 
-    fn sync_schema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.draft().collection.clone();
+    /// The schema behind collection or alias `name`, once the list is known.
+    fn schema_of<'a>(&self, name: &str, cx: &'a App) -> Option<&'a Collection> {
         let cache = &self.connection.read(cx).collection_cache;
         let alias = cache.aliases.iter().find(|a| a.name == name);
-        let target = alias.map_or(name.as_str(), |a| &a.collection_name);
-        self.schema = cache
+        let target = alias.map_or(name, |a| &a.collection_name);
+        cache
             .collections
             .iter()
             .flatten()
             .find(|c| c.name == target)
-            .cloned();
+    }
+
+    fn sync_schema(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.draft().collection.clone();
+        self.schema = self.schema_of(&name, cx).cloned();
         let schema = self.schema.clone();
         self.form
             .update(cx, |f, cx| f.set_schema(&name, schema.as_ref(), window, cx));
@@ -341,8 +381,8 @@ impl SearchWorkbench {
         }
     }
 
-    fn put_param(&mut self, key: &str, value: Option<Value>) {
-        let params = &mut self.drafts[self.active].params;
+    fn put_param(&mut self, draft: usize, key: &str, value: Option<Value>) {
+        let params = &mut self.drafts[draft].params;
         match value {
             Some(value) => {
                 params.insert(key.to_string(), value);
@@ -361,7 +401,7 @@ impl SearchWorkbench {
         cx: &mut Context<Self>,
     ) {
         if self.draft().params.get(key) != value.as_ref() {
-            self.put_param(key, value);
+            self.put_param(self.active, key, value);
             if key != "page" {
                 self.drop_page(window, cx);
             }
@@ -372,13 +412,13 @@ impl SearchWorkbench {
     /// Back to the first page: a page says nothing about another query's result.
     fn drop_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.draft().params.contains_key("page") {
-            self.put_param("page", None);
+            self.put_param(self.active, "page", None);
             self.sync_editors(window, cx);
         }
     }
 
-    /// Writes `edits`, as a click outside the editors does, and runs. Not over JSON text that
-    /// does not parse: showing the map would replace it.
+    /// Writes `edits` to the draft of the result on screen, as a click outside the editors does,
+    /// and runs. Not over JSON text that does not parse: showing the map would replace it.
     fn write_and_run(
         &mut self,
         edits: &[(&str, Option<Value>)],
@@ -388,8 +428,9 @@ impl SearchWorkbench {
         if self.json_error.is_some() {
             return;
         }
+        let draft = self.shown_draft();
         for (key, value) in edits {
-            self.put_param(key, value.clone());
+            self.put_param(draft, key, value.clone());
         }
         self.sync_editors(window, cx);
         self.run(window, cx);
@@ -412,31 +453,36 @@ impl SearchWorkbench {
         cx.notify();
     }
 
-    fn side_effects(&self) -> Vec<SideEffect> {
-        side_effects(&self.draft().params, self.schema.as_ref())
+    /// What a run of all drafts would do besides searching.
+    fn side_effects(&self, cx: &App) -> Vec<SideEffect> {
+        let of = |d: &SearchDraft| side_effects(&d.params, self.schema_of(&d.collection, cx));
+        self.drafts.iter().flat_map(of).collect()
     }
 
-    /// The schema is unknown, so `query_by` may name a field that embeds remotely.
-    fn schema_unknown(&self) -> bool {
-        self.schema.is_none() && self.draft().params.contains_key("query_by")
+    /// A schema is unknown, so a `query_by` may name a field that embeds remotely.
+    fn schema_unknown(&self, cx: &App) -> bool {
+        let unknown = |d: &SearchDraft| {
+            d.params.contains_key("query_by") && self.schema_of(&d.collection, cx).is_none()
+        };
+        self.drafts.iter().any(unknown)
     }
 
     /// Instant search would, or might, call a model or store something.
-    fn instant_paused(&self) -> bool {
-        self.schema_unknown()
+    fn instant_paused(&self, cx: &App) -> bool {
+        self.schema_unknown(cx)
             || self
-                .side_effects()
+                .side_effects(cx)
                 .iter()
                 .any(|e| *e != SideEffect::Analytics)
     }
 
-    fn instant_allowed(&self) -> bool {
-        self.instant && !self.run_blocked() && !self.instant_paused()
+    fn instant_allowed(&self, cx: &App) -> bool {
+        self.instant && !self.run_blocked() && !self.instant_paused(cx)
     }
 
-    /// There is nothing to send: no collection, or JSON that does not parse.
+    /// There is nothing to send: a draft without collection, or JSON that does not parse.
     fn run_blocked(&self) -> bool {
-        self.draft().collection.is_empty() || self.json_error.is_some()
+        self.drafts.iter().any(|d| d.collection.is_empty()) || self.json_error.is_some()
     }
 
     /// The draft changed: starts the wait for an instant run. Only the last change of a burst
@@ -444,7 +490,7 @@ impl SearchWorkbench {
     fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.instant_task = None;
         cx.notify();
-        if !self.instant_allowed() {
+        if !self.instant_allowed(cx) {
             return;
         }
         self.instant_task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -453,7 +499,7 @@ impl SearchWorkbench {
                 .await;
             // The schema may have arrived during the wait.
             this.update_in(cx, |this, window, cx| {
-                if this.instant_allowed() {
+                if this.instant_allowed(cx) {
                     this.run(window, cx);
                 }
             })
@@ -468,7 +514,7 @@ impl SearchWorkbench {
         if self.run_blocked() {
             return;
         }
-        if !self.side_effects().contains(&SideEffect::Conversation) {
+        if !self.side_effects(cx).contains(&SideEffect::Conversation) {
             return self.send(window, cx);
         }
         let this = cx.entity().downgrade();
@@ -479,24 +525,42 @@ impl SearchWorkbench {
         });
     }
 
+    /// The read for all drafts: `search` for one, `multi` for several.
+    fn ask(&self, client: Client, cx: &App) -> Result<BoxFuture<Answer>, ParamError> {
+        let backend = cx.global::<SearchBackendGlobal>().0.clone();
+        if let [draft] = &self.drafts[..] {
+            let search = backend.search(
+                client,
+                draft.collection.clone(),
+                to_pairs(&draft.params)?,
+                tags(&draft.params),
+            );
+            return Ok(Box::pin(async move {
+                let answer = search.await?;
+                let result = MultiResult::Federated(vec![Ok(answer.result)]);
+                Ok((answer.text, result))
+            }));
+        }
+        let request = multi_request(&self.drafts, self.union)?;
+        let tags = self.drafts.iter().map(|d| tags(&d.params)).collect();
+        let multi = backend.multi(client, request, tags);
+        Ok(Box::pin(async move {
+            let answer = multi.await?;
+            Ok((answer.text, answer.result))
+        }))
+    }
+
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let draft = self.draft();
-        let pairs = match to_pairs(&draft.params) {
-            Ok(pairs) => pairs,
+        let Some(connected) = &self.connection.read(cx).connected else {
+            return;
+        };
+        let search = match self.ask(connected.client.clone(), cx) {
+            Ok(search) => search,
             Err(error) => {
                 self.error = Some(param_error_text(&error).into());
                 return cx.notify();
             }
         };
-        let Some(connected) = &self.connection.read(cx).connected else {
-            return;
-        };
-        let search = cx.global::<SearchBackendGlobal>().0.search(
-            connected.client.clone(),
-            draft.collection.clone(),
-            pairs,
-            tags(&draft.params),
-        );
         self.generation += 1;
         let generation = self.generation;
         self.running = true;
@@ -512,20 +576,18 @@ impl SearchWorkbench {
         cx.notify();
     }
 
-    fn take_answer(
-        &mut self,
-        answer: Result<SearchAnswer, Error>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn take_answer(&mut self, answer: Answer, window: &mut Window, cx: &mut Context<Self>) {
         self.running = false;
         match answer {
-            Ok(answer) => {
+            Ok((text, result)) => {
                 self.error = None;
-                self.hits
-                    .update(cx, |h, cx| h.set_result(&answer.result, cx));
-                self.result = Some(answer.result);
-                self.raw_pending = Some(answer.text);
+                self.union_answer = matches!(result, MultiResult::Union(_));
+                self.results = match result {
+                    MultiResult::Federated(results) => results,
+                    MultiResult::Union(result) => vec![Ok(result)],
+                };
+                self.show_result_tab(self.result_tab, cx);
+                self.raw_pending = Some(text);
                 self.fill_raw(window, cx);
             }
             Err(error) => {
@@ -569,7 +631,7 @@ impl SearchWorkbench {
     }
 
     fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let needs_unlock = self.side_effects().contains(&SideEffect::Conversation)
+        let needs_unlock = self.side_effects(cx).contains(&SideEffect::Conversation)
             && self.connection.read(cx).writes_locked();
         h_flex()
             .flex_none()
@@ -620,11 +682,11 @@ impl SearchWorkbench {
         if !self.instant {
             return None;
         }
-        let (id, key) = if self.schema_unknown() {
+        let (id, key) = if self.schema_unknown(cx) {
             ("search.instant.paused", "search.instant_paused_schema")
-        } else if self.instant_paused() {
+        } else if self.instant_paused(cx) {
             ("search.instant.paused", "search.instant_paused")
-        } else if self.side_effects().contains(&SideEffect::Analytics) {
+        } else if self.side_effects(cx).contains(&SideEffect::Analytics) {
             ("search.instant.analytics", "search.instant_analytics")
         } else {
             return None;
@@ -733,9 +795,13 @@ impl SearchWorkbench {
         let facets = self.facet_panel(cx);
         let pager = self.pager(window, cx);
         let no_hits = self.no_hits(cx);
+        let result_tabs = self.result_tabs(cx);
+        let status = self.result().map(|r| results::status(r, self.union_answer));
+        let has_result = self.result().is_some();
         v_flex()
             .size_full()
-            .children(self.result.as_ref().map(results::status).map(|status| {
+            .children(result_tabs)
+            .children(status.map(|status| {
                 div()
                     .id("search.status")
                     .test_support()
@@ -744,6 +810,17 @@ impl SearchWorkbench {
                     .p_1()
                     .text_sm()
                     .child(status)
+            }))
+            .children(self.item_error().map(|error| {
+                div()
+                    .id("search.item_error")
+                    .test_support()
+                    .aria_label(error.clone())
+                    .flex_none()
+                    .p_1()
+                    .text_sm()
+                    .text_color(danger)
+                    .child(error)
             }))
             .children(self.error.clone().map(|error| {
                 div()
@@ -800,7 +877,9 @@ impl SearchWorkbench {
                             el.child(div().flex_1().min_h_0().child(self.raw.clone()))
                         } else {
                             el.children(no_hits)
-                                .child(div().flex_1().min_h_0().child(self.hits.clone()))
+                                .when(has_result, |el| {
+                                    el.child(div().flex_1().min_h_0().child(self.hits.clone()))
+                                })
                                 .children(pager)
                         }
                     }))
@@ -817,6 +896,7 @@ impl Focusable for SearchWorkbench {
 
 impl Render for SearchWorkbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabs = self.search_tabs(window, cx);
         let toolbar = self.toolbar(window, cx);
         let draft = self.draft_pane(window, cx);
         let result = self.result_pane(window, cx);
@@ -843,7 +923,22 @@ impl Render for SearchWorkbench {
             .on_action(cx.listener(|this, _: &PreviousResultPage, window, cx| {
                 this.turn_page(-1, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &AddSearch, window, cx| this.add_search(window, cx)))
+            .on_action(cx.listener(|this, _: &RemoveSearch, window, cx| {
+                this.remove_search(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextSearch, window, cx| {
+                this.step_search(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousSearch, window, cx| {
+                this.step_search(-1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleUnion, window, cx| {
+                this.toggle_union(window, cx);
+            }))
             .size_full()
+            .child(tabs)
+            .children(self.limit_note(cx))
             .child(toolbar)
             .children(self.instant_note(cx))
             .children(self.collections_note(cx))

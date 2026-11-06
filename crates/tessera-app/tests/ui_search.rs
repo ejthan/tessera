@@ -1011,3 +1011,291 @@ async fn removing_the_last_chip_keeps_the_keyboard_in_the_workbench(cx: &mut Tes
     f.press(cx, SHOW_JSON);
     assert!(f.has(cx, "json.editor"), "workbench shortcuts still arrive");
 }
+
+impl Fixture {
+    /// Two searches of `books`, the second with `q` set, and no instant runs.
+    fn two_searches(&self, cx: &mut TestAppContext) {
+        self.instant_off(cx);
+        self.press(cx, ADD_SEARCH);
+        self.fill(cx, "search.param.q", "dune");
+    }
+
+    fn load(&self, cx: &mut TestAppContext, drafts: Vec<SearchDraft>, union: bool) {
+        let workbench = self.workbench(cx);
+        self.act(cx, |window, cx| {
+            workbench.update(cx, |w, cx| w.load(drafts, union, window, cx));
+        });
+        self.settle(cx);
+    }
+
+    fn drafts(&self, cx: &mut TestAppContext) -> Vec<SearchDraft> {
+        let workbench = self.workbench(cx);
+        cx.update(|cx| workbench.read(cx).drafts().to_vec())
+    }
+
+    fn active(&self, cx: &mut TestAppContext) -> usize {
+        let workbench = self.workbench(cx);
+        cx.update(|cx| workbench.read(cx).active())
+    }
+}
+
+fn federated_body() -> String {
+    format!(
+        r#"{{"results":[{},{{"code":404,"error":"Not found: `nope`"}}]}}"#,
+        search_body(7)
+    )
+}
+
+fn draft_with(params: Value) -> SearchDraft {
+    let mut draft = SearchDraft::new("books");
+    draft.params.extend(params.as_object().unwrap().clone());
+    draft
+}
+
+#[gpui_kit::test]
+async fn add_copies_the_draft_up_to_50(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.fill(cx, "search.param.q", "dune");
+    assert!(!f.has(cx, "search.add.limit"));
+    for _ in 0..49 {
+        f.press(cx, ADD_SEARCH);
+    }
+    let drafts = f.drafts(cx);
+    assert_eq!(drafts.len(), 50);
+    assert!(drafts.iter().all(|d| d.params["q"] == "dune"));
+    assert_eq!(f.active(cx), 49);
+    assert!(f.disabled(cx, "search.add"));
+    assert!(f.has(cx, "search.add.limit"));
+    f.press(cx, ADD_SEARCH);
+    assert_eq!(f.drafts(cx).len(), 50);
+}
+
+#[gpui_kit::test]
+async fn one_search_uses_search_two_use_multi(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.run(cx);
+    assert_eq!(
+        (f.search.calls().len(), f.search.multi_calls().len()),
+        (1, 0)
+    );
+    f.press(cx, ADD_SEARCH);
+    f.run(cx);
+    assert_eq!(
+        (f.search.calls().len(), f.search.multi_calls().len()),
+        (1, 1)
+    );
+    let request = f.search.multi_calls().remove(0);
+    assert!(!request.union);
+    assert_eq!(request.searches.len(), 2);
+    assert_eq!(request.searches[1]["collection"], "books");
+    assert_eq!(request.searches[1]["enable_analytics"], json!(false));
+    f.press(cx, REMOVE_SEARCH);
+    f.run(cx);
+    assert_eq!(
+        (f.search.calls().len(), f.search.multi_calls().len()),
+        (2, 1)
+    );
+    assert!(f.disabled(cx, "search.remove"));
+}
+
+#[gpui_kit::test]
+async fn federated_error_shows_on_its_tab_only(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.two_searches(cx);
+    *f.search.multi_body.lock().unwrap() = Some(federated_body());
+    f.run(cx);
+    // Add moved to the second search, whose answer is the failure.
+    let text = f.text_of(cx, "search.item_error");
+    assert!(
+        text.contains("404") && text.contains("Not found: `nope`"),
+        "{text}"
+    );
+    assert!(!f.has(cx, "search.status"));
+    assert!(!f.has(cx, "search.error"));
+    f.click(cx, "search.result_tab.0");
+    assert!(!f.has(cx, "search.item_error"));
+    assert!(f.text_of(cx, "search.status").contains('7'));
+    assert_eq!(f.result(cx).unwrap().found, 7);
+}
+
+#[gpui_kit::test]
+async fn union_sends_page_in_the_request_not_the_searches(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.load(
+        cx,
+        vec![
+            draft_with(json!({"page": 3, "per_page": 5})),
+            draft_with(json!({"page": 9, "per_page": 7})),
+        ],
+        true,
+    );
+    f.run(cx);
+    let request = f.search.multi_calls().remove(0);
+    assert!(request.union);
+    assert_eq!((request.page, request.per_page), (Some(3), Some(5)));
+    for search in &request.searches {
+        assert!(!search.contains_key("page") && !search.contains_key("per_page"));
+    }
+}
+
+#[gpui_kit::test]
+async fn union_locks_paging_on_the_other_tabs(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.two_searches(cx);
+    // An input exposes no disabled flag to tests; the note comes from the same condition.
+    assert!(!f.has(cx, "search.param.page.union"));
+    f.press(cx, TOGGLE_UNION);
+    assert!(f.has(cx, "search.param.page.union"));
+    assert!(f.has(cx, "search.param.per_page.union"));
+    f.press(cx, PREVIOUS_SEARCH);
+    assert!(!f.has(cx, "search.param.page.union"));
+}
+
+#[gpui_kit::test]
+async fn union_status_says_before_duplicates(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.two_searches(cx);
+    f.press(cx, TOGGLE_UNION);
+    *f.search.multi_body.lock().unwrap() = Some(
+        r#"{"found":2,"out_of":9,"page":1,"search_time_ms":1,"facet_counts":[
+            {"field_name":"genre","counts":[{"value":"crime","count":1}]}],"hits":[
+            {"document":{"id":"1"},"collection":"books","search_index":0}]}"#
+            .to_string(),
+    );
+    f.run(cx);
+    assert!(f.text_of(cx, "search.status").contains("before duplicates"));
+    assert!(f.text_of(cx, "search.hit.0").contains("books"));
+    assert!(!f.has(cx, "search.facets"));
+    assert!(!f.has(cx, "search.result_tab.0"));
+}
+
+#[gpui_kit::test]
+async fn union_needs_two_searches(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    assert!(f.disabled(cx, "search.union"));
+    f.press(cx, TOGGLE_UNION);
+    let workbench = f.workbench(cx);
+    assert!(!cx.update(|cx| workbench.read(cx).union()));
+    f.press(cx, ADD_SEARCH);
+    assert!(!f.disabled(cx, "search.union"));
+    f.press(cx, TOGGLE_UNION);
+    assert!(cx.update(|cx| workbench.read(cx).union()));
+    f.press(cx, REMOVE_SEARCH);
+    assert!(
+        !cx.update(|cx| workbench.read(cx).union()),
+        "one search left"
+    );
+}
+
+#[gpui_kit::test]
+async fn union_error_shows_inline(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.two_searches(cx);
+    f.press(cx, TOGGLE_UNION);
+    *f.search.fail.lock().unwrap() = Some((400, "sort_by must match".to_string()));
+    f.run(cx);
+    assert!(f.text_of(cx, "search.error").contains("sort_by must match"));
+}
+
+#[gpui_kit::test]
+async fn bad_key_on_second_tab_sends_nothing(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    let bad = draft_with(json!({"Bad-Key": 1}));
+    f.load(cx, vec![SearchDraft::new("books"), bad], false);
+    f.run(cx);
+    assert!(f.search.multi_calls().is_empty() && f.search.calls().is_empty());
+    assert!(f.text_of(cx, "search.tab.1.error").contains("Bad-Key"));
+    assert!(!f.has(cx, "search.tab.0.error"));
+}
+
+#[gpui_kit::test]
+async fn instant_runs_all_searches_after_a_change(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.press(cx, ADD_SEARCH);
+    f.wait(cx, 200);
+    let calls = f.search.multi_calls().len();
+    assert_eq!(calls, 1, "adding a search is a change");
+    f.fill(cx, "search.param.q", "dune");
+    f.wait(cx, 200);
+    let requests = f.search.multi_calls();
+    assert_eq!(requests.len(), calls + 1);
+    assert_eq!(requests[calls].searches[1]["q"], "dune");
+}
+
+#[gpui_kit::test]
+async fn a_conversation_on_another_tab_pauses_instant(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.load(
+        cx,
+        vec![
+            draft_with(json!({"conversation": true})),
+            SearchDraft::new("books"),
+        ],
+        false,
+    );
+    f.press(cx, NEXT_SEARCH);
+    assert!(f.has(cx, "search.instant.paused"));
+    f.fill(cx, "search.param.q", "dune");
+    f.wait(cx, 300);
+    assert!(f.search.multi_calls().is_empty());
+}
+
+#[gpui_kit::test]
+async fn tabs_switch_the_form_and_json_text_stays(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.two_searches(cx);
+    f.press(cx, PREVIOUS_SEARCH);
+    assert_eq!(f.active(cx), 0);
+    let workbench = f.workbench(cx);
+    let q = |cx: &mut TestAppContext| {
+        cx.update(|cx| workbench.read(cx).form().read(cx).input_text("q", cx))
+    };
+    assert_eq!(q(cx), "*");
+    f.press(cx, NEXT_SEARCH);
+    assert_eq!(q(cx), "dune");
+    f.press(cx, SHOW_JSON);
+    f.set_json(cx, "{bad");
+    f.press(cx, PREVIOUS_SEARCH);
+    assert_eq!(f.active(cx), 1, "the text would land on the other search");
+    assert!(f.disabled(cx, "search.remove"));
+    assert_eq!(f.drafts(cx).len(), 2);
+}
+
+#[gpui_kit::test]
+async fn facets_act_on_the_result_tab_shown(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.two_searches(cx);
+    let facets = r#"{"found":1,"out_of":9,"page":1,"search_time_ms":1,"hits":[],"facet_counts":[
+        {"field_name":"genre","counts":[{"value":"crime","count":1}]}]}"#;
+    *f.search.multi_body.lock().unwrap() = Some(format!(r#"{{"results":[{facets},{facets}]}}"#));
+    f.run(cx);
+    f.click(cx, "search.result_tab.0");
+    assert_eq!(f.active(cx), 1);
+    f.click(cx, "search.facet.genre.crime");
+    let drafts = f.drafts(cx);
+    assert_eq!(drafts[0].params["filter_by"], "genre:=`crime`");
+    assert!(!drafts[1].params.contains_key("filter_by"));
+    assert_eq!(f.search.multi_calls().len(), 2);
+}
+
+#[gpui_kit::test]
+async fn removing_a_search_drops_its_answer_and_the_running_read(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.two_searches(cx);
+    *f.search.multi_body.lock().unwrap() = Some(federated_body());
+    f.run(cx);
+    f.press(cx, REMOVE_SEARCH);
+    assert!(!f.has(cx, "search.item_error"));
+    assert_eq!(f.result(cx).unwrap().found, 7);
+    assert!(!f.has(cx, "search.result_tab.0"));
+    f.press(cx, ADD_SEARCH);
+    let held = f.search.hold_next();
+    f.run(cx);
+    f.press(cx, REMOVE_SEARCH);
+    assert!(held.is_closed());
+}

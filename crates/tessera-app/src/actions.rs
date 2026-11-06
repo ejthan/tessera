@@ -78,7 +78,12 @@ gpui_kit::actions!(
         AddCondition,
         MoveChipLeft,
         MoveChipRight,
-        RemoveChip
+        RemoveChip,
+        AddSearch,
+        RemoveSearch,
+        NextSearch,
+        PreviousSearch,
+        ToggleUnion
     ]
 );
 
@@ -313,6 +318,22 @@ const PREVIOUS_PAGE: &str = "ctrl-alt-up";
 const NEXT_PAGE: &str = "cmd-alt-down";
 #[cfg(not(target_os = "macos"))]
 const NEXT_PAGE: &str = "ctrl-alt-down";
+#[cfg(target_os = "macos")]
+const ADD_SEARCH: &str = "cmd-t";
+#[cfg(not(target_os = "macos"))]
+const ADD_SEARCH: &str = "ctrl-t";
+#[cfg(target_os = "macos")]
+const REMOVE_SEARCH: &str = "cmd-shift-w";
+#[cfg(not(target_os = "macos"))]
+const REMOVE_SEARCH: &str = "ctrl-shift-w";
+#[cfg(target_os = "macos")]
+const NEXT_SEARCH: &str = "cmd-alt-right";
+#[cfg(not(target_os = "macos"))]
+const NEXT_SEARCH: &str = "ctrl-alt-right";
+#[cfg(target_os = "macos")]
+const PREVIOUS_SEARCH: &str = "cmd-alt-left";
+#[cfg(not(target_os = "macos"))]
+const PREVIOUS_SEARCH: &str = "ctrl-alt-left";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -423,6 +444,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(FIND, FocusQuery, Some(WORKBENCH)),
         KeyBinding::new(PREVIOUS_PAGE, PreviousResultPage, Some(WORKBENCH)),
         KeyBinding::new(NEXT_PAGE, NextResultPage, Some(WORKBENCH)),
+        KeyBinding::new(ADD_SEARCH, AddSearch, Some(WORKBENCH)),
+        KeyBinding::new(REMOVE_SEARCH, RemoveSearch, Some(WORKBENCH)),
+        KeyBinding::new(NEXT_SEARCH, NextSearch, Some(WORKBENCH)),
+        KeyBinding::new(PREVIOUS_SEARCH, PreviousSearch, Some(WORKBENCH)),
+        KeyBinding::new(SAVE_MODE, ToggleUnion, Some(WORKBENCH)),
         // Deeper than Run, so in the row ⌘↩ adds the condition.
         KeyBinding::new(SAVE, AddCondition, Some(CONDITION_ROW)),
         KeyBinding::new(SAVE, AddCondition, Some(CONDITION_INPUT)),

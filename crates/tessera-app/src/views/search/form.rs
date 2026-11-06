@@ -109,6 +109,8 @@ pub struct SearchForm {
     more_open: bool,
     /// Parameters of the map without a control.
     only_json: usize,
+    /// A union takes `page` and `per_page` from its first search, so here they do nothing.
+    paging_locked: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -208,6 +210,7 @@ impl SearchForm {
             condition_error: None,
             more_open: false,
             only_json: 0,
+            paging_locked: false,
             _subscriptions: subscriptions,
         }
     }
@@ -321,6 +324,12 @@ impl SearchForm {
         let names: Vec<String> = self.fields.iter().map(|f| f.name.clone()).collect();
         self.condition_field
             .update(cx, |s, cx| s.set_items(names, window, cx));
+        cx.notify();
+    }
+
+    /// Disables `page` and `per_page`, saying why.
+    pub fn lock_paging(&mut self, locked: bool, cx: &mut Context<Self>) {
+        self.paging_locked = locked;
         cx.notify();
     }
 
@@ -825,11 +834,13 @@ impl SearchForm {
     fn row(&mut self, def: &ParamDef, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let key = def.key;
         let id = SharedString::from(format!("search.param.{key}"));
+        let locked = self.paging_locked && matches!(key, "page" | "per_page");
         let control = match (self.controls.get(key), def.kind) {
             (Some(Control::Input(input)), _) => Input::new(input)
                 .id(id.clone())
                 .small()
                 .aria_label(key)
+                .disabled(locked)
                 .into_any_element(),
             (Some(Control::Select(select)), _) => Select::new(select)
                 .id(id.clone())
@@ -850,6 +861,16 @@ impl SearchForm {
                     .child(key),
             )
             .child(control)
+            .children(locked.then(|| {
+                let note = SharedString::from(t!("search.union.first_page").to_string());
+                div()
+                    .id(SharedString::from(format!("{id}.union")))
+                    .test_support()
+                    .aria_label(note.clone())
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(note)
+            }))
             .children(self.errors.get(key).cloned().map(|error| {
                 div()
                     .id(SharedString::from(format!("{id}.error")))
