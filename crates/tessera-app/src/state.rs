@@ -18,7 +18,9 @@ use tessera_core::documents::views::{self, CollectionView, ViewsFile};
 use tessera_core::import;
 use tessera_core::log::{LogEntry, RequestLog};
 use tessera_core::profile::Profile;
+use tessera_core::search::history::{self, History, HistoryItem};
 use tessera_core::search::params::SearchDraft;
+use tessera_core::search::saved::{self, SavedFile, SavedQuery};
 use tessera_core::secrets::{SecretError, SecretStore};
 use tessera_core::store::{self, ConnectionsFile, SCHEMA_VERSION, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -28,6 +30,46 @@ use uuid::Uuid;
 use crate::connection::{Connected, ConnectionState, ConnectorGlobal, client_options, error_text};
 use crate::runtime::Tokio;
 use crate::views::status_bar;
+
+/// One file's writes: each waits for the one before, on the background executor, and quitting
+/// waits for the last.
+#[derive(Default)]
+struct WriteChain {
+    task: Option<Task<()>>,
+    /// Registered with the first write.
+    on_quit: Option<Subscription>,
+}
+
+impl WriteChain {
+    /// Queues `write`, owned by the chain: closing a tab must not cancel it. `chain` finds this
+    /// chain again on quit.
+    fn push<R: Send + 'static>(
+        &mut self,
+        write: impl FnOnce() -> R + Send + 'static,
+        chain: fn(&mut AppState) -> &mut Self,
+        cx: &mut Context<AppState>,
+    ) -> Task<Option<R>> {
+        let previous = self.task.take();
+        let (done, result) = tokio::sync::oneshot::channel();
+        self.task = Some(cx.background_spawn(async move {
+            if let Some(previous) = previous {
+                previous.await;
+            }
+            done.send(write()).ok();
+        }));
+        if self.on_quit.is_none() {
+            self.on_quit = Some(cx.on_app_quit(move |s, _| {
+                let pending = chain(s).task.take();
+                async move {
+                    if let Some(pending) = pending {
+                        pending.await;
+                    }
+                }
+            }));
+        }
+        cx.background_spawn(async move { result.await.ok() })
+    }
+}
 
 /// Why saving a profile failed. Neither variant holds the key.
 #[derive(Debug)]
@@ -89,6 +131,20 @@ pub struct AppState {
     views_save_task: Option<Task<()>>,
     /// Waits for `views_save_task` on quit; registered with the first write.
     views_on_quit: Option<Subscription>,
+    /// Searches and console requests that ran.
+    pub history: History,
+    /// `None` keeps the history for this session only.
+    pub history_path: Option<PathBuf>,
+    /// Lines the history file gained beyond what it held after the last rewrite.
+    history_lines: usize,
+    history_chain: WriteChain,
+    /// Saved queries and console favorites.
+    pub saved: SavedFile,
+    /// `None` keeps them for this session only.
+    pub saved_path: Option<PathBuf>,
+    /// Why the saved file did not load; while set, it is not written.
+    pub saved_error: Option<String>,
+    saved_chain: WriteChain,
     log: RequestLog,
     log_tx: UnboundedSender<LogEntry>,
     /// Taken by [`AppState::spawn_log_drain`].
@@ -132,6 +188,14 @@ impl AppState {
             views_path: None,
             views_save_task: None,
             views_on_quit: None,
+            history: History::default(),
+            history_path: None,
+            history_lines: 0,
+            history_chain: WriteChain::default(),
+            saved: SavedFile::default(),
+            saved_path: None,
+            saved_error: None,
+            saved_chain: WriteChain::default(),
         }
     }
 
@@ -184,6 +248,135 @@ impl AppState {
             result
                 .await
                 .unwrap_or_else(|_| Err("the save was dropped".into()))
+        })
+    }
+
+    /// Loads history and saved queries. Reads the disk, so only before the window opens.
+    pub fn load_queries(&mut self, history_path: Option<PathBuf>, saved_path: Option<PathBuf>) {
+        if let Some(path) = &history_path {
+            (self.history, self.history_lines) = history::load(path);
+        }
+        if let Some(path) = &saved_path {
+            match saved::load(path) {
+                Ok(file) => self.saved = file,
+                Err(e) => {
+                    tracing::warn!("saved queries not loaded, they will not be written: {e}");
+                    self.saved_error = Some(e.to_string());
+                }
+            }
+        }
+        self.history_path = history_path;
+        self.saved_path = saved_path;
+    }
+
+    fn is_temporary(&self, profile: Uuid) -> bool {
+        self.temporary
+            .as_ref()
+            .is_some_and(|(p, _)| p.id == profile)
+    }
+
+    /// Adds `item` to the history and the file. A temporary connection stays in memory.
+    pub fn record_history(&mut self, item: HistoryItem, cx: &mut Context<Self>) {
+        let temporary = self.is_temporary(item.profile);
+        if !self.history.push(item.clone()) || temporary {
+            return;
+        }
+        self.history_lines += 1;
+        if self.history_lines > 2 * history::HISTORY_CAP {
+            return self.rewrite_history(cx);
+        }
+        let Some(path) = self.history_path.clone() else {
+            return;
+        };
+        let write = move || {
+            if let Err(e) = history::append(&path, &item) {
+                tracing::warn!("history not written: {e}");
+            }
+        };
+        self.history_chain
+            .push(write, |s| &mut s.history_chain, cx)
+            .detach();
+    }
+
+    /// Forgets the history of `profile`, also in the file.
+    pub fn clear_history(&mut self, profile: Uuid, cx: &mut Context<Self>) {
+        self.history.clear(profile);
+        self.rewrite_history(cx);
+    }
+
+    fn rewrite_history(&mut self, cx: &mut Context<Self>) {
+        self.history_lines = 0;
+        let Some(path) = self.history_path.clone() else {
+            return;
+        };
+        let mut file = self.history.clone();
+        if let Some((profile, _)) = &self.temporary {
+            file.clear(profile.id);
+        }
+        let write = move || {
+            if let Err(e) = history::rewrite(&path, &file) {
+                tracing::warn!("history not written: {e}");
+            }
+        };
+        self.history_chain
+            .push(write, |s| &mut s.history_chain, cx)
+            .detach();
+    }
+
+    /// Adds `query`, or replaces the one with its id, and saves. The task reports the save;
+    /// callers must show an error inline.
+    pub fn save_query(
+        &mut self,
+        query: SavedQuery,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        self.change_saved(
+            |saved| match saved.queries.iter_mut().find(|q| q.id == query.id) {
+                Some(old) => *old = query,
+                None => saved.queries.push(query),
+            },
+            cx,
+        )
+    }
+
+    /// Deletes query `id` and saves.
+    pub fn delete_query(&mut self, id: Uuid, cx: &mut Context<Self>) -> Task<Result<(), String>> {
+        self.change_saved(|saved| saved.queries.retain(|q| q.id != id), cx)
+    }
+
+    /// Replaces the console favorites and saves.
+    pub fn set_favorites(
+        &mut self,
+        favorites: Vec<HistoryItem>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        self.change_saved(|saved| saved.favorites = favorites, cx)
+    }
+
+    /// Applies `change` and writes the file without what a temporary connection holds. Refused
+    /// while the file on disk could not be read: it may hold work this build cannot see.
+    fn change_saved(
+        &mut self,
+        change: impl FnOnce(&mut SavedFile),
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        if let Some(error) = &self.saved_error {
+            return Task::ready(Err(error.clone()));
+        }
+        change(&mut self.saved);
+        let Some(path) = self.saved_path.clone() else {
+            return Task::ready(Ok(()));
+        };
+        let mut file = self.saved.clone();
+        if let Some((profile, _)) = &self.temporary {
+            file.queries.retain(|q| q.profile != profile.id);
+            file.favorites.retain(|f| f.profile != profile.id);
+        }
+        let write = move || saved::save(&path, &file).map_err(|e| e.to_string());
+        let done = self.saved_chain.push(write, |s| &mut s.saved_chain, cx);
+        cx.background_spawn(async move {
+            let done = done.await;
+            done.unwrap_or_else(|| Err("the save was dropped".into()))
         })
     }
 
@@ -705,6 +898,7 @@ mod tests {
     use tessera_client::{Client, ClientOptions, Error, KeyAccess, RaftState};
     use tessera_core::ServerCapabilities;
     use tessera_core::profile::{Node, Protocol};
+    use tessera_core::search::history::HistoryEntry;
     use tessera_core::secrets::MemoryStore;
 
     use super::*;
@@ -1321,6 +1515,188 @@ mod tests {
         drop(saves);
         last.await.unwrap();
         assert_eq!(views::load(&path).view(id, "books").widths["title"], 119.);
+    }
+
+    fn search_item(profile: Uuid, q: &str) -> HistoryItem {
+        let mut draft = SearchDraft::new("books");
+        draft.params.insert("q".into(), q.into());
+        HistoryItem {
+            at: 1,
+            profile,
+            entry: HistoryEntry::Search {
+                union: false,
+                searches: vec![draft],
+            },
+        }
+    }
+
+    fn query(profile: Uuid, name: &str) -> SavedQuery {
+        SavedQuery {
+            id: Uuid::new_v4(),
+            profile,
+            name: name.into(),
+            tags: Vec::new(),
+            union: false,
+            searches: vec![SearchDraft::new("books")],
+        }
+    }
+
+    /// State with both files in a temporary directory, already loaded.
+    fn query_state(cx: &mut TestAppContext, dir: &tempfile::TempDir) -> Entity<AppState> {
+        let state = new_state(
+            cx,
+            Ok(ConnectionsFile::default()),
+            None,
+            Arc::new(MemoryStore::default()),
+        );
+        state.update(cx, |s, _| {
+            s.load_queries(
+                Some(dir.path().join("history.jsonl")),
+                Some(dir.path().join("saved_queries.json")),
+            );
+        });
+        state
+    }
+
+    #[gpui_kit::test]
+    async fn history_lands_on_disk_and_clear_rewrites(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let state = query_state(cx, &dir);
+        let (id, other) = (Uuid::new_v4(), Uuid::new_v4());
+        state.update(cx, |s, cx| {
+            s.record_history(search_item(id, "a"), cx);
+            s.record_history(search_item(id, "a"), cx);
+            s.record_history(search_item(other, "b"), cx);
+        });
+        cx.run_until_parked();
+        let (loaded, lines) = history::load(&path);
+        assert_eq!((loaded.searches(id, "").len(), lines), (1, 2));
+        state.update(cx, |s, cx| s.clear_history(id, cx));
+        cx.run_until_parked();
+        let (loaded, lines) = history::load(&path);
+        assert_eq!(loaded.searches(id, "").len(), 0);
+        assert_eq!((loaded.searches(other, "").len(), lines), (1, 1));
+    }
+
+    #[gpui_kit::test]
+    async fn a_long_file_is_rewritten(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let id = Uuid::new_v4();
+        let line = |n| serde_json::to_string(&search_item(id, &format!("{n}"))).unwrap();
+        let text: Vec<String> = (0..=2 * history::HISTORY_CAP).map(line).collect();
+        std::fs::write(&path, text.join("\n")).unwrap();
+        let state = query_state(cx, &dir);
+        state.update(cx, |s, cx| s.record_history(search_item(id, "new"), cx));
+        cx.run_until_parked();
+        let (loaded, lines) = history::load(&path);
+        assert_eq!(lines, history::HISTORY_CAP);
+        assert_eq!(loaded.searches(id, "new").len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn temporary_connection_writes_no_history(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, saved) = (
+            dir.path().join("history.jsonl"),
+            dir.path().join("saved_queries.json"),
+        );
+        let state = query_state(cx, &dir);
+        let profile = Profile::new("tmp", vec![node()]);
+        let (id, kept) = (profile.id, Uuid::new_v4());
+        state.update(cx, |s, cx| {
+            s.temporary = Some((profile, SecretString::from("k")));
+            s.record_history(search_item(id, "a"), cx);
+            s.save_query(query(id, "tmp"), cx).detach();
+        });
+        cx.run_until_parked();
+        assert!(!path.exists(), "nothing written");
+        state.read_with(cx, |s, _| assert_eq!(s.history.searches(id, "").len(), 1));
+        // A rewrite for another connection must not carry it along.
+        state.update(cx, |s, cx| {
+            s.record_history(search_item(kept, "b"), cx);
+            s.clear_history(kept, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(history::load(&path).1, 0);
+        assert!(saved::load(&saved).unwrap().queries.is_empty());
+    }
+
+    #[gpui_kit::test]
+    async fn corrupt_saved_file_is_not_overwritten(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("saved_queries.json");
+        std::fs::write(&path, "{not json").unwrap();
+        let state = query_state(cx, &dir);
+        let id = Uuid::new_v4();
+        let shown = state.read_with(cx, |s, _| s.saved_error.clone()).unwrap();
+        assert!(shown.contains("cannot parse"), "{shown}");
+        let refused = [
+            state.update(cx, |s, cx| s.save_query(query(id, "a"), cx)),
+            state.update(cx, |s, cx| s.delete_query(id, cx)),
+            state.update(cx, |s, cx| s.set_favorites(Vec::new(), cx)),
+        ];
+        for task in refused {
+            assert_eq!(task.await.unwrap_err(), shown);
+        }
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
+        state.read_with(cx, |s, _| assert!(s.saved.queries.is_empty()));
+    }
+
+    #[gpui_kit::test]
+    async fn saved_queries_replace_and_delete(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("saved_queries.json");
+        let state = query_state(cx, &dir);
+        let id = Uuid::new_v4();
+        let mut q = query(id, "a");
+        let save = state.update(cx, |s, cx| s.save_query(q.clone(), cx));
+        save.await.unwrap();
+        q.name = "b".into();
+        let save = state.update(cx, |s, cx| s.save_query(q.clone(), cx));
+        save.await.unwrap();
+        assert_eq!(saved::load(&path).unwrap().queries, [q.clone()]);
+        let delete = state.update(cx, |s, cx| s.delete_query(q.id, cx));
+        delete.await.unwrap();
+        assert!(saved::load(&path).unwrap().queries.is_empty());
+        let favorites = vec![search_item(id, "a")];
+        let save = state.update(cx, |s, cx| s.set_favorites(favorites.clone(), cx));
+        save.await.unwrap();
+        assert_eq!(saved::load(&path).unwrap().favorites, favorites);
+    }
+
+    #[gpui_kit::test]
+    async fn saves_land_in_order(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("saved_queries.json");
+        let state = query_state(cx, &dir);
+        let id = Uuid::new_v4();
+        let mut saves = Vec::new();
+        for n in 0..20 {
+            // The caller drops the task, as a closed tab does.
+            let q = query(id, &n.to_string());
+            saves.push(state.update(cx, |s, cx| s.save_query(q, cx)));
+        }
+        let last = saves.pop().unwrap();
+        drop(saves);
+        last.await.unwrap();
+        assert_eq!(saved::load(&path).unwrap().queries.len(), 20);
+    }
+
+    #[gpui_kit::test]
+    fn quit_flushes_history(cx: &mut TestAppContext) {
+        // Poll the quit handler for the whole SHUTDOWN_TIMEOUT, not a random number of ticks.
+        cx.executor().set_block_on_ticks(usize::MAX..=usize::MAX);
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let state = query_state(cx, &dir);
+        let id = Uuid::new_v4();
+        state.update(cx, |s, cx| s.record_history(search_item(id, "a"), cx));
+        cx.quit();
+        assert_eq!(history::load(&path).1, 1, "written before quit returned");
     }
 
     #[gpui_kit::test]

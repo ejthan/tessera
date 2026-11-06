@@ -3,8 +3,10 @@
 //! The search workbench's logic: drafts, sort rows, results and facet filters.
 
 pub mod facet;
+pub mod history;
 pub mod params;
 pub mod results;
+pub mod saved;
 pub mod sort;
 
 /// An instant search waits this long after the last keystroke.

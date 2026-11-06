@@ -81,6 +81,10 @@ pub fn run(launch: Launch) -> Result<(), String> {
     if let Some(path) = &state.views_path {
         state.document_views = tessera_core::documents::views::load(path);
     }
+    state.load_queries(
+        tessera_core::search::history::history_path(),
+        tessera_core::search::saved::saved_path(),
+    );
     let open = state.resolve(launch)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
