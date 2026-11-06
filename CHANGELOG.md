@@ -74,6 +74,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- The inspector and the update by query dialog mark a numeric string for a numeric field as an error instead of a warning: without `dirty_values` the server refuses `"12"` for an `int32`, so a warning hid a save that would fail. The import preview keeps the warning, because an import coerces by default.
 - Document pages ignore curation sets, so a wildcard rule cannot hide or add rows in the browser and the found count matches what a delete or update by query reaches.
 - Embedding credentials (`api_key` and similar) are masked in the schema view, the request log and "Copy as curl".
 - A key that may read collections but not aliases still lists its collections; the list, the schema view and the delete dialog say inline that the aliases could not be loaded and why.

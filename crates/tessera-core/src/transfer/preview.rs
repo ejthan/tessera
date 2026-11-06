@@ -10,7 +10,7 @@ use tessera_client::Collection;
 use super::PREVIEW_LINES;
 use super::source::{ReadError, ReadOptions, RejectReason, Source, read_documents};
 use crate::documents::page::cell_preview;
-use crate::documents::validate::{DocIssue, validate_document};
+use crate::documents::validate::{DocIssue, validate_coerced};
 
 /// One row of the preview.
 #[derive(Debug, Clone, PartialEq)]
@@ -77,7 +77,7 @@ pub fn preview(
                     line: record.line,
                     text: cell_preview(&value).to_string(),
                     issues: schema
-                        .map(|c| validate_document(c, &value))
+                        .map(|c| validate_coerced(c, &value))
                         .unwrap_or_default(),
                     error: None,
                 },
