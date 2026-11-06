@@ -4,6 +4,7 @@
 //! the export is complete.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::mem;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -13,9 +14,10 @@ use tessera_client::{Client, Error, ExportQuery};
 use tokio::io::{AsyncWriteExt as _, BufWriter};
 use tokio::sync::watch;
 
-use super::CSV_HEADER_SAMPLE;
 use super::import::{JobControl, JobEnd, Phase, TransferError};
 use super::report::PartFile;
+use super::source::ReadError;
+use super::{CSV_HEADER_SAMPLE, REPORT_PREVIEW_BYTES};
 use crate::documents::ID_FILTER_BYTES;
 use crate::documents::export::csv_field;
 use crate::documents::ids::id_batches;
@@ -95,7 +97,8 @@ pub struct ExportOutcome {
     pub end: JobEnd<TransferError>,
     /// The final numbers.
     pub progress: ExportProgress,
-    /// CSV values whose key was not in the header, so left out.
+    /// CSV values left out: their key was not in the header, or it repeated a key of the
+    /// same document once flattened (`{"a.b":1,"a":{"b":2}}` keeps 1).
     pub unlisted_values: u64,
 }
 
@@ -128,6 +131,8 @@ pub fn flatten(doc: &Map<String, Value>) -> Vec<(String, Value)> {
     out
 }
 
+/// The text of a cell, verbatim. A cell starting with `=` stays one, which a spreadsheet may
+/// run as a formula: decision D55.
 fn cell(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
@@ -160,14 +165,14 @@ impl Csv {
 
     fn row(&mut self, pairs: Vec<(String, Value)>) -> String {
         let columns = self.columns.as_ref().map_or(0, HashMap::len);
-        let mut cells = vec![String::new(); columns];
+        let mut cells: Vec<Option<String>> = vec![None; columns];
         for (key, value) in pairs {
             match self.columns.as_ref().and_then(|c| c.get(&key)) {
-                Some(&column) => cells[column] = cell(&value),
-                None => self.unlisted += 1,
+                Some(&column) if cells[column].is_none() => cells[column] = Some(cell(&value)),
+                _ => self.unlisted += 1,
             }
         }
-        Self::line(cells.into_iter())
+        Self::line(cells.into_iter().map(Option::unwrap_or_default))
     }
 
     /// The header and the rows held back for it, or nothing when no document came.
@@ -195,9 +200,16 @@ impl Csv {
         out
     }
 
-    fn add(&mut self, line: &str) -> Result<String, TransferError> {
-        let doc: Map<String, Value> =
-            serde_json::from_str(line).map_err(|e| TransferError::Io(format!("{e}: {line}")))?;
+    /// Takes the document at `number`, 1-based.
+    fn add(&mut self, line: &str, number: u64) -> Result<String, TransferError> {
+        let doc: Map<String, Value> = serde_json::from_str(line).map_err(|e| ReadError::Json {
+            line: number,
+            column: e.column() as u64,
+            message: format!(
+                "{e}: {}",
+                &line[..line.floor_char_boundary(REPORT_PREVIEW_BYTES)]
+            ),
+        })?;
         let pairs = flatten(&doc);
         if self.columns.is_some() {
             return Ok(self.row(pairs));
@@ -241,7 +253,7 @@ impl Sink {
                 self.write(line).await?;
             }
             ExportFormat::Csv => {
-                let text = self.csv.add(line)?;
+                let text = self.csv.add(line, self.state.docs + 1)?;
                 self.write(&text).await?;
             }
         }
@@ -281,7 +293,16 @@ enum Written {
 }
 
 fn joined(names: &[String]) -> Option<String> {
-    Some(names.join(","))
+    (!names.is_empty()).then(|| names.join(","))
+}
+
+/// `future`, unless `stop` comes first.
+async fn or_stop<T>(control: &JobControl, future: impl Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = control.stop.cancelled() => None,
+        value = future => Some(value),
+    }
 }
 
 fn project(doc: &mut Value, fields: &FieldPick) {
@@ -351,11 +372,19 @@ async fn write_all(
                 }
             }
             for id in &batches.single {
-                if control.stop.is_cancelled() {
+                let Some(found) = or_stop(control, client.document(&job.collection, id)).await
+                else {
                     return Ok(Written::Stopped);
-                }
-                let mut doc = match client.document(&job.collection, id).await {
-                    Err(Error::Http { status: 404, .. }) => continue,
+                };
+                let mut doc = match found {
+                    // Only a document that went is skipped, not all of them with the collection.
+                    Err(Error::Http { status: 404, .. }) => {
+                        match or_stop(control, client.collection(&job.collection)).await {
+                            Some(collection) => collection?,
+                            None => return Ok(Written::Stopped),
+                        };
+                        continue;
+                    }
                     other => other?,
                 };
                 project(&mut doc, &job.fields);
@@ -396,7 +425,11 @@ pub async fn run_export(
     if let Some(name) = names.iter().find(|name| !field_safe(name)) {
         return failed(TransferError::UnsafeField(name.clone()), state, 0);
     }
-    let (part, file) = match PartFile::create(&job.target).await {
+    // `include_fields=` would answer with every field.
+    if job.fields == FieldPick::Include(Vec::new()) {
+        return failed(TransferError::UnsafeField(String::new()), state, 0);
+    }
+    let (part, file) = match PartFile::create(&job.target, false).await {
         Ok(created) => created,
         Err(e) => return failed(TransferError::Io(e.to_string()), state, 0),
     };
@@ -420,6 +453,12 @@ pub async fn run_export(
             JobEnd::Stopped
         }
         Err(e) => JobEnd::Failed(e),
+        // Nothing found is no reason to lose the file that is there.
+        Ok(Written::All) if sink.state.docs == 0 && part.replaces() => {
+            drop(sink.writer);
+            drop(part);
+            JobEnd::Finished
+        }
         Ok(Written::All) => match part.persist(sink.writer, &job.target).await {
             Ok(()) => JobEnd::Finished,
             Err(e) => JobEnd::Failed(TransferError::Io(e.to_string())),

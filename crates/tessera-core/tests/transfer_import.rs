@@ -217,6 +217,7 @@ async fn rejected_line_is_reported_and_never_sent() {
     let rows = outcome.report.rows();
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].line, rows[0].code), (2, None));
+    assert!(rows[0].lossy, "a saved copy must not pass for the original");
     assert!(rows[0].error.contains("UTF-8"), "{}", rows[0].error);
     assert_eq!(outcome.progress.failed, 1);
     assert_eq!(outcome.progress.imported, 2);
@@ -350,6 +351,7 @@ async fn abort_counts_unconfirmed() {
     assert!(matches!(outcome.end, JobEnd::Stopped), "{:?}", outcome.end);
     assert_eq!(outcome.progress.unconfirmed, 4);
     assert_eq!(outcome.progress.sent, 4);
+    assert_eq!(outcome.progress.imported + outcome.progress.failed, 0);
     assert_eq!(outcome.report.total(), 4);
     assert_eq!(outcome.stopped_at_line, Some(1));
 }
@@ -448,8 +450,136 @@ async fn collection_gone_fails_with_the_message() {
     };
     assert_eq!(message, "Not Found");
     assert_eq!(outcome.progress.imported, 5);
+    assert_eq!(
+        outcome.progress.failed, 5,
+        "nothing of a refused batch is stored"
+    );
     assert_eq!(outcome.progress.unconfirmed, 0);
+    assert_eq!(outcome.report.total(), 5);
     assert_eq!(outcome.stopped_at_line, Some(6));
+}
+
+#[tokio::test]
+async fn a_failed_batch_is_always_accounted_for() {
+    // (status, imported, failed, unconfirmed), of two batches of 5 with the first stored.
+    let cases = [
+        (400, 5, 5, 0),
+        (404, 5, 5, 0),
+        (429, 5, 5, 0),
+        (500, 5, 0, 5),
+        (502, 5, 0, 5),
+        (504, 5, 0, 5),
+    ];
+    for (status, imported, failed, unconfirmed) in cases {
+        let (server, _) = turning(1, ResponseTemplate::new(status)).await;
+        let outcome = run(
+            &server.uri(),
+            job(jsonl(10), Format::Jsonl, 5),
+            JobControl::default(),
+        )
+        .await;
+        assert!(
+            matches!(outcome.end, JobEnd::Failed(_)),
+            "{:?}",
+            outcome.end
+        );
+        let p = &outcome.progress;
+        assert_eq!(
+            (p.imported, p.failed, p.unconfirmed),
+            (imported, failed, unconfirmed),
+            "{status}"
+        );
+        assert_eq!(p.sent, 10, "{status}");
+        assert_eq!(outcome.report.total(), failed + unconfirmed, "{status}");
+        assert_eq!(outcome.report.rows()[0].line, 6, "{status}");
+        assert_eq!(outcome.stopped_at_line, Some(6), "{status}");
+    }
+}
+
+/// A server that reads the first `POST` whole and drops the connection without an answer.
+fn dropping_server() -> String {
+    use std::io::{Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for connection in listener.incoming() {
+            let mut socket = connection.unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                socket.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap().to_lowercase();
+            if !head.starts_with("post") {
+                socket
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+                continue;
+            }
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let mut body = vec![0; length];
+            socket.read_exact(&mut body).unwrap();
+            // Dropped here: the body arrived, the answer never comes.
+        }
+    });
+    url
+}
+
+#[tokio::test]
+async fn a_dropped_connection_leaves_the_batch_unconfirmed() {
+    let url = dropping_server();
+    let outcome = run(&url, job(jsonl(5), Format::Jsonl, 5), JobControl::default()).await;
+    assert!(
+        matches!(
+            outcome.end,
+            JobEnd::Failed(TransferError::Client(Error::Network(_)))
+        ),
+        "{:?}",
+        outcome.end
+    );
+    let p = &outcome.progress;
+    assert_eq!((p.sent, p.imported, p.failed, p.unconfirmed), (5, 0, 0, 5));
+    assert_eq!(outcome.report.total(), 5);
+    assert_eq!(outcome.stopped_at_line, Some(1));
+    assert!(
+        outcome.report.rows()[0].error.contains("may have stored"),
+        "{}",
+        outcome.report.rows()[0].error
+    );
+}
+
+#[tokio::test]
+async fn stop_does_not_wait_for_the_first_count() {
+    let (server, sent) = server(Duration::ZERO).await;
+    Mock::given(method("GET"))
+        .and(path("/collections/c"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
+        .mount(&server)
+        .await;
+    let control = JobControl::default();
+    let running = tokio::spawn(run(
+        &server.uri(),
+        job(jsonl(5), Format::Jsonl, 5),
+        control.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    control.stop.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), running)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(outcome.end, JobEnd::Stopped), "{:?}", outcome.end);
+    assert_eq!(sent.count(), 0);
 }
 
 #[tokio::test]
@@ -483,6 +613,8 @@ async fn read_only_fails_the_job() {
     );
     assert_eq!(outcome.progress.imported, 5);
     assert_eq!(outcome.progress.sent, 5, "the refused batch never left");
+    assert_eq!(outcome.progress.failed, 5);
+    assert_eq!(outcome.progress.unconfirmed, 0);
 }
 
 /// Answers 503 to the first `busy` requests.
@@ -560,6 +692,8 @@ async fn broken_json_array_stops_after_the_good_batches() {
         outcome.end
     );
     assert_eq!(outcome.progress.imported, 3);
+    assert_eq!(outcome.progress.sent, 3);
+    assert_eq!(outcome.stopped_at_line, Some(4));
 }
 
 /// The reader is fed through a pipe, so what the writer got rid of is what was read.

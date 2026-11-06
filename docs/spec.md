@@ -739,6 +739,7 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D52 | Which fields can an export pick? | Top-level names from the schema, by checkbox, each through an allowlist, because `include_fields=nope` answers 200 with `{}` per document and a comma cannot be written. No free text. Keys outside the schema export under All and Exclude |
 | D53 | How is NF3 measured? | `cargo xtask nf3` runs the real pipeline with a real request log against a real server and adds the app's baseline from the `TESSERA_SMOKE` run. Nightly on Linux, and one run through the UI by hand in M5's last PR |
 | D54 | When is a new collection created? | At Start, after the confirmation. The schema dialog gets a pick mode that sends nothing, so cancelling the import leaves the server untouched |
+| D55 | Are CSV cells neutralised against spreadsheet formulas? | No, cells stay verbatim. Tessera is an admin tool, and prefixing a cell would break the round trip: a re-import would store changed text. The risk stays: a cell starting with `=`, `+`, `-` or `@` runs as a formula when the file opens in a spreadsheet, and documents can hold what strangers typed. So the export dialog says so for CSV |
 
 ---
 

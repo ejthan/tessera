@@ -145,7 +145,7 @@ Hardware: an Apple M1 or comparable machine, a release build, no other heavy loa
 
 ## Measuring NF3
 
-NF3 says an import of 1 million documents stays below 300 MB of RSS. `cargo xtask nf3` measures it without a display: it writes 1,000,000 documents of about 1 KB to a temporary file, imports them through the real `run_import` on a 2-worker runtime with a request log of 5,000 and 500 entries, samples `ps -o rss=` every 200 ms, then imports 200,000 documents into a second collection and stops half way. It refuses to run when `tessera_nf3` or `tessera_nf3_cancel` exists, and drops both at the end, also on a failure. It has no default URL; never point it at a server you do not own.
+NF3 says an import of 1 million documents stays below 300 MB of RSS. `cargo xtask nf3` measures it without a display: it writes 1,000,000 documents of about 1 KB to a temporary file, imports them through the real `run_import` on a 2-worker runtime with a request log of 5,000 and 500 entries, samples `ps -o rss=` every 200 ms, then imports 200,000 documents into a second collection and stops half way. It refuses to run when `tessera_nf3` or `tessera_nf3_cancel` exists, and drops both at the end, also on a failure. It has no default URL; never point it at a server you do not own. `--keep-file <path>` writes the documents there and leaves them; a file that exists is refused, not overwritten.
 
 ```bash
 TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d
@@ -154,7 +154,7 @@ cargo run --release -p xtask -- nf3 --url http://localhost:18108 --docs 1000000 
 cargo run --release -p xtask -- nf3 --url http://localhost:18108 --docs 1000000 --format csv
 ```
 
-The number that counts adds the app. `engine_rss_mb` is the peak minus the baseline of the process, so what the import adds; `--app-baseline-mb` adds the RSS of the app with its window, and `total_rss_mb` is the sum. It prints one line of JSON and exits 1 when the total reaches `--limit-mb` (300) or a check fails: all documents imported, none failed or unconfirmed, `num_documents` right, no import started after the stop.
+The number that counts adds the app. `engine_rss_mb` is the peak minus the baseline of the process, so what the import adds; `--app-baseline-mb` adds the RSS of the app with its window, and `total_rss_mb` is the sum. It prints one line of JSON and exits 1 when the total reaches `--limit-mb` (300) or a check fails: all documents imported, none failed or unconfirmed, `num_documents` right, no import started after the stop, and the run returned only after the batch in flight answered.
 
 The baseline comes from the smoke start of a release build, `cargo build --release -p tessera-app` first:
 

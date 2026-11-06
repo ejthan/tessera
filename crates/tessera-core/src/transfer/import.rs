@@ -89,7 +89,8 @@ pub struct ImportProgress {
     pub sent: u64,
     /// Documents stored.
     pub imported: u64,
-    /// Documents refused, by the server or locally.
+    /// Documents that were not stored: refused by the server, one by one or as a batch, or
+    /// locally.
     pub failed: u64,
     /// Documents sent whose fate nobody knows.
     pub unconfirmed: u64,
@@ -204,6 +205,7 @@ impl Batch {
                     },
                     id: None,
                     raw: rejected.raw,
+                    lossy: true,
                 });
             }
         }
@@ -311,7 +313,55 @@ fn unconfirmed_row(line: u64, raw: &str, error: &str) -> ReportRow {
         error: error.to_string(),
         id: id_of(raw),
         raw: raw.to_string(),
+        lossy: false,
     }
+}
+
+/// What a failed request says about its batch.
+#[derive(Debug, PartialEq, Eq)]
+enum Fate {
+    /// It never left the client.
+    NotSent,
+    /// The server turned it down: nothing was stored.
+    Refused,
+    /// Anything may have been stored.
+    Unknown,
+}
+
+fn fate(error: &Error) -> Fate {
+    match error {
+        Error::ReadOnly { .. }
+        | Error::InvalidUrl(_)
+        | Error::InvalidKey
+        | Error::UnaddressableId(_) => Fate::NotSent,
+        Error::Http { status, .. } if (400..500).contains(status) || *status == 503 => {
+            Fate::Refused
+        }
+        _ => Fate::Unknown,
+    }
+}
+
+/// `num_documents`, unless it cannot be read or `stop` comes first.
+async fn count_documents(
+    client: &Client,
+    job: &ImportJob,
+    stop: &CancellationToken,
+) -> Option<u64> {
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => None,
+        collection = client.collection(&job.collection) => {
+            collection.ok().map(|c| c.num_documents)
+        }
+    }
+}
+
+/// `end`, told that the report could not be flushed.
+fn with_spool_error(end: JobEnd<TransferError>, spool: &std::io::Error) -> JobEnd<TransferError> {
+    JobEnd::Failed(TransferError::Report(match end {
+        JobEnd::Failed(e) => format!("{spool}, after: {e}"),
+        JobEnd::Finished | JobEnd::Stopped => spool.to_string(),
+    }))
 }
 
 /// Pairs `answers` with the documents of `batch` by position: a line the server cannot read
@@ -334,6 +384,7 @@ fn evaluate(
                     error: answer.error.unwrap_or_default(),
                     id: id_of(raw),
                     raw: raw.to_string(),
+                    lossy: false,
                 });
             }
             None => {
@@ -385,11 +436,7 @@ pub async fn run_import(
     };
     progress.send_replace(state.clone());
 
-    let before = client
-        .collection(&job.collection)
-        .await
-        .ok()
-        .map(|c| c.num_documents);
+    let before = count_documents(&client, &job, &control.stop).await;
 
     // The queue plus the batch that waits to enter it plus the one in flight: three batches
     // at most, so the constant's "one being filled" is not a slot of the queue.
@@ -460,17 +507,31 @@ pub async fn run_import(
                     state.sent += docs;
                     evaluate(&batch, answers, &mut state, &mut rows);
                 }
-                // A broken connection says nothing about what the server stored.
-                Sent::Answer(Err(e @ (Error::Network(_) | Error::Timeout))) => {
-                    unconfirmed(
-                        &mut rows,
-                        "the connection failed; the server may have stored this",
-                    );
-                    ended = Some(JobEnd::Failed(e.into()));
-                }
                 Sent::Answer(Err(e)) => {
-                    if matches!(e, Error::Http { .. }) {
-                        state.sent += docs;
+                    let code = match &e {
+                        Error::Http { status, .. } => Some(*status),
+                        _ => None,
+                    };
+                    let error = e.to_string();
+                    let fate = fate(&e);
+                    if fate == Fate::Unknown {
+                        unconfirmed(
+                            &mut rows,
+                            "the request failed; the server may have stored this",
+                        );
+                    } else {
+                        if fate == Fate::Refused {
+                            state.sent += docs;
+                        }
+                        state.failed += docs;
+                        rows.extend(batch.docs().map(|(line, raw)| ReportRow {
+                            line,
+                            code,
+                            error: error.clone(),
+                            id: id_of(raw),
+                            raw: raw.to_string(),
+                            lossy: false,
+                        }));
                     }
                     ended = Some(JobEnd::Failed(e.into()));
                 }
@@ -507,23 +568,17 @@ pub async fn run_import(
     drop(rx);
 
     let end = match report.finish().await {
-        Err(e) if matches!(end, JobEnd::Finished) => {
-            JobEnd::Failed(TransferError::Report(e.to_string()))
-        }
-        _ => end,
+        Ok(()) => end,
+        Err(e) => with_spool_error(end, &e),
     };
     let count = match (&end, before) {
-        (JobEnd::Finished, Some(before)) => {
-            client
-                .collection(&job.collection)
-                .await
-                .ok()
-                .map(|c| CountCheck {
-                    before,
-                    after: c.num_documents,
-                    ok: count_fits(job.params.action, before, c.num_documents, state.imported),
-                })
-        }
+        (JobEnd::Finished, Some(before)) => count_documents(&client, &job, &control.stop)
+            .await
+            .map(|after| CountCheck {
+                before,
+                after,
+                ok: count_fits(job.params.action, before, after, state.imported),
+            }),
         _ => None,
     };
     let stopped_at_line = match end {
@@ -566,6 +621,52 @@ mod tests {
         assert!(!count_fits(ImportAction::Emplace, 5, 4, 3));
         assert!(count_fits(ImportAction::Update, 5, 5, 3));
         assert!(!count_fits(ImportAction::Update, 5, 6, 3));
+    }
+
+    fn http(status: u16) -> Error {
+        Error::Http {
+            status,
+            message: String::new(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn only_a_clear_refusal_counts_as_not_stored() {
+        for status in [400, 401, 404, 409, 422, 429, 503] {
+            assert_eq!(fate(&http(status)), Fate::Refused, "{status}");
+        }
+        for status in [302, 500, 502, 504] {
+            assert_eq!(fate(&http(status)), Fate::Unknown, "{status}");
+        }
+        assert_eq!(fate(&Error::Timeout), Fate::Unknown);
+        assert_eq!(fate(&Error::Tls("x".to_string())), Fate::Unknown);
+        assert_eq!(fate(&Error::Stream("x".to_string())), Fate::Unknown);
+        assert_eq!(fate(&Error::InvalidKey), Fate::NotSent);
+        assert_eq!(fate(&Error::InvalidUrl("x".to_string())), Fate::NotSent);
+        assert_eq!(
+            fate(&Error::UnaddressableId(".".to_string())),
+            Fate::NotSent
+        );
+    }
+
+    #[test]
+    fn a_spool_failure_is_never_lost() {
+        let spool = std::io::Error::other("disk full");
+        for end in [JobEnd::Finished, JobEnd::Stopped] {
+            let JobEnd::Failed(TransferError::Report(text)) = with_spool_error(end, &spool) else {
+                panic!("not a failure");
+            };
+            assert_eq!(text, "disk full");
+        }
+        let first = JobEnd::Failed(TransferError::Io("first".to_string()));
+        let JobEnd::Failed(TransferError::Report(text)) = with_spool_error(first, &spool) else {
+            panic!("not a failure");
+        };
+        assert!(
+            text.contains("disk full") && text.contains("first"),
+            "{text}"
+        );
     }
 
     #[test]

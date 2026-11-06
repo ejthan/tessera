@@ -10,6 +10,7 @@ use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use secrecy::SecretString;
 use serde_json::Value;
@@ -17,6 +18,7 @@ use tessera_client::{Client, ClientOptions};
 use tessera_core::transfer::export::{
     ExportFormat, ExportJob, ExportOutcome, ExportProgress, ExportScope, FieldPick, run_export,
 };
+use tessera_core::transfer::source::ReadError;
 use tessera_core::transfer::{JobControl, JobEnd, TransferError};
 use tokio::sync::watch;
 use wiremock::matchers::{method, path, path_regex, query_param};
@@ -167,14 +169,35 @@ async fn csv_header_comes_from_the_first_1000() {
 }
 
 #[tokio::test]
-async fn a_line_that_is_no_object_fails_the_csv_with_its_text() {
+async fn csv_counts_a_key_that_flattens_onto_another() {
+    let (_dir, target) = target();
+    let server = serving("{\"id\":\"1\",\"a.b\":1,\"a\":{\"b\":2}}").await;
+    let outcome = finished(&server.uri(), job(&target, ExportFormat::Csv)).await;
+    assert_eq!(outcome.unlisted_values, 1);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "id,a.b\n1,1\n");
+}
+
+#[tokio::test]
+async fn csv_cells_stay_verbatim() {
+    let (_dir, target) = target();
+    let server = serving("{\"id\":\"1\",\"f\":\"=1+1\"}").await;
+    finished(&server.uri(), job(&target, ExportFormat::Csv)).await;
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "id,f\n1,=1+1\n");
+}
+
+#[tokio::test]
+async fn a_line_that_is_no_object_fails_the_csv_with_a_capped_text() {
     let (dir, target) = target();
-    let server = serving("not json").await;
+    let long = format!("not json {}", "é".repeat(5000));
+    let server = serving(&format!("{{\"id\":\"1\"}}\n{long}")).await;
     let outcome = run(&server.uri(), job(&target, ExportFormat::Csv)).await;
-    let JobEnd::Failed(TransferError::Io(message)) = &outcome.end else {
+    let JobEnd::Failed(TransferError::Read(ReadError::Json { line, message, .. })) = &outcome.end
+    else {
         panic!("{:?}", outcome.end);
     };
+    assert_eq!(*line, 2);
     assert!(message.contains("not json"), "{message}");
+    assert!(message.len() < 3000, "{}", message.len());
     assert!(names(dir.path()).is_empty());
 }
 
@@ -231,6 +254,22 @@ async fn unsafe_field_is_refused_and_sends_nothing() {
 }
 
 #[tokio::test]
+async fn an_include_of_nothing_is_refused() {
+    let (dir, target) = target();
+    let server = MockServer::start().await;
+    let mut empty = job(&target, ExportFormat::Jsonl);
+    empty.fields = FieldPick::Include(Vec::new());
+    let outcome = run(&server.uri(), empty).await;
+    assert!(
+        matches!(outcome.end, JobEnd::Failed(TransferError::UnsafeField(_))),
+        "{:?}",
+        outcome.end
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(names(dir.path()).is_empty());
+}
+
+#[tokio::test]
 async fn selection_runs_one_stream_per_filter_and_single_for_backticks() {
     let (_dir, target) = target();
     let server = MockServer::start().await;
@@ -254,6 +293,12 @@ async fn selection_runs_one_stream_per_filter_and_single_for_backticks() {
         .expect(1)
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/collections/c"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{\"name\":\"c\"}"))
+        .expect(1)
+        .mount(&server)
+        .await;
     let mut selected = job(&target, ExportFormat::Jsonl);
     selected.scope =
         ExportScope::Selection(vec!["a".to_string(), "b`c".to_string(), "g`e".to_string()]);
@@ -265,6 +310,115 @@ async fn selection_runs_one_stream_per_filter_and_single_for_backticks() {
     );
     assert_eq!(outcome.progress.docs, 2);
     assert_eq!(outcome.progress.expected, Some(3), "the gone id shows here");
+}
+
+fn single(target: &Path) -> ExportJob {
+    let mut selected = job(target, ExportFormat::Jsonl);
+    selected.scope = ExportScope::Selection(vec!["b`c".to_string()]);
+    selected
+}
+
+#[tokio::test]
+async fn a_gone_collection_is_no_skipped_document() {
+    let (_dir, target) = target();
+    std::fs::write(&target, "old").unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("{\"message\":\"Not Found\"}"))
+        .mount(&server)
+        .await;
+    let outcome = run(&server.uri(), single(&target)).await;
+    assert!(
+        matches!(
+            outcome.end,
+            JobEnd::Failed(TransferError::Client(tessera_client::Error::Http {
+                status: 404,
+                ..
+            }))
+        ),
+        "{:?}",
+        outcome.end
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
+}
+
+#[tokio::test]
+async fn stop_does_not_wait_for_a_single_document() {
+    let (dir, target) = target();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
+        .mount(&server)
+        .await;
+    let control = JobControl::default();
+    let (tx, _rx) = watch::channel(ExportProgress::default());
+    let running = tokio::spawn(run_export(
+        client(&server.uri()),
+        single(&target),
+        control.clone(),
+        tx,
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    control.stop.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), running)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(outcome.end, JobEnd::Stopped), "{:?}", outcome.end);
+    assert!(names(dir.path()).is_empty());
+}
+
+#[tokio::test]
+async fn an_empty_result_keeps_the_target() {
+    for format in [
+        ExportFormat::Jsonl,
+        ExportFormat::JsonArray,
+        ExportFormat::Csv,
+    ] {
+        let (dir, target) = target();
+        std::fs::write(&target, "old").unwrap();
+        let server = serving("").await;
+        let outcome = finished(&server.uri(), job(&target, format)).await;
+        assert_eq!(outcome.progress.docs, 0);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "old",
+            "{format:?}"
+        );
+        assert_eq!(names(dir.path()), ["out"], "{format:?}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn export_keeps_the_permissions_of_the_target() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (_dir, target) = target();
+    std::fs::write(&target, "old").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let server = serving("{\"id\":\"1\"}").await;
+    finished(&server.uri(), job(&target, ExportFormat::Jsonl)).await;
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn export_refuses_a_symbolic_link_before_any_request() {
+    let (dir, target) = target();
+    let real = dir.path().join("real");
+    std::fs::write(&real, "old").unwrap();
+    std::os::unix::fs::symlink(&real, &target).unwrap();
+    let server = MockServer::start().await;
+    let outcome = run(&server.uri(), job(&target, ExportFormat::Jsonl)).await;
+    assert!(
+        matches!(outcome.end, JobEnd::Failed(TransferError::Io(_))),
+        "{:?}",
+        outcome.end
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(std::fs::symlink_metadata(&target).unwrap().is_symlink());
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "old");
 }
 
 #[tokio::test]

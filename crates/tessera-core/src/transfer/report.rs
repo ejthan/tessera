@@ -14,6 +14,9 @@ use uuid::Uuid;
 
 use super::{REPORT_PREVIEW_BYTES, REPORT_ROWS};
 
+/// Starts a line of a saved failed file whose text is not the source's.
+pub const LOSSY_MARK: &str = "# changed or cut, fix it in the source:";
+
 /// One document that did not make it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportRow {
@@ -28,6 +31,10 @@ pub struct ReportRow {
     pub id: Option<String>,
     /// The text as it was sent.
     pub raw: String,
+    /// `raw` is not what the source holds, because it was not UTF-8 or was cut: it never
+    /// reached the server and must not by way of a saved file, an id could change.
+    #[serde(default)]
+    pub lossy: bool,
 }
 
 /// A file beside `target` that replaces it only once it is complete. Dropped unpersisted,
@@ -35,13 +42,30 @@ pub struct ReportRow {
 pub(super) struct PartFile {
     path: PathBuf,
     persisted: bool,
+    replaces: bool,
 }
 
 impl PartFile {
-    /// Creates the file; it must not exist.
-    pub(super) async fn create(target: &Path) -> io::Result<(Self, tokio::fs::File)> {
+    /// Creates the file. It takes the permissions of an existing target, or with `private`
+    /// is for the owner only, or else follows the umask. A symbolic link is refused: the
+    /// rename would replace the link, not what it points at.
+    pub(super) async fn create(
+        target: &Path,
+        private: bool,
+    ) -> io::Result<(Self, tokio::fs::File)> {
         let Some(name) = target.file_name() else {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        };
+        let existing = match tokio::fs::symlink_metadata(target).await {
+            Ok(meta) if meta.is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} is a symbolic link", target.display()),
+                ));
+            }
+            Ok(meta) => Some(meta.permissions()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
         };
         let mut part = name.to_os_string();
         part.push(format!(
@@ -49,16 +73,28 @@ impl PartFile {
             &Uuid::new_v4().simple().to_string()[..8]
         ));
         let path = target.with_file_name(part);
-        let file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .await?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Never wider than the target, not even until the permissions are copied.
+        #[cfg(unix)]
+        if private || existing.is_some() {
+            options.mode(0o600);
+        }
+        let file = options.open(&path).await?;
         let guard = Self {
             path,
             persisted: false,
+            replaces: existing.is_some(),
         };
+        if let Some(permissions) = existing {
+            file.set_permissions(permissions).await?;
+        }
         Ok((guard, file))
+    }
+
+    /// Whether a file stands at the target.
+    pub(super) fn replaces(&self) -> bool {
+        self.replaces
     }
 
     /// Flushes `writer` to the disk and moves the file onto `target`.
@@ -169,13 +205,19 @@ impl Report {
         .await
     }
 
-    /// Saves the failed documents as they were sent, one per line; returns how many.
+    /// Saves the failed documents as they were sent, one per line; returns how many. A
+    /// `lossy` row starts with [`LOSSY_MARK`] and cannot be imported.
     pub async fn save_failed(&self, path: &Path) -> Result<u64, io::Error> {
         self.save(path, |line| {
             let row: ReportRow = serde_json::from_str(&line)?;
-            let mut out = row.raw.into_bytes();
-            out.push(b'\n');
-            Ok(out)
+            let text = if row.lossy {
+                // Not JSON, so a re-import reports it instead of storing a changed id.
+                let raw = row.raw.replace(['\r', '\n'], " ");
+                format!("{LOSSY_MARK} line {}: {raw}\n", row.line)
+            } else {
+                format!("{}\n", row.raw)
+            };
+            Ok(text.into_bytes())
         })
         .await
     }
@@ -189,7 +231,7 @@ impl Report {
         let spool = self.spool.as_ref().ok_or_else(no_spool)?;
         let mut source = tokio::fs::File::from_std(spool.file.try_clone()?);
         source.seek(io::SeekFrom::Start(0)).await?;
-        let (part, file) = PartFile::create(path).await?;
+        let (part, file) = PartFile::create(path, true).await?;
         let mut writer = BufWriter::new(file);
         let mut lines = BufReader::new(source).lines();
         let mut count = 0;
@@ -220,6 +262,7 @@ mod tests {
             error: "bad".to_string(),
             id: None,
             raw: raw.to_string(),
+            lossy: false,
         }
     }
 
@@ -291,6 +334,74 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "{\"a\":1}\nnot json\n"
         );
+    }
+
+    #[tokio::test]
+    async fn lossy_rows_cannot_be_imported_from_a_saved_file() {
+        let mut report = Report::new().await.unwrap();
+        let mut bad = row(4, "{\"id\":\"bad\u{fffd}\"}");
+        bad.lossy = true;
+        report.add(bad).await.unwrap();
+        report.add(row(5, "{\"id\":\"ok\"}")).await.unwrap();
+        report.finish().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("failed.jsonl");
+        assert_eq!(report.save_failed(&path).await.unwrap(), 2);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with(LOSSY_MARK), "{}", lines[0]);
+        assert!(lines[0].contains("line 4"), "{}", lines[0]);
+        assert!(serde_json::from_str::<serde_json::Value>(lines[0]).is_err());
+        assert_eq!(lines[1], "{\"id\":\"ok\"}");
+
+        let report_file = dir.path().join("report.jsonl");
+        report.save_report(&report_file).await.unwrap();
+        let text = std::fs::read_to_string(&report_file).unwrap();
+        let saved: ReportRow = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert!(saved.lossy);
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn saves_are_private_unless_the_target_says_otherwise() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut report = Report::new().await.unwrap();
+        report.add(row(1, "a")).await.unwrap();
+        report.finish().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let new = dir.path().join("new.jsonl");
+        report.save_report(&new).await.unwrap();
+        assert_eq!(mode(&new), 0o600);
+
+        let shared = dir.path().join("shared.jsonl");
+        std::fs::write(&shared, "old").unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o640)).unwrap();
+        report.save_failed(&shared).await.unwrap();
+        assert_eq!(mode(&shared), 0o640);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symbolic_link_is_refused() {
+        let mut report = Report::new().await.unwrap();
+        report.add(row(1, "a")).await.unwrap();
+        report.finish().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::write(&real, "old").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let error = report.save_report(&link).await.unwrap_err();
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "old");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[tokio::test]

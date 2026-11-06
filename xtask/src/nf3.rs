@@ -98,9 +98,10 @@ fn document(i: u64, payload: &str) -> String {
     format!("{{\"id\":\"{i}\",\"title\":\"doc {i}\",\"n\":{i},\"payload\":\"{payload}\"}}")
 }
 
-/// Writes `docs` documents to `path` in `format`.
+/// Writes `docs` documents to `path` in `format`. The file must not exist: `--keep-file` can
+/// name anything.
 fn write_documents(path: &Path, format: Format, docs: u64) -> Result<()> {
-    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    let file = File::create_new(path).with_context(|| format!("creating {}", path.display()))?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
     let payload = "x".repeat(PAYLOAD_BYTES);
     match format {
@@ -290,6 +291,7 @@ async fn cancel_run(
     // by the copy of its body, about 100 µs.
     let round_trip = import_events(log).last().map_or(Duration::ZERO, |e| e.1);
     tokio::time::sleep(round_trip / 2).await;
+    let imported_at_stop = rx.borrow().imported;
     let (stop_time, stop) = (SystemTime::now(), Instant::now());
     control.stop.cancel();
     let outcome = running.await?;
@@ -298,6 +300,12 @@ async fn cancel_run(
         matches!(outcome.end, JobEnd::Stopped),
         "cancel run ended {:?}",
         outcome.end
+    );
+    let p = &outcome.progress;
+    ensure!(
+        p.imported > imported_at_stop && p.imported == p.sent && p.unconfirmed == 0,
+        "returned before the batch in flight answered: {} imported at the stop, then {p:?}",
+        imported_at_stop
     );
     let late = import_events(log)
         .iter()
@@ -445,7 +453,7 @@ mod tests {
     fn json_and_csv_writers_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         for format in [Format::Jsonl, Format::JsonArray, Format::Csv] {
-            let path = dir.path().join("docs");
+            let path = dir.path().join(format_name(format));
             write_documents(&path, format, 3).unwrap();
             let mut docs = Vec::new();
             read_documents(&Source::File(path), &read_options(format), |record| {
@@ -464,6 +472,15 @@ mod tests {
                 "{format:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_existing_file_is_not_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mine");
+        std::fs::write(&path, "keep").unwrap();
+        assert!(write_documents(&path, Format::Jsonl, 1).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep");
     }
 
     #[test]
