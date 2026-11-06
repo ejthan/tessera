@@ -23,15 +23,18 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use tessera_core::transfer::report::Report;
+use tessera_core::transfer::source::Source;
 use tessera_widgets::confirm;
 
 use super::super::env_badge;
 use super::super::overview::grouped;
 use super::super::request_detail::size;
+use super::import_dialog::DocumentImportDialog;
 use crate::actions::{
     CancelJob, DismissJob, JOBS, SaveFailedLines, SaveReport, StopWaiting, gated,
 };
 use crate::jobs::{Job, JobId, JobKind, JobOutcome, JobStatus, Jobs, JobsGlobal, Live};
+use crate::state::AppState;
 use crate::transfer::TransferBackendGlobal;
 
 /// Initial height of the detail under the job table.
@@ -375,12 +378,15 @@ struct Saved {
 
 /// The jobs tab.
 pub struct JobsPanel {
+    state: Entity<AppState>,
     jobs: Entity<Jobs>,
     table: Entity<TableState<JobRows>>,
     report: Entity<TableState<ReportRows>>,
     /// The job the user picked; without one the newest shows.
     picked: Option<JobId>,
     saved: Option<Saved>,
+    /// The last saved failed lines: the job and the file.
+    failed_file: Option<(JobId, PathBuf)>,
     save_task: Option<Task<()>>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -388,7 +394,7 @@ pub struct JobsPanel {
 
 impl JobsPanel {
     /// The panel over the app's jobs.
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let jobs = cx.global::<JobsGlobal>().0.clone();
         let rows = JobRows { jobs: jobs.clone() };
         let table = cx.new(|cx| {
@@ -412,11 +418,13 @@ impl JobsPanel {
             }),
         ];
         Self {
+            state,
             jobs,
             table,
             report,
             picked: None,
             saved: None,
+            failed_file: None,
             save_task: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -552,6 +560,9 @@ impl JobsPanel {
                 if result.is_ok() {
                     this.jobs
                         .update(cx, |jobs, cx| jobs.set_report_saved(id, cx));
+                    if failed_only {
+                        this.failed_file = Some((id, path.clone()));
+                    }
                 }
                 let text = match result {
                     Ok(count) => Ok(t!(
@@ -570,6 +581,28 @@ impl JobsPanel {
             })
             .ok();
         }));
+    }
+
+    /// Opens the import dialog on the saved failed lines of the shown job.
+    fn import_saved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(job) = self.current(cx) else {
+            return;
+        };
+        let (profile, collection) = (job.connection, job.collection.clone());
+        let Some(path) = self.saved_file(job) else {
+            return;
+        };
+        if let Some(connection) = self.state.read(cx).connection(profile, cx) {
+            let source = Some(Source::File(path));
+            let state = self.state.clone();
+            DocumentImportDialog::open(state, connection, Some(collection), source, window, cx);
+        }
+    }
+
+    /// The failed lines saved from `job`.
+    fn saved_file(&self, job: &Job) -> Option<PathBuf> {
+        let (id, path) = self.failed_file.as_ref()?;
+        (*id == job.id).then(|| path.clone())
     }
 
     /// The buttons of the shown job.
@@ -622,6 +655,15 @@ impl JobsPanel {
                             window,
                         ))
                         .on_click(cx.listener(|this, _, window, cx| this.save(true, window, cx))),
+                )
+            })
+            .when(self.saved_file(job).is_some(), |el| {
+                el.child(
+                    Button::new("jobs.import_saved")
+                        .ghost()
+                        .xsmall()
+                        .label(t!("jobs.import_saved").to_string())
+                        .on_click(cx.listener(|this, _, window, cx| this.import_saved(window, cx))),
                 )
             })
             .when(!job.is_running(), |el| {

@@ -2,4 +2,5 @@
 
 //! Views of import and export jobs.
 
+pub mod import_dialog;
 pub mod panel;

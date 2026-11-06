@@ -113,7 +113,11 @@ gpui_kit::actions!(
         CancelJob,
         DismissJob,
         SaveReport,
-        SaveFailedLines
+        SaveFailedLines,
+        ImportDocuments,
+        PickImportFile,
+        PasteImport,
+        StartTransfer
     ]
 );
 
@@ -169,6 +173,10 @@ const CONDITION_INPUT: &str = "ConditionRow > Input";
 pub const REQUEST_LOG: &str = "RequestLog";
 /// Key context of the jobs panel.
 pub const JOBS: &str = "Jobs";
+/// Key context of the import dialog.
+pub const IMPORT_DIALOG: &str = "DocumentImport";
+/// An input in that dialog, which has its own ⌘↩.
+const IMPORT_INPUT: &str = "DocumentImport > Input";
 /// Key context of the raw console.
 pub const CONSOLE: &str = "Console";
 /// Key context of an input in the console, where ⌘↩ / Ctrl+↩ still sends.
@@ -433,6 +441,14 @@ const QUICK_SWITCH: &str = "cmd-p";
 #[cfg(not(target_os = "macos"))]
 const QUICK_SWITCH: &str = "ctrl-p";
 #[cfg(target_os = "macos")]
+const IMPORT_DOCUMENTS: &str = "cmd-shift-i";
+#[cfg(not(target_os = "macos"))]
+const IMPORT_DOCUMENTS: &str = "ctrl-shift-i";
+#[cfg(target_os = "macos")]
+const PASTE_IMPORT: &str = "cmd-shift-v";
+#[cfg(not(target_os = "macos"))]
+const PASTE_IMPORT: &str = "ctrl-shift-v";
+#[cfg(target_os = "macos")]
 const TOGGLE_JOBS: &str = "cmd-shift-j";
 #[cfg(not(target_os = "macos"))]
 const TOGGLE_JOBS: &str = "ctrl-shift-j";
@@ -537,6 +553,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     DismissJob,
     SaveReport,
     SaveFailedLines,
+    ImportDocuments,
 ];
 
 /// Actions the palette never lists: steps that mean nothing outside their control, and
@@ -563,6 +580,9 @@ pub const PALETTE_HIDDEN: &[&str] = &[
     "tessera::LoadQuery",
     "tessera::DeleteSavedQuery",
     "tessera::ToggleFrameOverlay",
+    "tessera::PickImportFile",
+    "tessera::PasteImport",
+    "tessera::StartTransfer",
 ];
 
 /// The locale key of the label of action `name`, when the palette lists it.
@@ -793,6 +813,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-right", MoveChipRight, Some(CHIP)),
         KeyBinding::new("delete", RemoveChip, Some(CHIP)),
         KeyBinding::new("backspace", RemoveChip, Some(CHIP)),
+        KeyBinding::new(IMPORT_DOCUMENTS, ImportDocuments, Some(COLLECTION)),
+        KeyBinding::new(IMPORT_DOCUMENTS, ImportDocuments, Some(COLLECTIONS)),
+        KeyBinding::new(OPEN_SAVED, PickImportFile, Some(IMPORT_DIALOG)),
+        KeyBinding::new(PASTE_IMPORT, PasteImport, Some(IMPORT_DIALOG)),
+        KeyBinding::new(SAVE, StartTransfer, Some(IMPORT_DIALOG)),
+        KeyBinding::new(SAVE, StartTransfer, Some(IMPORT_INPUT)),
         KeyBinding::new(CANCEL_JOB, CancelJob, Some(JOBS)),
         KeyBinding::new(STOP_WAITING, StopWaiting, Some(JOBS)),
         KeyBinding::new(DELETE, DismissJob, Some(JOBS)),

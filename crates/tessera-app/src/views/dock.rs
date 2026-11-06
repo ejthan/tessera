@@ -29,8 +29,8 @@ use super::sidebar::Sidebar;
 use super::{env_badge, unlock, welcome};
 use crate::actions::{
     COLLECTION, COLLECTIONS, CONSOLE, CloneCollection, DeleteCollection, EditSchema, FocusSearch,
-    LockAgain, NewCollection, OVERVIEW, OpenCollectionRow, Refresh, ShowDocuments, ShowSchema,
-    ToggleFavorite, TogglePolling, TruncateCollection, WORKBENCH, gated,
+    ImportDocuments, LockAgain, NewCollection, OVERVIEW, OpenCollectionRow, Refresh, ShowDocuments,
+    ShowSchema, ToggleFavorite, TogglePolling, TruncateCollection, WORKBENCH, gated,
 };
 use crate::connection::ConnectionState;
 use crate::poller::Poller;
@@ -284,6 +284,9 @@ impl Render for CollectionsPanel {
             .on_action(cx.listener(|this, _: &NewCollection, window, cx| {
                 this.list.update(cx, |l, cx| l.new_collection(window, cx));
             }))
+            .on_action(cx.listener(|this, _: &ImportDocuments, window, cx| {
+                this.list.update(cx, |l, cx| l.import(None, window, cx));
+            }))
             .on_action(cx.listener(|this, _: &CloneCollection, window, cx| {
                 this.list.update(cx, |l, cx| l.clone_selected(window, cx));
             }))
@@ -473,6 +476,10 @@ impl Render for CollectionPanel {
             })
             .on_action(cx.listener(|this, _: &ClosePanel, window, cx| {
                 this.documents.update(cx, |d, cx| d.close_tab(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &ImportDocuments, window, cx| {
+                this.documents
+                    .update(cx, |d, cx| d.import(None, window, cx));
             }))
             .on_action(cx.listener(|this, _: &ShowDocuments, window, cx| {
                 this.show(CollectionView::Documents, window, cx);

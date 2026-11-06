@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui_kit::component::WindowExt as _;
-use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
 use tessera_app::connection::{CollectionChanged, ConnectionState};
 use tessera_app::jobs::{JobId, JobStatus, Jobs, JobsGlobal, Live, RunningChanged};
@@ -685,4 +685,29 @@ async fn count_shows_with_the_shortcut(cx: &mut TestAppContext) {
     cx.run_until_parked();
     f.click(cx, "jobs.dismiss");
     assert!(!f.has(cx, "status.jobs"));
+}
+
+#[gpui_kit::test]
+async fn saved_failed_lines_offer_import(cx: &mut TestAppContext) {
+    let (f, _) = finished_with_a_report(cx).await;
+    assert!(!f.has(cx, "jobs.import_saved"));
+    let (_dir, path) = {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("books.failed.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        (dir, path)
+    };
+    f.click(cx, "jobs.save_report");
+    cx.simulate_new_path_selection(|_| Some(path.clone()));
+    cx.run_until_parked();
+    assert!(!f.has(cx, "jobs.import_saved"), "only for the failed lines");
+    f.click(cx, "jobs.save_failed");
+    cx.simulate_new_path_selection(|_| Some(path.clone()));
+    cx.run_until_parked();
+    f.click(cx, "jobs.import_saved");
+    cx.wait_for(f.handle.into(), Duration::from_millis(5000), |window, _| {
+        let source = window.try_find("transfer.import.source");
+        source.is_some_and(|e| e.label().is_some_and(|l| l.contains("books.failed")))
+    })
+    .await;
 }

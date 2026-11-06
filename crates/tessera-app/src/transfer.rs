@@ -6,14 +6,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::Global;
+use rust_i18n::t;
 use tessera_client::{Client, Collection};
-use tessera_core::transfer::JobControl;
 use tessera_core::transfer::export::{ExportJob, ExportOutcome, ExportProgress, run_export};
 use tessera_core::transfer::import::{ImportJob, ImportOutcome, ImportProgress, run_import};
 use tessera_core::transfer::infer::{InferredSchema, infer_schema};
 use tessera_core::transfer::preview::{Preview, preview};
 use tessera_core::transfer::report::Report;
 use tessera_core::transfer::source::{ReadError, ReadOptions, Source};
+use tessera_core::transfer::{JobControl, MAX_DOC_BYTES};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
@@ -131,6 +132,37 @@ impl TransferBackend for TokioBackend {
             saved.map_err(|e| e.to_string())
         })
     }
+}
+
+/// The sentence for a source that cannot be read.
+pub fn read_error_text(err: &ReadError) -> String {
+    match err {
+        ReadError::Io(detail) => t!("transfer.read_error.io", detail = detail),
+        ReadError::Json {
+            line,
+            column,
+            message,
+        } => t!(
+            "transfer.read_error.json",
+            line = line,
+            column = column,
+            detail = message
+        ),
+        ReadError::Csv { line, message } => {
+            t!("transfer.read_error.csv", line = line, detail = message)
+        }
+        ReadError::RecordTooLarge { line } => t!(
+            "transfer.read_error.record_too_large",
+            line = line,
+            limit = MAX_DOC_BYTES >> 20
+        ),
+        ReadError::ElementTooLarge { element } => t!(
+            "transfer.read_error.element_too_large",
+            element = element,
+            limit = MAX_DOC_BYTES >> 20
+        ),
+    }
+    .to_string()
 }
 
 /// The real backend, on the tokio runtime.

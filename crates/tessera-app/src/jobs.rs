@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::collections::BoxFuture;
 use crate::connection::{ConnectionState, long_error_text};
-use crate::transfer::TransferBackendGlobal;
+use crate::transfer::{TransferBackendGlobal, read_error_text};
 
 /// The shortest time between two progress updates: at most 30 a second.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(34);
@@ -155,7 +155,7 @@ pub fn init(cx: &mut App) {
 fn failure_text(err: &TransferError, profile: &Profile) -> SharedString {
     match err {
         TransferError::Client(e) => long_error_text(e, profile),
-        TransferError::Read(e) => t!("jobs.error.read", detail = e.to_string()).to_string(),
+        TransferError::Read(e) => read_error_text(e),
         TransferError::Report(detail) => t!("jobs.error.report", detail = detail).to_string(),
         TransferError::AnswerMismatch { sent, answered } => t!(
             "jobs.error.answer_mismatch",

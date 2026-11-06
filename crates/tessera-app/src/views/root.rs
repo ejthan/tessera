@@ -2,7 +2,7 @@
 
 //! The window's top-level view: title bar, the dock (sidebar, tabs, request log), status bar.
 
-use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::base::{Root, TestSupportExt as _};
 use gpui_kit::component::dock::{
     DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, PaneRef, PanelId, panel_handle,
 };
@@ -68,7 +68,7 @@ impl RootView {
         skin.set_close_button_visible(true, cx);
         let sidebar = cx.new(|cx| SidebarPanel::new(state.clone(), cx));
         let log = cx.new(|cx| RequestLogPanel::new(state.clone(), window, cx));
-        let jobs = cx.new(|cx| JobsPanel::new(window, cx));
+        let jobs = cx.new(|cx| JobsPanel::new(state.clone(), window, cx));
         let welcome = cx.new(|cx| WelcomePanel::new(state.clone(), cx));
         dock.update(cx, |area, cx| {
             let tabs = |panel| DockLayout::tabs().panel_view(panel, cx);
@@ -239,6 +239,14 @@ impl RootView {
     pub fn show_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reveal(self.jobs_id(), window, cx);
         cx.notify();
+    }
+
+    /// Shows the jobs tab of the window's root view, from a dialog.
+    pub fn reveal_jobs(window: &mut Window, cx: &mut App) {
+        let root = Root::read(window, cx).view().clone().downcast::<Self>();
+        if let Ok(root) = root {
+            root.update(cx, |root, cx| root.show_jobs(window, cx));
+        }
     }
 
     /// A job ending is a background event, so it is the one toast, unless its tab is on screen.
