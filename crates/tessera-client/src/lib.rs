@@ -7,6 +7,7 @@ mod documents;
 mod error;
 mod event;
 mod models;
+mod raw;
 mod search;
 mod send;
 
@@ -21,6 +22,7 @@ pub use documents::{DocumentQuery, SearchPage, document_path, encode_query};
 pub use error::Error;
 pub use event::{BODY_LIMIT, Body, Origin, RequestEvent, RequestHook};
 pub use models::{CollectionSummary, Debug, Health, KeyAccess, Metrics, RaftState, Stats};
+pub use raw::{RawBody, RawRequest, RawResponse};
 pub use reqwest::Method;
 pub use search::{
     GET_QUERY_LIMIT, MULTI_SEARCH_LIMIT, MultiSearch, Preset, SearchRoute, multi_route,
