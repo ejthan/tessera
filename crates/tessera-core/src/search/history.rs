@@ -16,7 +16,7 @@ use crate::store::{self, StoreError};
 
 /// Entries kept per kind.
 pub const HISTORY_CAP: usize = 500;
-/// A larger raw body is not kept.
+/// A larger raw body is not kept, and a search with more parameter text stays out.
 pub const RAW_BODY_KEEP: usize = 64 * 1024;
 
 /// One entry with its time and connection.
@@ -144,12 +144,12 @@ pub fn without_secrets(drafts: &[SearchDraft]) -> Vec<SearchDraft> {
     drafts
 }
 
-/// The entry of a search of `drafts`, without keys: see [`without_secrets`].
-pub fn search_entry(union: bool, drafts: &[SearchDraft]) -> HistoryEntry {
-    HistoryEntry::Search {
-        union,
-        searches: without_secrets(drafts),
-    }
+/// The entry of a search of `drafts`, without keys: see [`without_secrets`]. `None` over
+/// [`RAW_BODY_KEEP`]: every entry stays in memory and is rewritten with the file.
+pub fn search_entry(union: bool, drafts: &[SearchDraft]) -> Option<HistoryEntry> {
+    let searches = without_secrets(drafts);
+    let size = serde_json::to_string(&searches).ok()?.len();
+    (size <= RAW_BODY_KEEP).then_some(HistoryEntry::Search { union, searches })
 }
 
 /// `history.jsonl` in the platform data directory.
@@ -335,7 +335,7 @@ mod tests {
         let item = HistoryItem {
             at: 1,
             profile: Uuid::new_v4(),
-            entry: search_entry(false, &[draft]),
+            entry: search_entry(false, &[draft]).unwrap(),
         };
         let line = to_line(&item).unwrap();
         assert!(!line.contains("topsecret"), "{line}");
@@ -348,8 +348,10 @@ mod tests {
         let entry = raw_entry(
             "POST",
             "keys",
-            Some("a=1&x-typesense-api-key=topsecret"),
-            Some(r#"{"api_key":"topsecret"}"#),
+            Some("a=1&x-typesense-api-key=topsecret&api_key=topsecret&scoped_key=topsecret"),
+            Some(
+                r#"{"api_key":"topsecret","x-typesense-api-key":"topsecret","scoped_key":"topsecret"}"#,
+            ),
         );
         let item = HistoryItem {
             at: 1,
@@ -359,6 +361,17 @@ mod tests {
         let line = to_line(&item).unwrap();
         assert!(!line.contains("topsecret"), "{line}");
         assert!(line.contains("a=1"));
+    }
+
+    #[test]
+    fn a_huge_search_stays_out() {
+        let mut draft = SearchDraft::new("books");
+        let fits = search_entry(false, std::slice::from_ref(&draft));
+        assert!(fits.is_some());
+        draft
+            .params
+            .insert("filter_by".into(), "x".repeat(RAW_BODY_KEEP).into());
+        assert_eq!(search_entry(false, &[draft]), None);
     }
 
     #[test]

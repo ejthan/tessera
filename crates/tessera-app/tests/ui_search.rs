@@ -1798,3 +1798,77 @@ async fn a_post_route_disables_the_raw_url(cx: &mut TestAppContext) {
     });
     assert_eq!(label.unwrap(), "Copy the URL: this search is sent as POST");
 }
+
+#[gpui_kit::test]
+async fn a_change_on_another_tab_sends_a_union_to_the_first_page(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.load(
+        cx,
+        vec![draft_with(json!({"page": 3})), draft_with(json!({}))],
+        true,
+    );
+    f.press(cx, NEXT_SEARCH);
+    assert_eq!(f.active(cx), 1);
+    f.fill(cx, "search.param.q", "dune");
+    assert!(!f.drafts(cx)[0].params.contains_key("page"));
+    f.run(cx);
+    assert_eq!(f.search.multi_calls().remove(0).page, None);
+}
+
+#[gpui_kit::test]
+async fn a_union_page_that_is_no_number_shows_an_error(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.load(
+        cx,
+        vec![draft_with(json!({"page": "two"})), draft_with(json!({}))],
+        true,
+    );
+    f.run(cx);
+    assert!(f.text_of(cx, "search.error").contains("`page`"));
+    assert!(f.search.multi_calls().is_empty());
+}
+
+#[gpui_kit::test]
+async fn a_union_ends_at_a_short_page_whatever_found_says(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.load(
+        cx,
+        vec![
+            draft_with(json!({"page": 2, "per_page": 2})),
+            draft_with(json!({})),
+        ],
+        true,
+    );
+    *f.search.multi_body.lock().unwrap() = Some(
+        r#"{"found":9,"out_of":9,"page":2,"search_time_ms":1,"hits":[
+            {"document":{"id":"1"},"collection":"books","search_index":0}]}"#
+            .to_string(),
+    );
+    f.run(cx);
+    assert!(f.text_of(cx, "search.status").contains("approximate"));
+    assert!(f.disabled(cx, "search.page.next"));
+    assert!(!f.disabled(cx, "search.page.previous"));
+
+    *f.search.multi_body.lock().unwrap() = Some(search_body(9));
+    f.run(cx);
+    assert!(f.has(cx, "search.end"));
+    assert!(!f.has(cx, "search.past_end"));
+}
+
+#[gpui_kit::test]
+async fn an_export_that_cannot_run_says_why(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.press(cx, SHOW_JSON);
+    f.set_json(cx, "{not json");
+    f.press(cx, COPY_DOC_CURL);
+    assert!(f.has(cx, "search.export.error"));
+    assert!(cx.read_from_clipboard().is_none());
+    f.set_json(cx, r#"{"q": "dune"}"#);
+    f.press(cx, COPY_DOC_CURL);
+    assert!(!f.has(cx, "search.export.error"));
+    assert!(f.has(cx, "search.export.copied"));
+}

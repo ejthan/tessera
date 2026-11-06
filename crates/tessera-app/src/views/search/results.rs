@@ -29,7 +29,8 @@ fn page_count(found: u64, per_page: u64) -> u64 {
     found.div_ceil(per_page.max(1))
 }
 
-/// The status line of `result`. A union's `found` counts a document once per search.
+/// The status line of `result`. A union's `found` counts a document once per search and moves
+/// with the page, so it is only ever approximate.
 pub(super) fn status(result: &SearchResult, union: bool) -> SharedString {
     let (found, out_of, ms) = (
         grouped(result.found),
@@ -69,12 +70,22 @@ impl SearchWorkbench {
         page.unwrap_or(1)
     }
 
+    /// The last page of `result`. A union's `found` overstates, so a short page ends it.
+    fn last_page(&self, result: &SearchResult) -> u64 {
+        let per_page = self.per_page();
+        let pages = page_count(result.found, per_page);
+        if pages > 0 && self.union_answer && (result.hits.len() as u64) < per_page {
+            return self.page();
+        }
+        pages
+    }
+
     /// Writes `page` and runs, when `step` stays within the result.
     pub(super) fn turn_page(&mut self, step: i64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(result) = self.result() else {
             return;
         };
-        let pages = page_count(result.found, self.per_page());
+        let pages = self.last_page(result);
         // Clamped: an edit in JSON can leave the draft past the end.
         let page = self
             .page()
@@ -202,7 +213,7 @@ impl SearchWorkbench {
     ) -> Option<impl IntoElement + use<>> {
         let result = self.result()?;
         let page = self.page();
-        let pages = page_count(result.found, self.per_page());
+        let pages = self.last_page(result);
         if pages == 0 {
             return None;
         }
@@ -256,7 +267,9 @@ impl SearchWorkbench {
         }
         let q = self.shown_param("q");
         let filter = self.filter_text();
-        let (id, text) = if result.found > 0 {
+        let (id, text) = if result.found > 0 && self.union_answer {
+            ("search.end", t!("search.union.end"))
+        } else if result.found > 0 {
             let found = grouped(result.found);
             ("search.past_end", t!("search.past_end", found = found))
         } else if filter.is_empty() {

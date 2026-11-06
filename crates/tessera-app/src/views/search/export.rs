@@ -7,9 +7,9 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{Disableable as _, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _};
 use gpui_kit::{
-    AnyElement, ClipboardItem, Context, DismissEvent, Entity, Focusable as _, IntoElement,
+    AnyElement, App, ClipboardItem, Context, DismissEvent, Entity, Focusable as _, IntoElement,
     ParentElement as _, SharedString, Subscription, Task, Window, div, prelude::*,
 };
 use rust_i18n::t;
@@ -29,6 +29,8 @@ pub(super) struct ExportState {
     menu: Option<(Entity<PopupMenu>, Subscription)>,
     /// Takes "Copied" away again; a newer copy replaces it.
     copied_reset: Option<Task<()>>,
+    /// Why the last export did nothing.
+    error: Option<SharedString>,
 }
 
 /// Why a search cannot be exported.
@@ -68,15 +70,21 @@ impl SearchWorkbench {
         cx.notify();
     }
 
-    /// Writes the search as `lang` to the clipboard and says so.
+    fn export_refused(&mut self, text: String, cx: &mut Context<Self>) {
+        self.export.error = Some(text.into());
+        cx.notify();
+    }
+
+    /// Writes the search as `lang` to the clipboard and says so, or says why not.
     pub(super) fn copy_export(&mut self, lang: ExportLang, cx: &mut Context<Self>) {
+        self.export.error = None;
         if self.run_blocked() {
-            return;
+            return self.export_refused(t!("search.export.blocked").to_string(), cx);
         }
-        let Some(connected) = &self.connection.read(cx).connected else {
-            return;
+        let connected = self.connection.read(cx).connected.as_ref();
+        let Some(node) = connected.map(|c| c.client.base_url().clone()) else {
+            return self.export_refused(t!("status.not_connected").to_string(), cx);
         };
-        let node = connected.client.base_url().clone();
         match self.with_route(|route, target| export(lang, &node, route, target)) {
             Ok(Some(code)) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(code));
@@ -90,7 +98,7 @@ impl SearchWorkbench {
                 }));
                 cx.notify();
             }
-            Ok(None) => {}
+            Ok(None) => self.export_refused(t!("search.export.post_only").to_string(), cx),
             Err(refused) => self.show_refusal(&refused, cx),
         }
     }
@@ -100,8 +108,9 @@ impl SearchWorkbench {
             self.focus_handle.focus(window, cx);
             return cx.notify();
         }
+        self.export.error = None;
         if self.run_blocked() {
-            return;
+            return self.export_refused(t!("search.export.blocked").to_string(), cx);
         }
         let post = match self.with_route(|route, _| matches!(route, SearchRoute::Post { .. })) {
             Ok(post) => post,
@@ -174,15 +183,23 @@ impl SearchWorkbench {
     }
 
     /// "Copied", for a moment after a copy.
-    pub(super) fn export_note(&self) -> Option<impl IntoElement + use<>> {
-        self.export.copied_reset.as_ref()?;
-        let note = SharedString::from(t!("search.export.copied").to_string());
+    pub(super) fn export_note(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        let (id, note) = match &self.export.error {
+            Some(error) => ("search.export.error", error.clone()),
+            None => {
+                self.export.copied_reset.as_ref()?;
+                let copied = t!("search.export.copied").to_string();
+                ("search.export.copied", copied.into())
+            }
+        };
+        let error = self.export.error.is_some();
         Some(
             div()
-                .id("search.export.copied")
+                .id(id)
                 .test_support()
                 .aria_label(note.clone())
                 .text_sm()
+                .when(error, |el| el.text_color(cx.theme().danger))
                 .child(note),
         )
     }

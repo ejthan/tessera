@@ -43,6 +43,9 @@ pub enum ParamError {
     /// The value is not a string, number or boolean.
     #[error("`{0}` must be a string, a number or true/false")]
     BadValue(String),
+    /// The value is not a whole number, and a union's page must be.
+    #[error("`{0}` must be a whole number")]
+    BadNumber(String),
     /// The text is not a JSON object.
     #[error("the parameters must be a JSON object")]
     NotAnObject,

@@ -110,6 +110,7 @@ fn param_error_text(error: &ParamError) -> String {
         ParamError::BadKey(key) => t!("search.param_error.bad_key", key = key),
         ParamError::Reserved(key) => t!("search.param_error.reserved", key = key),
         ParamError::BadValue(key) => t!("search.param_error.bad_value", key = key),
+        ParamError::BadNumber(key) => t!("search.param_error.bad_number", key = key),
         ParamError::NotAnObject => t!("search.param_error.not_an_object"),
     }
     .to_string()
@@ -430,10 +431,12 @@ impl SearchWorkbench {
         }
     }
 
-    /// Back to the first page: a page says nothing about another query's result.
+    /// Back to the first page: a page says nothing about another query's result. A union pages
+    /// on its first draft, whichever is being edited.
     fn drop_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.draft().params.contains_key("page") {
-            self.put_param(self.active, "page", None);
+        let target = if self.union { 0 } else { self.active };
+        if self.drafts[target].params.contains_key("page") {
+            self.put_param(target, "page", None);
             self.sync_editors(window, cx);
         }
     }
@@ -719,7 +722,7 @@ impl SearchWorkbench {
                 cx,
             ))
             .child(self.export_button(window, cx))
-            .children(self.export_note())
+            .children(self.export_note(cx))
             .child(
                 Checkbox::new("search.instant")
                     .checked(self.instant)

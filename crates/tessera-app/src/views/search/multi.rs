@@ -29,9 +29,15 @@ pub(super) fn multi_request(
         .iter()
         .map(to_search)
         .collect::<Result<Vec<_>, _>>()?;
-    let number = |key| value_text(drafts.first()?.params.get(key)).parse().ok();
+    let number = |key: &str| match drafts.first().and_then(|d| d.params.get(key)) {
+        Some(value) => value_text(Some(value))
+            .parse()
+            .map(Some)
+            .map_err(|_| ParamError::BadNumber(key.to_string())),
+        None => Ok(None),
+    };
     let (page, per_page) = if union {
-        (number("page"), number("per_page"))
+        (number("page")?, number("per_page")?)
     } else {
         (None, None)
     };
@@ -335,6 +341,21 @@ mod tests {
         let drafts = [draft(json!({"page": "4"})), draft(json!({}))];
         let request = multi_request(&drafts, true).unwrap();
         assert_eq!((request.page, request.per_page), (Some(4), None));
+    }
+
+    #[test]
+    fn a_union_refuses_a_page_that_is_no_number() {
+        let drafts = [draft(json!({"page": "two"})), draft(json!({}))];
+        assert_eq!(
+            multi_request(&drafts, true).unwrap_err(),
+            ParamError::BadNumber("page".into())
+        );
+        let drafts = [draft(json!({"per_page": 1.5})), draft(json!({}))];
+        assert_eq!(
+            multi_request(&drafts, true).unwrap_err(),
+            ParamError::BadNumber("per_page".into())
+        );
+        assert!(multi_request(&drafts, false).is_ok());
     }
 
     #[test]

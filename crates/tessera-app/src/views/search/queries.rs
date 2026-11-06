@@ -24,7 +24,7 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use serde_json::{Value, json};
-use tessera_client::Preset;
+use tessera_client::{MULTI_SEARCH_LIMIT, Preset};
 use tessera_core::search::HISTORY_SETTLE_MS;
 use tessera_core::search::history::{HistoryEntry, HistoryItem, search_entry, without_secrets};
 use tessera_core::search::params::{ParamError, SearchDraft, parse_params, to_search};
@@ -157,8 +157,9 @@ pub(super) struct PendingHistory {
     answered: bool,
 }
 
-/// `value` of a preset as drafts. Without a collection a search stays on `current`.
-fn preset_drafts(value: &Value, current: &str) -> Result<Vec<SearchDraft>, SharedString> {
+/// `value` of a preset as drafts and whether they are a union. Without a collection a search
+/// stays on `current`.
+fn preset_drafts(value: &Value, current: &str) -> Result<(Vec<SearchDraft>, bool), SharedString> {
     fn draft(search: &Value, current: &str) -> Result<SearchDraft, SharedString> {
         let Value::Object(search) = search else {
             return Err(t!("search.preset.not_an_object").to_string().into());
@@ -174,15 +175,22 @@ fn preset_drafts(value: &Value, current: &str) -> Result<Vec<SearchDraft>, Share
         })
     }
     match value.get("searches").and_then(Value::as_array) {
-        Some(searches) if !searches.is_empty() => {
-            searches.iter().map(|s| draft(s, current)).collect()
+        Some(searches) if searches.len() > MULTI_SEARCH_LIMIT => {
+            let text = t!("search.preset.too_many", n = MULTI_SEARCH_LIMIT);
+            Err(text.to_string().into())
         }
-        _ => Ok(vec![draft(value, current)?]),
+        Some(searches) if !searches.is_empty() => {
+            let drafts: Result<Vec<_>, _> = searches.iter().map(|s| draft(s, current)).collect();
+            let union = value.get("union").and_then(Value::as_bool);
+            Ok((drafts?, union.unwrap_or(false)))
+        }
+        _ => Ok((vec![draft(value, current)?], false)),
     }
 }
 
-/// What a preset of `drafts` stores: one search without its collection, or all of them.
-fn preset_value(drafts: &[SearchDraft]) -> Result<Value, ParamError> {
+/// What a preset of `drafts` stores: one search without its collection, or all of them, with
+/// `union` when it is on.
+fn preset_value(drafts: &[SearchDraft], union: bool) -> Result<Value, ParamError> {
     let mut searches = drafts
         .iter()
         .map(to_search)
@@ -191,7 +199,11 @@ fn preset_value(drafts: &[SearchDraft]) -> Result<Value, ParamError> {
         search.shift_remove("collection");
         return Ok(Value::Object(std::mem::take(search)));
     }
-    Ok(json!({ "searches": searches }))
+    let mut value = json!({ "searches": searches });
+    if union {
+        value["union"] = true.into();
+    }
+    Ok(value)
 }
 
 /// Tags typed as a list: split at commas, trimmed, empties dropped.
@@ -331,8 +343,11 @@ impl SearchWorkbench {
     /// Follows a run: only `explicit` ones and those that stand for the settle time enter
     /// the history, and only once they answered. Replaces the run followed before.
     pub(super) fn follow_for_history(&mut self, explicit: bool, cx: &mut Context<Self>) {
+        let Some(entry) = search_entry(self.union, &self.drafts) else {
+            return self.forget_run();
+        };
         self.pending_history = Some(PendingHistory {
-            entry: search_entry(self.union, &self.drafts),
+            entry,
             settled: explicit,
             answered: false,
         });
@@ -502,7 +517,7 @@ impl SearchWorkbench {
             Some(Entry::Saved(query)) => (query.searches, query.union),
             Some(Entry::Preset(preset)) => {
                 match preset_drafts(&preset.value, &self.draft().collection) {
-                    Ok(drafts) => (drafts, false),
+                    Ok(loaded) => loaded,
                     Err(error) => {
                         self.queries.pick_error = Some(error);
                         return cx.notify();
@@ -657,7 +672,7 @@ impl SearchWorkbench {
     }
 
     fn submit_preset(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let value = match preset_value(&without_secrets(&self.drafts)) {
+        let value = match preset_value(&without_secrets(&self.drafts), self.union) {
             Ok(value) => value,
             Err(error) => {
                 self.queries.write_error = Some(param_error_text(&error).into());
@@ -947,20 +962,40 @@ mod tests {
 
     #[test]
     fn a_preset_of_one_search_keeps_no_collection() {
-        let value = preset_value(&[SearchDraft::new("books")]).unwrap();
+        let value = preset_value(&[SearchDraft::new("books")], false).unwrap();
         assert_eq!(value, json!({"q": "*", "enable_analytics": false}));
     }
 
     #[test]
     fn a_preset_of_several_lists_them() {
         let drafts = [SearchDraft::new("a"), SearchDraft::new("b")];
-        let value = preset_value(&drafts).unwrap();
+        let value = preset_value(&drafts, false).unwrap();
         assert_eq!(value["searches"][1]["collection"], "b");
+        assert!(value.get("union").is_none());
+    }
+
+    #[test]
+    fn a_union_survives_a_preset_both_ways() {
+        let drafts = [SearchDraft::new("a"), SearchDraft::new("b")];
+        let value = preset_value(&drafts, true).unwrap();
+        assert_eq!(value["union"], true);
+        let (loaded, union) = preset_drafts(&value, "other").unwrap();
+        assert!(union);
+        assert_eq!(loaded.len(), 2);
+    }
+
+    #[test]
+    fn a_preset_over_the_limit_is_refused() {
+        let searches = vec![json!({"q": "a"}); MULTI_SEARCH_LIMIT + 1];
+        let error = preset_drafts(&json!({ "searches": searches }), "books").unwrap_err();
+        assert!(error.contains("50"), "{error}");
+        let searches = vec![json!({"q": "a"}); MULTI_SEARCH_LIMIT];
+        assert!(preset_drafts(&json!({ "searches": searches }), "books").is_ok());
     }
 
     #[test]
     fn a_search_without_collection_stays_on_the_current_one() {
-        let drafts = preset_drafts(&json!({"searches": [{"q": "a"}]}), "books").unwrap();
+        let (drafts, _) = preset_drafts(&json!({"searches": [{"q": "a"}]}), "books").unwrap();
         assert_eq!(drafts[0].collection, "books");
     }
 
