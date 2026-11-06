@@ -349,15 +349,16 @@ Each module lists acceptance criteria (AC).
 - **Streaming:** the file is read record by record, sent as one `POST` per batch (D45), and the response is evaluated line by line. Memory stays constant regardless of file size. A batch also ends at 16 MiB, and a record over 32 MiB is refused.
 - **Progress:** bytes, documents, rate per second, ETA, error count. Can be cancelled at any time; batches already imported stay imported (the dialog says so). Jobs run in the jobs panel and outlive the dialog and the tab (D48).
 - **Error report:** table with line number, error message and original document, the first 1,000 rows in memory and all of them in a temporary file (D47). Exportable as JSONL. The failed lines can be saved as a new file and imported again.
-- **Preview:** the first 20 lines before starting, including schema validation.
+- **Preview:** the first 20 lines before starting, including schema validation. It is advisory (D27): it checks the values as the server would coerce them under the default `dirty_values`, so with `drop` or `reject` a numeric string is flagged although the server decides.
 
-**AC:** Importing 1 million documents (≈ 1 GB JSONL) completes with less than 300 MB RSS for the app. Cancelling stops within one batch round trip.
+**AC:** Importing 1 million documents (≈ 1 GB JSONL) completes with less than 300 MB RSS for the app. Cancelling stops within one batch round trip. Measured headlessly (see §14); the figure for the window is a lower bound, since the smoke start holds no connection or jobs panel.
 
 ### 7.7 Export (P0)
 
 - Everything, by `filter_by`, or only the current selection. `include_fields` and `exclude_fields` are selectable, as top-level schema names (D52).
 - Formats: JSONL (native, streamed) and JSON array. CSV (P1, in M5) with nested fields flattened (`a.b.c`), the header taken from the first 1,000 documents.
-- Progress with cancel; the target is chosen in a file dialog and replaced only after a complete export.
+- Progress with cancel; the target is chosen in a file dialog and replaced only after a complete export. A target that is a symbolic link is refused, and an export that finds no document keeps an existing target. Export ignores curations, so the count matches what is written, and a finished export says when it wrote fewer documents than counted. Reading needs no unlock, so the dialog works on a read-only connection.
+- CSV cells are written as they are (D55). A column that first appears after the first 1,000 documents is left out and counted in the job, not added to the header.
 - **Backup assistant** (P1, M8): exports schema, all documents, aliases, attached synonym and curation sets, and stopwords for one or more collections into a folder or a `.tar.zst` archive. The **restore assistant** loads it into any cluster.
 
 ### 7.8 Aliases (P0)
@@ -650,7 +651,7 @@ Each milestone ends with green CI, an updated CHANGELOG and a short demo (GIF in
 | **M2 Collections** | §7.3 without the JOIN graph and schema inference (M5, D19): list, schema view, create (form and JSON), clone, PATCH with diff, delete, truncate, read-only unlock (D10). Creates `tessera-widgets`; `xtask seed` with small data sets. Details: `docs/superpowers/specs/2026-11-05-m2-collections-design.md` | Integration tests for all collection endpoints green |
 | **M3 Document browser** | §7.4: DataTable, infinite scroll, filter with autocompletion, inspector with JSON editor, CRUD, multi-select, delete by query with preview. `xtask seed` gains the 200k `products` set. Details: `docs/superpowers/specs/2026-11-05-m3-documents-design.md` | NF2 met (200k rows); measurement still open, steps in `docs/building.md` |
 | **M4 Search and raw console** | §7.5 (without P2 parts), multi-search, history, saved queries, code export. §7.17 raw console. §7.20 command palette. §7.19 full view of truncated bodies. Details: `docs/superpowers/specs/2026-11-06-m4-search-design.md`, decisions D33–D44 | Exported curl reproduces the response (live test, 30.0 and 30.2); the checks on screen are still open, steps in `docs/building.md` |
-| **M5 Import/export** | §7.6, §7.7 including schema inference, error report, cancel. Jobs panel. The backup and restore assistant is M8. Details: `docs/superpowers/specs/2026-11-06-m5-import-export-design.md`, decisions D45–D54 | NF3 met, measured headlessly with `cargo xtask nf3` (D53) |
+| **M5 Import/export** | §7.6, §7.7 including schema inference, error report, cancel. Jobs panel. The backup and restore assistant is M8. Details: `docs/superpowers/specs/2026-11-06-m5-import-export-design.md`, decisions D45–D54 | NF3 met headlessly: 1,000,000 documents in JSONL, JSON and CSV add at most 25 MB to the process and total at most 118 MB with the app's baseline, limit 300 MB (`cargo xtask nf3`, D53, record in `docs/building.md`); the run through the window and the Linux binary size (NF5) are still open |
 | **M6 Relevance resources** | §7.8 aliases including the reindex assistant, §7.9 synonym sets, §7.10 curation sets, §7.11 stopwords, §7.12 presets | CRUD and test panels work against 30.0 and 30.2 |
 | **M7 Keys, analytics, AI** | §7.14 including the scoped key generator and decoder, §7.15, §7.16, §7.13 | Scoped key test vectors identical to typesense-js |
 | **M8 Operations and hardening** | §7.18, safety UX §8.2 complete, backup/restore assistant, §9 audit (redaction tests) | Security checklist done |

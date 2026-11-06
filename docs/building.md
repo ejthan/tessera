@@ -112,6 +112,19 @@ context = "Workbench"
 
 A control shows the chord that is bound now. A bad entry is skipped and named above the tabs, and the others apply. A file that does not parse, or has a field the format does not know, changes nothing: the default shortcuts stay, and the line above the tabs names the place. `escape` cannot be bound, because it closes every dialog. An unbound action stays reachable from its control and the palette.
 
+## Manual checks of import and export (M5)
+
+Nothing here has been done yet. The headless run above is NF3's number; this is the run through the window, and it stays open until someone records it in the last PR's description.
+
+1. `TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d`, then `cargo run --release -p xtask -- nf3 --url http://localhost:18108 --docs 1000000 --keep-file /tmp/nf3.jsonl`, which also leaves the file for the import below.
+2. `cargo run --release -p tessera-app -- --host localhost --port 18108 --api-key-stdin <<< xyz`. Import `/tmp/nf3.jsonl` into a new collection with Import → New collection….
+3. While it runs, in a terminal: `while :; do ps -o rss= -p $(pgrep -x tessera); sleep 1; done`. Pass: the peak stays below 300 MB.
+4. Start a second import of the same file, press Cancel in the Jobs panel, and note that the panel stopped within one batch (the job row says `stopped`, and no further batch arrives).
+5. Delete the new collection afterwards. Record the machine, both RSS series and the stop time.
+6. Export the collection as JSONL, JSON and CSV with a filter and with a selection, open each file, and check that a stopped export leaves an existing target untouched.
+7. Open the import dialog, the export dialog and the schema dialog at 960×600. Nothing may be cut off.
+8. Record the Linux release binary size from the CI job (NF5, below 41,943,040 bytes). A macOS release binary is 23,397,360 bytes, which says nothing about Linux.
+
 ## Manual checks of the search milestone (M4)
 
 Nothing here has been done yet; record the results in PR D's description.
@@ -168,6 +181,19 @@ TESSERA_SMOKE=1 xvfb-run -a /usr/bin/time -v target/release/tessera
 That baseline holds the window, fonts and theme, but no connection, sidebar content or jobs panel, so the total is a lower bound of the running app. The stop in the cancel run lands half a round trip after a progress update, inside a batch in flight. A stop in the moment between two batches can see one more `POST` start about 100 µs later: it passed the check of `stop` before the stop came, and is awaited and counted like any batch in flight.
 
 The nightly workflow runs this as the job `nf3`, on Linux.
+
+### Record of the headless run (M5)
+
+Measured on the finished M5 branch (`b036c25`), release builds, Apple M3 Max with 128 GB, macOS 27.0.1, Typesense 30.2 from `dev/docker-compose.yml` on port 18108, 1,000,000 documents of about 1 KB each, `--app-baseline-mb 93`:
+
+| Format | Time | Documents per second | Peak RSS (MB) | Engine RSS (MB) | Total with the app (MB) | Slowest batch | Stop latency |
+|---|---|---|---|---|---|---|---|
+| JSONL | 33.7 s | 29,659 | 33.1 | 24.6 | 117.6 | 214 ms | 13 ms |
+| JSON array | 35.2 s | 28,429 | 29.2 | 19.7 | 112.7 | 201 ms | 17 ms |
+| CSV | 39.5 s | 25,290 | 30.0 | 21.6 | 114.6 | 286 ms | 17 ms |
+
+All three passed every check against the 300 MB limit. The app's baseline from three smoke starts of `target/release/tessera` was 93.0 MB (the first, cold start), then 64.1 and 64.0 MB; the table uses the 93.0. This is macOS: the nightly job measures Linux, and the numbers above do not stand for it. The collections `tessera_nf3` and `tessera_nf3_cancel` were gone afterwards.
+
 
 ## Smoke start
 
