@@ -92,7 +92,7 @@ impl Fixture {
     fn open_search(&self, cx: &mut TestAppContext) {
         cx.update(|cx| {
             self.state
-                .update(cx, |s, cx| s.open_search(self.id, None, cx))
+                .update(cx, |s, cx| s.open_search(self.id, None, None, cx))
         });
         self.settle(cx);
     }
@@ -223,6 +223,18 @@ async fn lists_actions_of_the_focused_view_only(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn resource_tabs_are_listed_for_the_selected_connection(cx: &mut TestAppContext) {
+    let f = Fixture::on_search(cx).await;
+    f.palette(cx);
+    f.query(cx, "synonyms");
+    assert!(!f.has_action(cx, "OpenSynonyms"));
+    f.press(cx, SELECT_ALL);
+    f.press(cx, "backspace");
+    f.query(cx, "aliases");
+    assert!(f.has_action(cx, "OpenAliases"));
+}
+
+#[gpui_kit::test]
 async fn dispatch_runs_in_the_previous_focus(cx: &mut TestAppContext) {
     let f = Fixture::on_documents(cx, Profile::new("test", vec![node()])).await;
     f.select_row(cx);
@@ -315,7 +327,7 @@ async fn collections_of_every_connection_are_listed_with_their_badge(cx: &mut Te
     f.open_search(cx);
     cx.update(|cx| {
         f.state
-            .update(cx, |s, cx| s.open_search(second_id, None, cx))
+            .update(cx, |s, cx| s.open_search(second_id, None, None, cx))
     });
     f.settle(cx);
     f.palette(cx);

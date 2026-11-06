@@ -24,8 +24,8 @@ use tessera_core::relevance::{AliasState, alias_state, name_ok};
 
 use super::super::overview::grouped;
 use super::{
-    Danger, ListRow, ResourceColumn, ResourceList, client_of, confirm_write, empty_state, notice,
-    row_button, toolbar,
+    Danger, ListRow, ResourceColumn, ResourceList, client_of, confirm_write, dialog_title,
+    empty_state, notice, row_button, toolbar,
 };
 use crate::actions::{
     ALIAS_DIALOG, DeleteResource, EditResource, FocusResourceFilter, NewResource, ReloadResource,
@@ -128,7 +128,7 @@ impl AliasesView {
                         count_text(collections, &alias.collection_name),
                         state_text(state),
                     ],
-                    warning: state != AliasState::Ok,
+                    warning: (state != AliasState::Ok).then_some(3),
                 }
             })
             .collect();
@@ -203,13 +203,13 @@ impl AliasesView {
                     expected: name.clone(),
                     action: t!("aliases.delete").to_string(),
                     typed: prod,
-                    prod,
                 };
                 let view = this.clone();
+                let conn = connection.clone();
                 let run = move |_: &mut Window, cx: &mut App| {
-                    send_delete(view.clone(), connection.clone(), name.clone(), cx)
+                    send_delete(view.clone(), conn.clone(), name.clone(), cx)
                 };
-                confirm_write(danger, run, report_to(this), window, cx);
+                confirm_write(danger, &connection, run, report_to(this), window, cx);
             });
         });
     }
@@ -402,6 +402,7 @@ impl AliasDialog {
         window: &mut Window,
         cx: &mut App,
     ) -> WeakEntity<Self> {
+        let shown = connection.clone();
         let dialog = cx.new(|cx| Self::new(view, connection, repoint, window, cx));
         let weak = dialog.downgrade();
         let title = t!(if dialog.read(cx).repoint.is_some() {
@@ -424,7 +425,8 @@ impl AliasDialog {
                 }
             }
             let enter = dialog.clone();
-            d.title(title.clone())
+            let heading = dialog_title(title.clone(), &shown, cx);
+            d.title(heading)
                 .w(px(DIALOG_WIDTH))
                 // The dialog's Enter binding wins over the focused button's own key handling.
                 .on_ok(move |_, window, cx| {
@@ -602,7 +604,6 @@ impl AliasDialog {
             expected: name.clone(),
             action: t!("resources.new").to_string(),
             typed: false,
-            prod: true,
         };
         self.confirm(danger, name, target, window, cx);
     }
@@ -636,7 +637,6 @@ impl AliasDialog {
             expected: name.clone(),
             action: t!("aliases.repoint").to_string(),
             typed: prod,
-            prod,
         };
         self.confirm(danger, name, new, window, cx);
     }
@@ -653,7 +653,8 @@ impl AliasDialog {
         let run = move |_: &mut Window, cx: &mut App| {
             send_save(connection.clone(), name.clone(), target.clone(), cx)
         };
-        confirm_write(danger, run, report_to(self.view.clone()), window, cx);
+        let report = report_to(self.view.clone());
+        confirm_write(danger, &self.connection, run, report, window, cx);
     }
 
     /// Turns a New that named an existing alias into its Repoint.

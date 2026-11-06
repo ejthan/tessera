@@ -146,7 +146,10 @@ impl RootView {
                     .and_then(|id| connection_tab(this.dock.read(cx), id));
                 if let Some(ConnectionTab::Search(panel)) = tab {
                     let workbench = panel.read(cx).workbench().clone();
-                    workbench.update(cx, |w, cx| w.load(drafts, union, window, cx));
+                    workbench.update(cx, |w, cx| {
+                        w.load(drafts, union, window, cx);
+                        w.set_preset(event.2.clone(), cx);
+                    });
                 }
             }),
             cx.subscribe_in(
@@ -711,7 +714,8 @@ impl Render for RootView {
             }))
             .when_some(can_search, |el, id| {
                 el.on_action(cx.listener(move |this, _: &OpenSearchTab, _, cx| {
-                    this.state.update(cx, |s, cx| s.open_search(id, None, cx));
+                    this.state
+                        .update(cx, |s, cx| s.open_search(id, None, None, cx));
                 }))
                 .on_action(cx.listener(
                     move |this, _: &OpenConsoleTab, _, cx| {

@@ -91,8 +91,12 @@ pub struct OpenCollections(pub Uuid);
 pub struct OpenCollection(pub Uuid, pub String);
 
 /// Asks the window to show the search tab of a profile, with `.1` loaded into it when given:
-/// the searches and whether they run as a union.
-pub struct OpenSearch(pub Uuid, pub Option<(Vec<SearchDraft>, bool)>);
+/// the searches and whether they run as a union. `.2` then names the preset they edit.
+pub struct OpenSearch(
+    pub Uuid,
+    pub Option<(Vec<SearchDraft>, bool)>,
+    pub Option<String>,
+);
 
 /// Asks the window to show the console tab of a profile.
 pub struct OpenConsole(pub Uuid);
@@ -877,10 +881,11 @@ impl AppState {
         &mut self,
         id: Uuid,
         loaded: Option<(Vec<SearchDraft>, bool)>,
+        preset: Option<String>,
         cx: &mut Context<Self>,
     ) {
         self.selected = Some(id);
-        cx.emit(OpenSearch(id, loaded));
+        cx.emit(OpenSearch(id, loaded, preset));
         cx.notify();
     }
 

@@ -34,8 +34,9 @@ use tessera_widgets::confirm;
 use uuid::Uuid;
 
 use super::super::env_badge;
+use super::super::resources::titled;
 use super::{SearchWorkbench, param_error_text};
-use crate::actions::{DeleteSavedQuery, QUERY_LIST, WORKBENCH};
+use crate::actions::{DeleteSavedQuery, QUERY_LIST, SaveQuery, WORKBENCH};
 use crate::connection::error_text;
 use crate::search::SearchBackendGlobal;
 
@@ -158,7 +159,8 @@ pub(super) struct PendingHistory {
     answered: bool,
 }
 
-fn preset_error_text(error: &PresetError) -> String {
+/// What is wrong with a preset's value.
+pub(crate) fn preset_error_text(error: &PresetError) -> String {
     match error {
         PresetError::NotAnObject => t!("search.preset.not_an_object").to_string(),
         PresetError::TooMany => t!("search.preset.too_many", n = MULTI_SEARCH_LIMIT).to_string(),
@@ -546,7 +548,7 @@ impl SearchWorkbench {
     }
 
     pub(super) fn save_blocked(&self, cx: &App) -> bool {
-        self.run_blocked() || self.state.read(cx).saved_error.is_some()
+        self.run_blocked() || (self.preset.is_none() && self.state.read(cx).saved_error.is_some())
     }
 
     /// Opens the Save dialog.
@@ -662,6 +664,93 @@ impl SearchWorkbench {
             window,
             cx,
         );
+    }
+
+    /// Saves to the preset of preset mode, keys left out, asking first on prod.
+    pub(super) fn save_preset_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.preset.clone().filter(|_| !self.save_blocked(cx)) else {
+            return;
+        };
+        let value = match preset_value(&without_secrets(&self.drafts), self.union) {
+            Ok(value) => value,
+            Err(error) => {
+                self.queries.write_error = Some(param_error_text(&error).into());
+                return cx.notify();
+            }
+        };
+        let this = cx.entity().downgrade();
+        let profile = self.connection.read(cx).profile.clone();
+        let prod = profile.environment.is_prod();
+        self.connection.update(cx, |c, cx| {
+            c.ensure_writable(window, cx, move |window, cx| {
+                let send = {
+                    let name = name.clone();
+                    move |cx: &mut App| {
+                        this.update(cx, |this, cx| {
+                            this.send_preset(name.clone(), value.clone(), cx);
+                        })
+                        .ok();
+                    }
+                };
+                if !prod {
+                    return send(cx);
+                }
+                confirm::open(
+                    titled(&t!("presets.save_title", name = name), &profile),
+                    t!("presets.save_line", name = name).to_string(),
+                    t!("presets.save").to_string(),
+                    move |_, cx| send(cx),
+                    window,
+                    cx,
+                );
+            });
+        });
+    }
+
+    /// The band of preset mode.
+    pub(super) fn preset_band(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let name = self.preset.as_ref()?;
+        let text = SharedString::from(t!("presets.mode", name = name).to_string());
+        let locked = self.connection.read(cx).writes_locked();
+        Some(
+            h_flex()
+                .id("presets.band")
+                .test_support()
+                .aria_label(text.clone())
+                .flex_none()
+                .gap_3()
+                .px_2()
+                .py_1()
+                .items_center()
+                .text_sm()
+                .bg(cx.theme().accent)
+                .text_color(cx.theme().accent_foreground)
+                .child(div().flex_1().truncate().child(text))
+                .child(
+                    Button::new("presets.save")
+                        .primary()
+                        .small()
+                        .label(t!("presets.save").to_string())
+                        .when(locked, |b| {
+                            b.child(env_badge::lock("presets.save", false, cx))
+                        })
+                        .children(Kbd::binding_for_action(&SaveQuery, Some(WORKBENCH), window))
+                        .disabled(self.save_blocked(cx))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.save_preset_mode(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("presets.leave")
+                        .small()
+                        .label(t!("presets.leave").to_string())
+                        .on_click(cx.listener(|this, _, _, cx| this.set_preset(None, cx))),
+                ),
+        )
     }
 
     /// Detached: closing the tab must not abort a write.

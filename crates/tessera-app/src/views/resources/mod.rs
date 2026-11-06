@@ -3,6 +3,9 @@
 //! The views of the relevance resources, one tab per connection and kind.
 
 pub mod aliases;
+pub mod name_dialog;
+pub mod presets;
+pub mod stopwords;
 
 use std::rc::Rc;
 
@@ -18,20 +21,27 @@ use gpui_kit::{
     Task, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
-use tessera_client::Client;
+use tessera_client::{Client, Error};
+use tessera_core::profile::Profile;
 use tessera_widgets::confirm;
 use tessera_widgets::confirm_danger::{self, DangerOptions};
 
 use self::aliases::AliasesView;
+use self::presets::PresetsView;
+use self::stopwords::StopwordsView;
 use super::env_badge;
 use crate::actions::{FocusResourceFilter, NewResource, RESOURCES, ReloadResource};
-use crate::connection::ConnectionState;
+use crate::connection::{ConnectionState, error_text};
 use crate::state::{AppState, ResourceKind};
 
 /// The view inside a resource tab.
 pub enum ResourceView {
     /// See [`AliasesView`].
     Aliases(Entity<AliasesView>),
+    /// See [`StopwordsView`].
+    Stopwords(Entity<StopwordsView>),
+    /// See [`PresetsView`].
+    Presets(Entity<PresetsView>),
     /// A kind whose view has not arrived: no sidebar row, shortcut or palette entry reaches it.
     Pending(Entity<PendingView>),
 }
@@ -41,7 +51,7 @@ impl ResourceView {
     pub fn new(
         kind: ResourceKind,
         connection: Entity<ConnectionState>,
-        _state: Entity<AppState>,
+        state: Entity<AppState>,
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
@@ -49,10 +59,18 @@ impl ResourceView {
             ResourceKind::Aliases => {
                 Self::Aliases(cx.new(|cx| AliasesView::new(connection, window, cx)))
             }
-            _ => Self::Pending(cx.new(|cx| PendingView {
-                kind,
-                focus_handle: cx.focus_handle(),
-            })),
+            ResourceKind::Stopwords => {
+                Self::Stopwords(cx.new(|cx| StopwordsView::new(connection, window, cx)))
+            }
+            ResourceKind::Presets => {
+                Self::Presets(cx.new(|cx| PresetsView::new(connection, state, window, cx)))
+            }
+            ResourceKind::Synonyms | ResourceKind::Curations => {
+                Self::Pending(cx.new(|cx| PendingView {
+                    kind,
+                    focus_handle: cx.focus_handle(),
+                }))
+            }
         }
     }
 
@@ -60,6 +78,8 @@ impl ResourceView {
     pub fn view(&self) -> AnyView {
         match self {
             Self::Aliases(view) => view.clone().into(),
+            Self::Stopwords(view) => view.clone().into(),
+            Self::Presets(view) => view.clone().into(),
             Self::Pending(view) => view.clone().into(),
         }
     }
@@ -68,6 +88,8 @@ impl ResourceView {
     pub fn focus_handle(&self, cx: &App) -> FocusHandle {
         match self {
             Self::Aliases(view) => view.focus_handle(cx),
+            Self::Stopwords(view) => view.focus_handle(cx),
+            Self::Presets(view) => view.focus_handle(cx),
             Self::Pending(view) => view.read(cx).focus_handle.clone(),
         }
     }
@@ -76,6 +98,8 @@ impl ResourceView {
     pub fn gates(&self, cx: &App) -> Vec<(bool, &'static dyn Action)> {
         match self {
             Self::Aliases(view) => view.read(cx).gates(cx),
+            Self::Stopwords(view) => view.read(cx).gates(cx),
+            Self::Presets(view) => view.read(cx).gates(cx),
             Self::Pending(_) => Vec::new(),
         }
     }
@@ -107,8 +131,8 @@ pub struct ListRow {
     pub key: String,
     /// The cells, as text. The first is matched by the filter, like all of them.
     pub cells: Vec<String>,
-    /// The last cell states a problem.
-    pub warning: bool,
+    /// The cell that states a problem.
+    pub warning: Option<usize>,
 }
 
 /// The table's data: every row, and the part that passes the filter.
@@ -177,7 +201,6 @@ impl TableDelegate for ListRows {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let (prefix, column) = (self.prefix, self.columns[col_ix].0);
-        let warn = col_ix + 1 == self.columns.len();
         let warning = cx.theme().warning;
         let Some(row) = self.row(row_ix) else {
             return div().into_any_element();
@@ -188,7 +211,7 @@ impl TableDelegate for ListRows {
             .test_support()
             .aria_label(text.clone())
             .truncate()
-            .when(warn && row.warning, |el| el.text_color(warning))
+            .when(row.warning == Some(col_ix), |el| el.text_color(warning))
             .child(text)
             .into_any_element()
     }
@@ -289,6 +312,11 @@ impl ResourceList {
         let table = self.table.read(cx);
         let row = table.delegate().row(table.selected_row()?)?;
         Some(row.key.clone())
+    }
+
+    /// Whether there are no rows at all.
+    pub(super) fn is_empty(&self, cx: &App) -> bool {
+        self.table.read(cx).delegate().all.is_empty()
     }
 
     /// Puts the cursor in the filter.
@@ -432,6 +460,40 @@ pub(super) fn client_of(connection: &Entity<ConnectionState>, cx: &App) -> Optio
     connected.map(|c| c.client.clone())
 }
 
+/// Why a list failed to load. A key that may not read it says so.
+pub(super) fn list_error_text(error: &Error, profile: &Profile) -> SharedString {
+    let detail = error_text(error, profile);
+    match error {
+        Error::Http {
+            status: 401 | 403, ..
+        } => t!("resources.forbidden", detail = detail)
+            .to_string()
+            .into(),
+        _ => detail.into(),
+    }
+}
+
+/// `title` with the connection and environment, for a title that holds only text.
+pub(crate) fn titled(title: &str, profile: &Profile) -> String {
+    let environment = env_badge::label(&profile.environment);
+    format!("{title} · {} · {environment}", profile.name)
+}
+
+/// A dialog's title with the connection and environment (UX rule 1).
+pub(super) fn dialog_title(
+    title: String,
+    connection: &Entity<ConnectionState>,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let profile = &connection.read(cx).profile;
+    h_flex()
+        .gap_2()
+        .items_center()
+        .child(title)
+        .child(div().text_sm().child(profile.name.clone()))
+        .child(env_badge::render(&profile.environment, cx))
+}
+
 /// What a destructive write asks (D62).
 pub(super) struct Danger {
     pub title: String,
@@ -442,32 +504,36 @@ pub(super) struct Danger {
     pub action: String,
     /// Asks for the name instead of a plain confirmation.
     pub typed: bool,
-    /// Shows the PROD badge.
-    pub prod: bool,
 }
 
 /// Asks, then runs `run`. Cancelling sends nothing. A typed confirmation shows a failure in its
 /// dialog; after a plain one, which is closed by then, `on_error` gets it.
 pub(super) fn confirm_write(
     danger: Danger,
+    connection: &Entity<ConnectionState>,
     run: impl Fn(&mut Window, &mut App) -> Task<Result<(), SharedString>> + 'static,
     on_error: impl Fn(SharedString, &mut App) + 'static,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let profile = &connection.read(cx).profile;
+    let (title, prod) = (
+        titled(&danger.title, profile),
+        profile.environment.is_prod(),
+    );
     if danger.typed {
         let options = DangerOptions {
-            title: danger.title.into(),
+            title: title.into(),
             consequences: danger.lines.into_iter().map(Into::into).collect(),
             expected: danger.expected.into(),
             action_label: danger.action.into(),
-            prod: danger.prod,
+            prod,
         };
         return confirm_danger::open(options, run, window, cx);
     }
     let on_error = Rc::new(on_error);
     confirm::open(
-        danger.title,
+        title,
         danger.lines.join(" "),
         danger.action,
         move |window, cx| {

@@ -526,7 +526,7 @@ impl Sidebar {
                     .or_insert_with(|| cx.focus_handle().tab_stop(true))
                     .clone();
                 let open = Rc::new(move |cx: &mut gpui_kit::App| {
-                    state.update(cx, |s, cx| s.open_search(id, None, cx))
+                    state.update(cx, |s, cx| s.open_search(id, None, None, cx))
                 });
                 el.child(Self::link_row(
                     format!("sidebar.{id}.search"),

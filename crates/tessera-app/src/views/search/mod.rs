@@ -9,6 +9,8 @@ mod multi;
 mod queries;
 mod results;
 
+pub(crate) use queries::preset_error_text;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -158,6 +160,8 @@ pub struct SearchWorkbench {
     pending_history: Option<PendingHistory>,
     /// The wait until an instant run counts as settled.
     history_task: Option<Task<()>>,
+    /// The preset these drafts edit: Save goes there.
+    preset: Option<String>,
     queries: Queries,
     export: ExportState,
     focus_handle: FocusHandle,
@@ -242,6 +246,7 @@ impl SearchWorkbench {
             pending_history: None,
             history_task: None,
             queries,
+            preset: None,
             export: ExportState::default(),
             focus_handle: cx.focus_handle(),
         };
@@ -263,6 +268,7 @@ impl SearchWorkbench {
         }
         self.union = union && drafts.len() > 1;
         self.drafts = drafts;
+        self.preset = None;
         self.active = 0;
         self.instant_task = None;
         // Its answer would show under drafts that did not ask for it.
@@ -293,6 +299,17 @@ impl SearchWorkbench {
     fn sync_paging_lock(&self, cx: &mut Context<Self>) {
         let locked = self.union && self.active > 0;
         self.form.update(cx, |f, cx| f.lock_paging(locked, cx));
+    }
+
+    /// The preset these drafts edit.
+    pub fn preset(&self) -> Option<&str> {
+        self.preset.as_deref()
+    }
+
+    /// Enters preset mode on `name`, or leaves it, keeping the drafts.
+    pub fn set_preset(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.preset = name;
+        cx.notify();
     }
 
     /// The drafts.
@@ -1042,7 +1059,13 @@ impl Render for SearchWorkbench {
             .on_action(cx.listener(|this, _: &OpenPresets, window, cx| {
                 this.toggle_list(QueryList::Presets, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &SaveQuery, window, cx| this.ask_save(window, cx)))
+            .on_action(cx.listener(|this, _: &SaveQuery, window, cx| {
+                if this.preset.is_some() {
+                    this.save_preset_mode(window, cx);
+                } else {
+                    this.ask_save(window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.step_list(-1, cx)))
             .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.step_list(1, cx)))
             .on_action(cx.listener(|this, _: &LoadQuery, window, cx| {
@@ -1060,6 +1083,7 @@ impl Render for SearchWorkbench {
             .size_full()
             .child(tabs)
             .children(self.limit_note(cx))
+            .children(self.preset_band(window, cx))
             .child(toolbar)
             .children(self.write_note(cx))
             .children(self.instant_note(cx))

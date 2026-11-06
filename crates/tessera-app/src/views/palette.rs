@@ -309,7 +309,7 @@ fn confirm(view: &Entity<CommandPalette>, path: IndexPath, window: &mut Window, 
                     return;
                 };
                 let loaded = Some((query.searches, query.union));
-                state.update(cx, |s, cx| s.open_search(query.profile, loaded, cx));
+                state.update(cx, |s, cx| s.open_search(query.profile, loaded, None, cx));
             }
             PaletteTarget::Connection(id) => state.update(cx, |s, cx| s.connect(id, None, cx)),
         }
