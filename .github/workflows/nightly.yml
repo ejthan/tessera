@@ -71,3 +71,24 @@ jobs:
         run: |
           kb=$(TESSERA_SMOKE=1 xvfb-run -a /usr/bin/time -f %M target/release/tessera 2>&1 >/dev/null | tail -1)
           cargo run --release --locked -p xtask -- nf3 --url http://localhost:8108 --app-baseline-mb $((kb / 1024))
+
+  ai-builtin:
+    runs-on: ubuntu-24.04
+    services:
+      typesense:
+        image: typesense/typesense:30.2
+        # Service containers cannot take arguments, so pass them as env.
+        env:
+          TYPESENSE_DATA_DIR: /tmp
+          TYPESENSE_API_KEY: xyz
+        ports:
+          - 8108:8108
+        # Lets the server reach the stub of a test on the runner.
+        options: --add-host=host.docker.internal:host-gateway
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.3
+      - run: cargo test -p tessera-client --test live_ai --locked -- --ignored
+        env:
+          TESSERA_IT_URL: http://localhost:8108
+          TESSERA_IT_STUB_HOST: host.docker.internal

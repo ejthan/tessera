@@ -2,6 +2,7 @@
 
 //! Domain logic for Tessera that does not depend on the UI.
 
+pub mod ai;
 pub mod analytics;
 pub mod cli;
 pub mod curl;

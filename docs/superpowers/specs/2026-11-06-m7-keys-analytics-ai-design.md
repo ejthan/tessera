@@ -184,7 +184,7 @@ Traps (both, unless noted):
 - Conversation validation: `Property history_collection is missing or is not a string.`, `Schema is missing conversation_id field`, `Collection not found`, `Property max_bytes is not provided or not a positive integer.` (also on `PUT`), `API key is not provided`, `Model namespace nope is not supported.`.
 - NL validation: `Property model_name is not provided or not a string.`, `Property max_bytes is not provided or not a positive integer.`. `max_bytes` is checked before the namespace.
 - **A masked key is still accepted by a lenient provider.** A collection's `embed.model_config.api_key` reads as `sk-st*********`, and a create with that string answers 201 against a provider that ignores it. M2's blanking of clones stays necessary.
-- **`nl_query` falls back silently.** An unknown `nl_model_id` answers **200** with a plain search of the sentence and no `parsed_nl_query`. When the LLM fails, the docs promise an `error` field. The panel must treat a missing `parsed_nl_query` as failure (§7.6).
+- **`nl_query` falls back silently.** An unknown `nl_model_id` answers **200** with a plain search of the sentence. A failing model too. Measured on 30.0 and 30.2 against the stub: both carry `parsed_nl_query.error` and empty `generated_params`, not the top-level `error` the docs promise. `api_url` is the whole address, the server posts to it as it stands. The panel treats `error` in either place, and a missing `parsed_nl_query`, as failure (§7.6).
 - `conversation=true` with an unknown model: 400 `Model not found`. Same with `conversation_id=nope` while the model is unknown. The answer holds `conversation.answer`, `conversation.conversation_id` and `conversation.conversation_history`. The history collection receives one document per message.
 - `POST /multi_search?conversation=true&…` answers `conversation` at the top level. `Client::search` unwraps `results[0]` and would lose it, so a chat stays below the 4,000-byte `GET` limit (§7.6).
 - **`query_by` naming a plain vector field:** 400 on 30.2, `Vector field e is not an auto-embedding field…`; **30.0 gives no answer** within 25 s when combined with `conversation=true`. The panel only offers text fields and auto-embedding fields.
@@ -348,7 +348,7 @@ pub const BUILT_IN_MODELS: [&str; 2];                   // "ts/all-MiniLM-L12-v2
 
 `chat_params` writes `q`, `query_by`, `conversation=true`, `conversation_model_id`, `conversation_id` when continuing, `exclude_fields` from `documents::columns::exclude_fields`, `enable_analytics=false` (D35), `per_page=5`. `nl_params` writes `q`, `query_by`, `nl_query=true`, `nl_model_id`, `nl_query_debug=true`, the same `exclude_fields` and `enable_analytics=false`.
 
-`nl_outcome`: an `error` field beside the hits is `Failed`, no `parsed_nl_query` is `FellBack`, otherwise `Parsed`.
+`nl_outcome`: an `error` field beside the hits or in `parsed_nl_query` is `Failed`, no `parsed_nl_query` is `FellBack`, otherwise `Parsed`.
 
 `set_embedding` writes `embed` as a `Value`, keeping unknown keys of an existing `embed` and writing `api_key` only when `Some`, and clears `num_dim`.
 

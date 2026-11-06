@@ -10,6 +10,7 @@ mod event;
 mod export;
 mod keys;
 mod models;
+mod models_ai;
 mod raw;
 mod search;
 mod send;
@@ -33,6 +34,7 @@ pub use event::{BODY_LIMIT, Body, FULL_BODY_MAX, Origin, RequestEvent, RequestHo
 pub use export::{ExportQuery, ExportStream, MAX_LINE, STREAM_STALL};
 pub use keys::{ApiKey, CreatedKey, NewKey};
 pub use models::{CollectionSummary, Debug, Health, KeyAccess, Metrics, RaftState, Stats};
+pub use models_ai::{AI_TIMEOUT, ModelKind};
 pub use raw::{RawBody, RawRequest, RawResponse};
 pub use reqwest::Method;
 pub use search::{
@@ -129,6 +131,14 @@ impl fmt::Debug for Client {
 fn resource_path(root: &str, name: &str) -> Result<String, Error> {
     collections::addressable(name)?;
     Ok(format!("{root}/{}", documents::segment(name)))
+}
+
+/// Whether a schema or patch has an embedding field, whose config can hold a provider key and
+/// whose write can download a model.
+fn has_embed(schema: &Value) -> bool {
+    schema["fields"]
+        .as_array()
+        .is_some_and(|fields| fields.iter().any(|f| f.get("embed").is_some()))
 }
 
 fn parse_node(input: &str) -> Result<Url, Error> {
@@ -470,9 +480,15 @@ impl Client {
         pin: Option<usize>,
         schema: &Value,
     ) -> Result<Collection, Error> {
-        let body = self
-            .write(pin, Method::POST, "collections", None, Some(schema), None)
-            .await?;
+        let body = if has_embed(schema) {
+            let long = Some(LONG_TIMEOUT);
+            self.without_bodies()
+                .write(pin, Method::POST, "collections", None, Some(schema), long)
+                .await?
+        } else {
+            self.write(pin, Method::POST, "collections", None, Some(schema), None)
+                .await?
+        };
         serde_json::from_str(&body).map_err(Error::Decode)
     }
 
@@ -484,7 +500,13 @@ impl Client {
     ) -> Result<(), Error> {
         let path = collections::collection_path(name, "")?;
         let long = Some(LONG_TIMEOUT);
-        self.write(pin, Method::PATCH, &path, None, Some(patch), long)
+        let client = if has_embed(patch) {
+            self.without_bodies()
+        } else {
+            self.clone()
+        };
+        client
+            .write(pin, Method::PATCH, &path, None, Some(patch), long)
             .await
             .map(drop)
     }

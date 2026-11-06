@@ -85,6 +85,10 @@ jobs:
           TESSERA_IT_URL: http://localhost:8108
           TESSERA_IT_ANALYTICS: "1"
           TESSERA_IT_STUB_HOST: host.docker.internal
+      - run: cargo test -p tessera-client --test live_ai --locked -- --ignored --skip live_builtin_model
+        env:
+          TESSERA_IT_URL: http://localhost:8108
+          TESSERA_IT_STUB_HOST: host.docker.internal
       - run: cargo test -p tessera-core --test live_scoped --test live_actions --locked -- --ignored
         env:
           TESSERA_IT_URL: http://localhost:8108
