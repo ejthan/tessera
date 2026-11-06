@@ -59,7 +59,7 @@ Product spec §7.5 without its P2 parts, §7.17 and §7.20, the §7.19 full view
 New module `crates/tessera-client/src/search.rs`. Parameters arrive as validated pairs from core (§5.1); the client does not interpret them. Responses stay text, because the Raw tab shows what the server said and core parses it on the tokio worker.
 
 ```rust
-pub const GET_QUERY_LIMIT: usize = 4000;   // bytes of encoded query
+pub const GET_QUERY_LIMIT: usize = 4000;   // an encoded query of this length or more goes by POST (GET at 4000 is a 400)
 pub const MULTI_SEARCH_LIMIT: usize = 50;  // the server's default limit_multi_searches
 
 pub enum SearchRoute { Get { path: String, query: String }, Post { query: Option<String>, body: Value } }
@@ -78,7 +78,7 @@ pub struct Preset { pub name: String, pub value: Value }
 
 | Method | Endpoint | Confirmed behaviour |
 |---|---|---|
-| `search(c, params) -> String` | `GET …/documents/search`, or `POST /multi_search` with one search when the encoded query exceeds `GET_QUERY_LIMIT` | The answer of a one-search `multi_search` equals the `GET` answer, `search_time_ms` aside. An 11 KB filter passes. String values such as `"per_page":"1"` and `"enable_analytics":"false"` are honoured, so pairs convert without typing |
+| `search(c, params) -> String` | `GET …/documents/search`, or `POST /multi_search` with one search when the encoded query is `GET_QUERY_LIMIT` bytes or more (3,999 passes by GET, 4,000 is a 400) | The answer of a one-search `multi_search` equals the `GET` answer, `search_time_ms` aside. An 11 KB filter passes. String values such as `"per_page":"1"` and `"enable_analytics":"false"` are honoured, so pairs convert without typing |
 | `multi_search(&MultiSearch) -> String` | `POST /multi_search[?page=&per_page=]` | See §4.3. A form-encoded content type is accepted too, so a curl heredoc without `-H content-type` works. Body stays `application/json` here |
 | `preset(name) -> Value` | `GET /presets/{name}` | 404 `Not found.` |
 | `presets() -> Vec<Preset>` | `GET /presets` | `{"presets":[{"name","value"}]}` |
@@ -93,7 +93,7 @@ pub struct Preset { pub name: String, pub value: Value }
 
 D34. `Client` gains a private `read_post: bool`, false everywhere except a clone made inside `search`, `search_raw` and `multi_search`. In `send`, the guard also passes `POST` when `read_post` is set. In `call`, such a request fails over like a `GET`. The flag has no public setter, so `raw()` cannot reach it and a console `POST /multi_search` on a read-only profile is refused, which keeps §7.17's "GET only" literal.
 
-`Filter::writes_only` in `tessera-core/src/log.rs` stops counting a path ending in `/multi_search` as a write.
+`Filter::writes_only` in `tessera-core/src/log.rs` stops counting a `POST` to a path ending in `/multi_search` as a write. Other methods stay writes, so `DELETE /collections/multi_search` is not hidden.
 
 ### 4.3 Traps found while probing
 
@@ -579,7 +579,7 @@ Checked against `gpui-base-0.9.0/src/input/base/state.rs`: Ctrl+Y is the kit's r
 
 | Level | What it checks |
 |---|---|
-| Client unit (`wiremock`) | Route at 4,000 and 4,001 bytes; `read_post` passes a read-only client and fails over; `raw` refuses a foreign origin; `raw` keeps response headers; embedded error mapping for union and for a one-search fallback; union page in the URL; preset paths |
+| Client unit (`wiremock`) | Route at 3,999 and 4,000 bytes; `read_post` passes a read-only client and fails over; `raw` refuses a foreign origin; `raw` keeps response headers; embedded error mapping for union and for a one-search fallback; union page in the URL; preset paths |
 | Client integration (`#[ignore]`, 30.0 and 30.2) | `search`, long filter over POST with the same answer, federated with one failing search, union, union uniform error, presets create, read, list, delete, `raw` GET and POST, read-only refuses `raw` POST |
 | Core unit | Param allowlist table; `to_pairs`; `side_effects`; `marks`; highlight walk with arrays and nesting; `facet_value_ok`, `toggle_facet` table including `\|\|`; `parse_sort` with `_eval`; export snapshots with hostile strings; history skip, redaction, rotation; saved load errors; `parse_path` table with every spelling from §5.7; `raw_danger` table; `outcome_note`; OpenAPI scanner; fuzzy order; keymap parse; `RequestLog` budget and eviction |
 | Acceptance (`#[ignore]`, 30.0 and 30.2) | `tests/live.rs`: for a `q` with quotes and a filter with `&&`, spaces and backticks, run the exported curl through `sh -c` with `TYPESENSE_API_KEY` set, compare JSON with the client's answer minus `search_time_ms`, for a GET route, a POST route and a multi-search |

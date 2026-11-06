@@ -2,6 +2,8 @@
 
 //! Facet clicks as edits of the `filter_by` text, which is the only filter state.
 
+use super::split_top;
+
 /// The element type of a field type: `int32[]` is `int32`.
 fn base_type(field_type: &str) -> &str {
     field_type.strip_suffix("[]").unwrap_or(field_type)
@@ -68,37 +70,6 @@ pub fn facet_clause(field: &str, field_type: &str, values: &[&str]) -> Option<St
     })
 }
 
-/// Splits `text` at `sep` outside backticks, parentheses and brackets. `None` when they do
-/// not balance.
-fn split_top<'a>(text: &'a str, sep: &str) -> Option<Vec<&'a str>> {
-    let (mut depth, mut tick, mut start, mut i) = (0usize, false, 0, 0);
-    let mut parts = Vec::new();
-    while i < text.len() {
-        let c = text[i..].chars().next()?;
-        if c == '`' {
-            tick = !tick;
-        } else if !tick {
-            match c {
-                '(' | '[' => depth += 1,
-                ')' | ']' => depth = depth.checked_sub(1)?,
-                _ if depth == 0 && text[i..].starts_with(sep) => {
-                    parts.push(&text[start..i]);
-                    i += sep.len();
-                    start = i;
-                    continue;
-                }
-                _ => {}
-            }
-        }
-        i += c.len_utf8();
-    }
-    if tick || depth != 0 {
-        return None;
-    }
-    parts.push(&text[start..]);
-    Some(parts)
-}
-
 /// The top-level `&&` clauses of `filter`, trimmed. `None` for a filter this module will not
 /// edit: unbalanced, or with a top-level `||`.
 fn and_clauses(filter: &str) -> Option<Vec<&str>> {
@@ -114,40 +85,67 @@ fn and_clauses(filter: &str) -> Option<Vec<&str>> {
     )
 }
 
-/// The values of a clause this module wrote for `field`, in `` field:=`a` `` or
-/// `` field:=[`a`,`b`] `` form. `None` for anything else, or a value it would not write.
-fn own_values(clause: &str, field: &str) -> Option<Vec<String>> {
+/// The form `facet_clause` writes for a value: backticks around a string, nothing around a
+/// number or a boolean. `kind` is the field's base type, or `None` when it is not known, which
+/// accepts either form.
+fn own_item(item: &str, kind: Option<&str>) -> Option<String> {
+    let item = item.trim();
+    let quoted = item
+        .strip_prefix('`')
+        .and_then(|rest| rest.strip_suffix('`'));
+    let string_ok = |v: &str| facet_value_ok("string", v);
+    let literal_type = |base: &str| is_numeric(base) || base == "bool";
+    let bare_ok = |v: &str| match kind {
+        Some(base) => literal_type(base) && facet_value_ok(base, v),
+        None => ["int64", "float", "bool"]
+            .iter()
+            .any(|t| facet_value_ok(t, v)),
+    };
+    let wants_string = kind.is_none_or(|base| !literal_type(base));
+    match quoted {
+        Some(v) if wants_string && string_ok(v) => Some(v.to_string()),
+        Some(_) => None,
+        None => bare_ok(item).then(|| item.to_string()),
+    }
+}
+
+/// The values of a clause this module wrote for `field` in `` field:=`a` `` or
+/// `` field:=[`a`,`b`] `` form. `None` for anything else: a range, a prefix match, `!=`, or a
+/// value of the wrong form for the type.
+fn own_values(clause: &str, field: &str, kind: Option<&str>) -> Option<Vec<String>> {
     let rest = clause.strip_prefix(field)?.strip_prefix(":=")?;
     let items = match rest.strip_prefix('[') {
         Some(inner) => split_top(inner.strip_suffix(']')?, ",")?,
         None => vec![rest],
     };
-    items
-        .into_iter()
-        .map(|item| {
-            let item = item.trim();
-            let value = match item.strip_prefix('`') {
-                Some(quoted) => quoted.strip_suffix('`')?,
-                None => item,
-            };
-            // Only a value this module could have written, so a rewrite keeps it.
-            facet_value_ok("string", value).then(|| value.to_string())
-        })
-        .collect()
+    items.into_iter().map(|i| own_item(i, kind)).collect()
 }
 
-/// Where `field`'s own clause sits among `clauses`, with its values.
-fn find_own(clauses: &[&str], field: &str) -> Option<(usize, Vec<String>)> {
-    clauses
-        .iter()
-        .enumerate()
-        .find_map(|(i, c)| own_values(c, field).map(|values| (i, values)))
+/// The positions of `field`'s own clauses among `clauses`, with all their values.
+fn find_own(
+    clauses: &[&str],
+    field: &str,
+    kind: Option<&str>,
+) -> Option<(Vec<usize>, Vec<String>)> {
+    let (mut at, mut values) = (Vec::new(), Vec::<String>::new());
+    for (i, clause) in clauses.iter().enumerate() {
+        if let Some(found) = own_values(clause, field, kind) {
+            at.push(i);
+            for v in found {
+                if !values.contains(&v) {
+                    values.push(v);
+                }
+            }
+        }
+    }
+    (!at.is_empty()).then_some((at, values))
 }
 
 /// Adds `value` to `field`'s clause of `filter`, or removes it when it is already there. The
 /// clause is created, rewritten as a list, or dropped with its `&&` when its last value goes.
-/// A filter with a top-level `||` is wrapped in parentheses first; a clause this module cannot
-/// read stays as it is and the new one is appended. `None` when `value` or `field` is not
+/// Two own clauses of one field are merged into the first. A filter with a top-level `||` is
+/// wrapped in parentheses first; a clause this module cannot read (a range, a prefix match, a
+/// negation) stays as it is and the new one is appended. `None` when `value` or `field` is not
 /// allowed, or the filter's brackets do not balance.
 pub fn toggle_facet(filter: &str, field: &str, field_type: &str, value: &str) -> Option<String> {
     if !facet_value_ok(field_type, value) || !field_ok(field) {
@@ -161,9 +159,10 @@ pub fn toggle_facet(filter: &str, field: &str, field_type: &str, value: &str) ->
         wrapped = format!("({filter})");
         &wrapped
     };
-    let mut clauses: Vec<String> = and_clauses(filter)?.into_iter().map(String::from).collect();
+    let clauses: Vec<String> = and_clauses(filter)?.into_iter().map(String::from).collect();
     let refs: Vec<&str> = clauses.iter().map(String::as_str).collect();
-    match find_own(&refs, field) {
+    let mut out = clauses.clone();
+    match find_own(&refs, field, Some(base_type(field_type))) {
         Some((at, mut values)) => {
             match values.iter().position(|v| v == value) {
                 Some(i) => {
@@ -173,20 +172,23 @@ pub fn toggle_facet(filter: &str, field: &str, field_type: &str, value: &str) ->
             }
             let values: Vec<&str> = values.iter().map(String::as_str).collect();
             if values.is_empty() {
-                clauses.remove(at);
+                out.remove(at[0]);
             } else {
-                clauses[at] = facet_clause(field, field_type, &values)?;
+                out[at[0]] = facet_clause(field, field_type, &values)?;
+            }
+            for i in at[1..].iter().rev() {
+                out.remove(*i);
             }
         }
-        None => clauses.push(facet_clause(field, field_type, &[value])?),
+        None => out.push(facet_clause(field, field_type, &[value])?),
     }
-    Some(clauses.join(" && "))
+    Some(out.join(" && "))
 }
 
-/// Whether `value` is among the values of `field`'s own clause of `filter`.
+/// Whether `value` is among the values of `field`'s own clauses of `filter`.
 pub fn facet_active(filter: &str, field: &str, value: &str) -> bool {
     and_clauses(filter)
-        .and_then(|clauses| find_own(&clauses, field))
+        .and_then(|clauses| find_own(&clauses, field, None))
         .is_some_and(|(_, values)| values.iter().any(|v| v == value))
 }
 
@@ -315,6 +317,57 @@ mod tests {
         assert_eq!(got, "(genre:=x) && genre:=`y`");
         let got = toggle_facet("genre:!=`x`", "genre", "string", "y").unwrap();
         assert_eq!(got, "genre:!=`x` && genre:=`y`");
+    }
+
+    #[test]
+    fn clauses_of_another_form_are_not_ours() {
+        let t = |f: &str, ty: &str, v: &str| toggle_facet(f, f.split(':').next().unwrap(), ty, v);
+        assert_eq!(
+            t("year:=[1900..1950]", "int32", "1965").unwrap(),
+            "year:=[1900..1950] && year:=1965"
+        );
+        assert_eq!(
+            t("year:=>1920", "int32", "1965").unwrap(),
+            "year:=>1920 && year:=1965"
+        );
+        // A prefix match stays a prefix match.
+        assert_eq!(
+            t("genre:=foo*", "string", "bar").unwrap(),
+            "genre:=foo* && genre:=`bar`"
+        );
+        // A bare word is not the form written for a string; backticks around a number are not
+        // the form written for an int.
+        assert_eq!(
+            t("genre:=bar", "string", "x").unwrap(),
+            "genre:=bar && genre:=`x`"
+        );
+        assert_eq!(
+            t("year:=`1965`", "int32", "1970").unwrap(),
+            "year:=`1965` && year:=1970"
+        );
+        for f in [
+            "year:=[1900..1950]",
+            "year:=>1920",
+            "genre:=foo*",
+            "genre:=bar",
+        ] {
+            let field = f.split(':').next().unwrap();
+            assert!(!facet_active(f, field, "foo*") && !facet_active(f, field, "1950"));
+        }
+        assert!(facet_active("year:=1965", "year", "1965"));
+        assert!(facet_active("ok:=true", "ok", "true"));
+        assert!(!facet_active("genre:=bar", "genre", "bar"));
+    }
+
+    #[test]
+    fn two_own_clauses_merge_into_one() {
+        let got = toggle_facet("genre:=`a` && x:1 && genre:=`b`", "genre", "string", "c").unwrap();
+        assert_eq!(got, "genre:=[`a`,`b`,`c`] && x:1");
+        let got = toggle_facet("genre:=`a` && genre:=`a`", "genre", "string", "b").unwrap();
+        assert_eq!(got, "genre:=[`a`,`b`]");
+        let got = toggle_facet("genre:=`a` && genre:=`b`", "genre", "string", "a").unwrap();
+        assert_eq!(got, "genre:=`b`");
+        assert!(facet_active("genre:=`a` && genre:=`b`", "genre", "b"));
     }
 
     #[test]

@@ -9,7 +9,8 @@ use crate::collections::{addressable, collection_path};
 use crate::documents::{encode_query, segment};
 use crate::{Client, Error, Method};
 
-/// Longest encoded query a `GET` search carries; longer ones go by `POST /multi_search`.
+/// An encoded query of this many bytes or more goes by `POST /multi_search`: the server
+/// answers 400 to a `GET` at exactly 4000 bytes and accepts 3999.
 pub const GET_QUERY_LIMIT: usize = 4000;
 
 /// The server's default `limit_multi_searches`.
@@ -63,7 +64,7 @@ pub fn search_route(collection: &str, params: &[(String, String)]) -> Result<Sea
     let path = collection_path(collection, "/documents/search")?;
     let pairs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (&**k, &**v)).collect();
     let query = encode_query(&pairs);
-    if query.len() <= GET_QUERY_LIMIT {
+    if query.len() < GET_QUERY_LIMIT {
         return Ok(SearchRoute::Get { path, query });
     }
     let mut search = Map::new();

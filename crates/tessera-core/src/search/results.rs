@@ -224,18 +224,26 @@ fn walk(path: &str, value: &Value, tags: (&str, &str), out: &mut Vec<HitLine>) {
             }
         },
         Value::Array(items) => {
-            let matched: Vec<&str> = items
-                .iter()
-                .filter(|item| {
-                    item["matched_tokens"]
-                        .as_array()
-                        .is_some_and(|tokens| !tokens.is_empty())
-                })
-                .filter_map(|item| item["snippet"].as_str())
-                .collect();
+            let mut matched = Vec::new();
+            let mut nested = Vec::new();
+            for item in items {
+                match item.get("snippet").and_then(Value::as_str) {
+                    Some(snippet) => {
+                        let has_tokens = item["matched_tokens"]
+                            .as_array()
+                            .is_some_and(|tokens| !tokens.is_empty());
+                        if has_tokens {
+                            matched.push(snippet);
+                        }
+                    }
+                    // An array of objects: `addresses.city` keeps one line per element.
+                    None => walk(path, item, tags, &mut nested),
+                }
+            }
             if !matched.is_empty() {
                 out.push(line(path, &matched.join(ARRAY_JOIN), tags));
             }
+            out.extend(nested);
         }
         _ => {}
     }
@@ -402,6 +410,19 @@ mod tests {
         assert_eq!(lines[0].field, "meta.author");
         assert_eq!(lines[1].text, "ax · by");
         assert_eq!(lines[1].marks, [0..1, 6..7]);
+    }
+
+    #[test]
+    fn an_array_of_objects_keeps_its_lines() {
+        let hit = r#"{"document":{"id":"7"},"highlight":{"addresses":[{"city":{"matched_tokens":["ber"],"snippet":"<mark>Ber</mark>lin"}},{"city":{"matched_tokens":[],"snippet":"Rome"}}]}}"#;
+        let r = parse_result(&answer(hit), TAGS).unwrap();
+        let lines = &r.hits[0].lines;
+        assert_eq!(lines[0].field, "addresses.city");
+        assert_eq!(
+            (lines[0].text.as_str(), lines[0].marks.clone()),
+            ("Berlin", vec![0..3])
+        );
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]

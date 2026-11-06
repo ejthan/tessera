@@ -2,6 +2,8 @@
 
 //! `sort_by` as rows of the form.
 
+use super::split_top;
+
 /// Typesense accepts at most three sort criteria.
 const MAX_ROWS: usize = 3;
 
@@ -14,38 +16,14 @@ pub struct SortRow {
     pub desc: bool,
 }
 
-/// Splits at commas outside `(…)`, `[…]` and backticks. `None` when they do not balance.
-fn split_top(text: &str) -> Option<Vec<&str>> {
-    let (mut depth, mut tick, mut start) = (0usize, false, 0);
-    let mut parts = Vec::new();
-    for (i, c) in text.char_indices() {
-        match c {
-            '`' => tick = !tick,
-            _ if tick => {}
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = depth.checked_sub(1)?,
-            ',' if depth == 0 => {
-                parts.push(&text[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    if tick || depth != 0 {
-        return None;
-    }
-    parts.push(&text[start..]);
-    Some(parts)
-}
-
 /// The rows of `text`. `None` when it has more than three criteria, an empty one, or
-/// unbalanced brackets. A criterion without a direction counts as descending, the
-/// server's default for a bare field.
+/// unbalanced brackets. A criterion without a direction counts as descending, so the
+/// form writes it out in full (the server refuses a bare field).
 pub fn parse_sort(text: &str) -> Option<Vec<SortRow>> {
     if text.trim().is_empty() {
         return Some(Vec::new());
     }
-    let parts = split_top(text)?;
+    let parts = split_top(text, ",")?;
     if parts.len() > MAX_ROWS {
         return None;
     }
@@ -53,9 +31,10 @@ pub fn parse_sort(text: &str) -> Option<Vec<SortRow>> {
         .into_iter()
         .map(|part| {
             let part = part.trim();
+            // The server takes the direction in any case and with spaces around it.
             let (expr, desc) = match part.rsplit_once(':') {
-                Some((expr, "asc")) => (expr, false),
-                Some((expr, "desc")) => (expr, true),
+                Some((expr, dir)) if dir.trim().eq_ignore_ascii_case("asc") => (expr, false),
+                Some((expr, dir)) if dir.trim().eq_ignore_ascii_case("desc") => (expr, true),
                 _ => (part, true),
             };
             let expr = expr.trim();
@@ -88,7 +67,7 @@ mod tests {
 
     #[test]
     fn parse_sort_table() {
-        let cases: [(&str, Option<Vec<SortRow>>); 8] = [
+        let cases: [(&str, Option<Vec<SortRow>>); 12] = [
             ("a:desc,b:asc", Some(vec![row("a", true), row("b", false)])),
             ("_text_match:desc", Some(vec![row("_text_match", true)])),
             ("_eval(x:>1):desc", Some(vec![row("_eval(x:>1)", true)])),
@@ -100,6 +79,13 @@ mod tests {
             ("a", Some(vec![row("a", true)])),
             ("a,,b", None),
             ("_eval(a:1:desc", None),
+            ("n:ASC", Some(vec![row("n", false)])),
+            ("n:Desc", Some(vec![row("n", true)])),
+            ("n: asc", Some(vec![row("n", false)])),
+            (
+                " a : DESC , b:asc ",
+                Some(vec![row("a", true), row("b", false)]),
+            ),
         ];
         for (text, want) in cases {
             assert_eq!(parse_sort(text), want, "{text}");

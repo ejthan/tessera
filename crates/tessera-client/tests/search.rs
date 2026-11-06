@@ -62,9 +62,9 @@ async fn short_query_goes_by_get() {
 }
 
 #[tokio::test]
-async fn query_of_4000_bytes_stays_get() {
+async fn query_of_3999_bytes_stays_get() {
     assert_eq!(GET_QUERY_LIMIT, 4000);
-    let params = params_of(4000);
+    let params = params_of(3999);
     assert!(matches!(
         search_route("c", &params).unwrap(),
         SearchRoute::Get { .. }
@@ -75,9 +75,9 @@ async fn query_of_4000_bytes_stays_get() {
 }
 
 #[tokio::test]
-async fn query_of_4001_bytes_goes_by_post() {
-    // "q=" + letters + "&filter_by=" is 4001 bytes.
-    let q_len = 4001 - 2 - 11;
+async fn query_of_4000_bytes_goes_by_post() {
+    // "q=" + letters + "&filter_by=" is 4000 bytes.
+    let q_len = 4000 - 2 - 11;
     let params = vec![pair("q", &"a".repeat(q_len)), pair("filter_by", "")];
     let server = MockServer::start().await;
     mount_post(&server, r#"{"results":[{"found":1,"hits":[]}]}"#).await;

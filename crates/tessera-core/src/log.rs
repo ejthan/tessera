@@ -53,8 +53,9 @@ impl Filter {
             && (!self.errors_only || e.is_error())
             && (!self.writes_only
                 || (![Method::GET, Method::HEAD, Method::OPTIONS].contains(m)
-                    // A search sent as POST reads.
-                    && !e.event.path.ends_with("/multi_search")))
+                    // A search sent as POST reads; a DELETE or PUT on a resource of that
+                    // name still writes.
+                    && !(*m == Method::POST && e.event.path.ends_with("/multi_search"))))
             && (self.methods.is_empty() || self.methods.contains(m))
             && (self.connections.is_empty() || self.connections.contains(&e.connection))
     }
@@ -255,6 +256,18 @@ pub(crate) mod tests {
             ..Filter::default()
         };
         assert_eq!(ids(&log, &f), [2]);
+        // The same name on a resource is still a write.
+        let mut log = RequestLog::default();
+        for (id, method, path) in [
+            (1, Method::DELETE, "/collections/multi_search"),
+            (2, Method::DELETE, "/aliases/multi_search"),
+            (3, Method::PUT, "/presets/multi_search"),
+        ] {
+            let mut e = entry(id, method, Origin::User, Some(200));
+            e.event.path = path.into();
+            log.push(e);
+        }
+        assert_eq!(ids(&log, &f), [1, 2, 3]);
     }
 
     #[test]
