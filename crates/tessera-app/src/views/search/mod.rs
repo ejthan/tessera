@@ -2,6 +2,7 @@
 
 //! The search tab of a connection: a draft on the left, its result on the right.
 
+mod export;
 pub mod form;
 pub mod hits;
 mod multi;
@@ -31,12 +32,14 @@ use serde_json::{Map, Value};
 use tessera_client::{Client, Collection, Error};
 use tessera_core::profile::Node;
 use tessera_core::search::INSTANT_DEBOUNCE_MS;
+use tessera_core::search::export::ExportLang;
 use tessera_core::search::params::{
     ParamError, SearchDraft, SideEffect, params_text, parse_params, side_effects, to_pairs,
 };
 use tessera_core::search::results::{ItemError, MultiResult, SearchResult};
 use tessera_widgets::{BodyView, JsonEditor, JsonEditorEvent};
 
+use self::export::ExportState;
 use self::form::{FormEvent, SearchForm};
 use self::hits::HitsView;
 use self::multi::multi_request;
@@ -44,9 +47,10 @@ use self::queries::{PendingHistory, Queries, QueryList};
 use super::dock::view_tab;
 use super::env_badge;
 use crate::actions::{
-    AddSearch, DeleteSavedQuery, FocusQuery, LoadQuery, NextResultPage, NextSearch, OpenHistory,
-    OpenPresets, OpenSaved, PreviousResultPage, PreviousSearch, RemoveSearch, RunSearch, SaveQuery,
-    ShowForm, ShowHits, ShowJson, ShowRawResult, ToggleInstant, ToggleUnion, WORKBENCH,
+    AddSearch, CopyCurl, DeleteSavedQuery, FocusQuery, LoadQuery, NextResultPage, NextSearch,
+    OpenExport, OpenHistory, OpenPresets, OpenSaved, PreviousResultPage, PreviousSearch,
+    RemoveSearch, RunSearch, SaveQuery, ShowForm, ShowHits, ShowJson, ShowRawResult, ToggleInstant,
+    ToggleUnion, WORKBENCH,
 };
 use crate::collections::BoxFuture;
 use crate::connection::{ConnectionState, error_text};
@@ -153,6 +157,7 @@ pub struct SearchWorkbench {
     /// The wait until an instant run counts as settled.
     history_task: Option<Task<()>>,
     queries: Queries,
+    export: ExportState,
     focus_handle: FocusHandle,
     _subscriptions: [Subscription; 5],
 }
@@ -235,6 +240,7 @@ impl SearchWorkbench {
             pending_history: None,
             history_task: None,
             queries,
+            export: ExportState::default(),
             focus_handle: cx.focus_handle(),
         };
         this.sync_editors(window, cx);
@@ -712,6 +718,8 @@ impl SearchWorkbench {
                 window,
                 cx,
             ))
+            .child(self.export_button(window, cx))
+            .children(self.export_note())
             .child(
                 Checkbox::new("search.instant")
                     .checked(self.instant)
@@ -1008,6 +1016,12 @@ impl Render for SearchWorkbench {
             }))
             .on_action(cx.listener(|this, _: &DeleteSavedQuery, window, cx| {
                 this.ask_delete_saved(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenExport, window, cx| {
+                this.toggle_export(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyCurl, _, cx| {
+                this.copy_export(ExportLang::Curl, cx);
             }))
             .size_full()
             .child(tabs)

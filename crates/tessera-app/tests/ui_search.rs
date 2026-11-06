@@ -1733,3 +1733,68 @@ async fn preset_replace_cancel_sends_nothing(cx: &mut TestAppContext) {
     f.click(cx, "confirm.ok");
     assert_eq!(f.saved_presets().len(), 1);
 }
+
+#[gpui_kit::test]
+async fn export_menu_copies_with_the_key_placeholder(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.fill(cx, "search.param.q", "dune");
+
+    for (entry, expected) in [
+        (0, "$TYPESENSE_API_KEY"),
+        (1, "process.env.TYPESENSE_API_KEY"),
+        (2, r#"os.environ["TYPESENSE_API_KEY"]"#),
+        (3, r#"std::env::var("TYPESENSE_API_KEY")?"#),
+    ] {
+        f.press(cx, OPEN_EXPORT);
+        f.act(cx, |window, cx| {
+            window.within("popup-menu").click(entry, cx)
+        });
+        f.settle(cx);
+        let code = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
+        assert!(code.contains(expected), "{code}");
+        assert!(
+            code.contains("q=dune") || code.contains(r#""q": "dune""#),
+            "{code}"
+        );
+        // The fake's key is `k`.
+        assert!(!code.contains(": k\""), "{code}");
+    }
+    assert_eq!(f.text_of(cx, "search.export.copied"), "Copied");
+    f.wait(cx, 2000);
+    assert!(!f.has(cx, "search.export.copied"));
+
+    f.press(cx, OPEN_EXPORT);
+    f.act(cx, |window, cx| window.within("popup-menu").click(4, cx));
+    f.settle(cx);
+    let url = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
+    assert!(
+        url.starts_with("http://localhost:8108/collections/books/"),
+        "{url}"
+    );
+    assert!(!url.to_lowercase().contains("api-key"), "{url}");
+}
+
+#[gpui_kit::test]
+async fn copy_curl_needs_no_menu(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.press(cx, COPY_DOC_CURL);
+    let code = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
+    assert!(code.starts_with("curl "), "{code}");
+    assert!(f.has(cx, "search.export.copied"));
+}
+
+#[gpui_kit::test]
+async fn a_post_route_disables_the_raw_url(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.press(cx, ADD_SEARCH);
+    f.press(cx, OPEN_EXPORT);
+    let label = f.act(cx, |window, cx| {
+        let mut menu = window.within("popup-menu");
+        let label = menu.find(4).label().map(|l| l.to_string());
+        menu.click(0, cx);
+        label
+    });
+    assert_eq!(label.unwrap(), "Copy the URL: this search is sent as POST");
+}

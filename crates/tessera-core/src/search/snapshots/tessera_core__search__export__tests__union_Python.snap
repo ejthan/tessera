@@ -1,0 +1,49 @@
+---
+source: crates/tessera-core/src/search/export.rs
+expression: "text(lang, &node(), &target)"
+---
+import os
+
+import typesense
+
+client = typesense.Client({
+    "nodes": [
+        {
+            "host": "ts.example.net",
+            "port": 8443,
+            "protocol": "https",
+        },
+    ],
+    "api_key": os.environ["TYPESENSE_API_KEY"],
+})
+
+search_requests = {
+    "union": True,
+    "searches": [
+        {
+            "collection": "a",
+            "q": "*",
+            "exhaustive": True,
+            "n": None,
+            "l": [
+                1,
+            ],
+        },
+        {
+            "collection": "b",
+            "q": "*",
+            "exhaustive": True,
+            "n": None,
+            "l": [
+                1,
+            ],
+        },
+    ],
+}
+common_params = {
+    "page": 2,
+    "per_page": 5,
+}
+
+results = client.multi_search.perform(search_requests, common_params)
+print(results)

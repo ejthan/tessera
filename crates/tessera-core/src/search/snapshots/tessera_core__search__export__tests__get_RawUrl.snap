@@ -1,0 +1,5 @@
+---
+source: crates/tessera-core/src/search/export.rs
+expression: "text(lang, &node(), &target)"
+---
+https://ts.example.net:8443/collections/books/documents/search?q=dune&query_by=title&filter_by=genre%3A%3D%60a%20b%60%20%26%26%20year%3A%3E1

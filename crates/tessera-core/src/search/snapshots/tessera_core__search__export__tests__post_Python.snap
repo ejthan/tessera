@@ -1,0 +1,32 @@
+---
+source: crates/tessera-core/src/search/export.rs
+expression: code
+---
+import os
+
+import typesense
+
+client = typesense.Client({
+    "nodes": [
+        {
+            "host": "ts.example.net",
+            "port": 8443,
+            "protocol": "https",
+        },
+    ],
+    "api_key": os.environ["TYPESENSE_API_KEY"],
+})
+
+search_requests = {
+    "searches": [
+        {
+            "collection": "books",
+            "q": "*",
+            "filter_by": "aaa…",
+        },
+    ],
+}
+common_params = {}
+
+results = client.multi_search.perform(search_requests, common_params)
+print(results)

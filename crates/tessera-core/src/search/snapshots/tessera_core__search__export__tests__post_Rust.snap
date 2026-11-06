@@ -1,0 +1,20 @@
+---
+source: crates/tessera-core/src/search/export.rs
+expression: code
+---
+let response = reqwest::Client::new()
+    .post("https://ts.example.net:8443/multi_search")
+    .header("X-TYPESENSE-API-KEY", std::env::var("TYPESENSE_API_KEY")?)
+    .header("Content-Type", "application/json")
+    .body(r#"{
+  "searches": [
+    {
+      "collection": "books",
+      "q": "*",
+      "filter_by": "aaa…"
+    }
+  ]
+}"#)
+    .send()
+    .await?;
+println!("{}", response.text().await?);

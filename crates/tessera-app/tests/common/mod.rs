@@ -1021,6 +1021,7 @@ pub const OPEN_HISTORY: &str = key("cmd-shift-h", "ctrl-shift-h");
 pub const OPEN_SAVED: &str = key("cmd-o", "ctrl-o");
 pub const SAVE_QUERY: &str = key("cmd-s", "ctrl-s");
 pub const OPEN_PRESETS: &str = key("cmd-alt-p", "ctrl-alt-p");
+pub const OPEN_EXPORT: &str = key("cmd-alt-e", "ctrl-alt-e");
 pub const SHOW_FORM: &str = key("cmd-1", "ctrl-1");
 pub const SHOW_JSON: &str = key("cmd-2", "ctrl-2");
 pub const SHOW_HITS: &str = key("cmd-3", "ctrl-3");

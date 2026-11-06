@@ -89,7 +89,8 @@ gpui_kit::actions!(
         SaveQuery,
         OpenPresets,
         LoadQuery,
-        DeleteSavedQuery
+        DeleteSavedQuery,
+        OpenExport
     ]
 );
 
@@ -360,6 +361,10 @@ const SAVE_QUERY: &str = "ctrl-s";
 const OPEN_PRESETS: &str = "cmd-alt-p";
 #[cfg(not(target_os = "macos"))]
 const OPEN_PRESETS: &str = "ctrl-alt-p";
+#[cfg(target_os = "macos")]
+const OPEN_EXPORT: &str = "cmd-alt-e";
+#[cfg(not(target_os = "macos"))]
+const OPEN_EXPORT: &str = "ctrl-alt-e";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -479,6 +484,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_SAVED, OpenSaved, Some(WORKBENCH)),
         KeyBinding::new(SAVE_QUERY, SaveQuery, Some(WORKBENCH)),
         KeyBinding::new(OPEN_PRESETS, OpenPresets, Some(WORKBENCH)),
+        KeyBinding::new(OPEN_EXPORT, OpenExport, Some(WORKBENCH)),
+        KeyBinding::new(COPY_DOC_CURL, CopyCurl, Some(WORKBENCH)),
         // Deeper than the input's own keys, so the filter keeps the focus.
         KeyBinding::new("up", SelectUp, Some(QUERY_LIST_INPUT)),
         KeyBinding::new("down", SelectDown, Some(QUERY_LIST_INPUT)),

@@ -1,0 +1,24 @@
+---
+source: crates/tessera-core/src/search/export.rs
+expression: code
+---
+import Typesense from "typesense";
+
+const client = new Typesense.Client({
+  nodes: [{"host":"ts.example.net","port":8443,"protocol":"https"}],
+  apiKey: process.env.TYPESENSE_API_KEY,
+});
+
+const searchRequests = {
+  "searches": [
+    {
+      "collection": "books",
+      "q": "*",
+      "filter_by": "aaa…"
+    }
+  ]
+};
+const commonParams = {};
+
+const results = await client.multiSearch.perform(searchRequests, commonParams);
+console.log(results);

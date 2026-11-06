@@ -2,6 +2,7 @@
 
 //! The search workbench's logic: drafts, sort rows, results and facet filters.
 
+pub mod export;
 pub mod facet;
 pub mod history;
 pub mod params;
