@@ -530,3 +530,45 @@ async fn live_bulk_by_filter() {
     assert_eq!(many.unwrap(), 2000);
     assert_eq!(left.unwrap(), 2500 - 5 - 2000);
 }
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_odd_ids_delete_only_themselves() {
+    use serde_json::json;
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_odd_ids";
+    let _ = client.delete_collection(name).await;
+    client
+        .create_collection(&json!({"name":name,"fields":[{"name":"t","type":"string"}]}))
+        .await
+        .unwrap();
+    let odd = ["*", "keep1 ", " lead", "trail ", "  "];
+    let others = ["keep1", "other", ".", ".."];
+    for id in odd.iter().chain(&others) {
+        client
+            .create_document(name, &json!({"id":id,"t":"x"}))
+            .await
+            .unwrap();
+    }
+    for id in odd {
+        client.delete_document(name, id).await.unwrap();
+    }
+    let left = client.count_documents(name, None).await;
+    let bystander = client.document(name, "keep1").await;
+    // A URL cannot hold these two: `..` would reach the collection itself.
+    let dots = [
+        client.delete_document(name, "..").await,
+        client.delete_document(name, ".").await,
+    ];
+    let by_filter = client.delete_by_filter(name, "id:[`.`,`..`]").await;
+    let after = client.count_documents(name, None).await;
+    let _ = client.delete_collection(name).await;
+    assert_eq!(left.unwrap(), others.len() as u64);
+    assert_eq!(bystander.unwrap()["id"], "keep1");
+    for dot in dots {
+        assert!(matches!(dot, Err(Error::UnaddressableId(_))), "{dot:?}");
+    }
+    assert_eq!(by_filter.unwrap(), 2);
+    assert_eq!(after.unwrap(), 2);
+}

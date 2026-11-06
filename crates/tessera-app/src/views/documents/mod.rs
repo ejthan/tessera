@@ -114,8 +114,6 @@ pub struct DocumentsView {
     copy_error: Option<SharedString>,
     /// A delete is running.
     deleting: bool,
-    /// How the last delete failed.
-    delete_error: Option<SharedString>,
     /// The open copy menu of a cell, where it was asked for, and its dismissal.
     context_menu: Option<(Entity<PopupMenu>, Point<Pixels>, Subscription)>,
     connection: Entity<ConnectionState>,
@@ -223,9 +221,10 @@ impl DocumentsView {
                     },
                 ),
                 cx.subscribe(&inspector, |this, _, _: &DocumentSaved, cx| this.reload(cx)),
+                // Not `reload`: a delete reports its failure and then announces the change.
                 cx.subscribe(&connection, |this, _, CollectionChanged(name), cx| {
                     if *name == this.name {
-                        this.reload(cx);
+                        this.reload_rows(cx);
                     }
                 }),
             ],
@@ -248,7 +247,6 @@ impl DocumentsView {
             copy_task: None,
             copy_error: None,
             deleting: false,
-            delete_error: None,
             context_menu: None,
             connection,
             focus_handle: cx.focus_handle(),
@@ -459,6 +457,11 @@ impl DocumentsView {
     /// Drops the pages and loads them again; the rows and the scroll position stay until
     /// the answer.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.set_delete_error(None, cx);
+        self.reload_rows(cx);
+    }
+
+    fn reload_rows(&mut self, cx: &mut Context<Self>) {
         if self.has_schema {
             self.table.update(cx, |t, cx| {
                 t.delegate_mut().reload(cx);
@@ -477,17 +480,26 @@ impl DocumentsView {
         }
     }
 
-    /// Takes in the end of a delete of `ids`: a failure stays with what is ticked.
+    fn set_delete_error(&mut self, error: Option<SharedString>, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().delete_error = error;
+            cx.notify();
+        });
+    }
+
+    /// Takes in the end of a delete of `ids`: a failure stays with what is ticked and with the
+    /// draft. `draft_accepted`: the confirmation said a draft of a row in `ids` goes too.
     fn delete_finished(
         &mut self,
         ids: &[String],
         error: Option<SharedString>,
+        draft_accepted: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.deleting = false;
         let failed = error.is_some();
-        self.delete_error = error;
+        self.set_delete_error(error, cx);
         cx.notify();
         if failed {
             return;
@@ -498,6 +510,9 @@ impl DocumentsView {
         });
         let shown = self.inspector.read(cx).current_id();
         if shown.is_some_and(|id| ids.iter().any(|i| i == id)) {
+            if draft_accepted {
+                self.inspector.update(cx, |i, cx| i.revert(window, cx));
+            }
             self.after_discard(window, cx, |this, window, cx| {
                 this.close_inspector(window, cx)
             });
@@ -837,6 +852,7 @@ impl DocumentsView {
         // Its shortcuts and actions are the table's, whatever holds the focus.
         let target = self.table.read(cx).focus_handle(cx);
         let can_delete = !self.deleting
+            && !self.table.read(cx).delegate().query_pending()
             && (!self.table.read(cx).delegate().selection.is_empty()
                 || self.selected_id(cx).is_some());
         let locked = self.connection.read(cx).writes_locked();
@@ -967,9 +983,8 @@ impl Render for DocumentsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.table.read(cx).delegate();
         let query_error = rows.query_error.clone();
-        let error = (self.delete_error.clone())
-            .or_else(|| rows.error.clone())
-            .or_else(|| self.copy_error.clone());
+        let error = rows.error.clone().or_else(|| self.copy_error.clone());
+        let delete_error = rows.delete_error.clone();
         let selection_note = selection_note(rows);
         let picker = self.has_schema.then(|| {
             columns::picker(
@@ -1094,6 +1109,15 @@ impl Render for DocumentsView {
             .children(error.map(|e| {
                 div()
                     .id("documents.error")
+                    .test_support()
+                    .aria_label(e.clone())
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(e)
+            }))
+            .children(delete_error.map(|e| {
+                div()
+                    .id("documents.delete.error")
                     .test_support()
                     .aria_label(e.clone())
                     .text_sm()

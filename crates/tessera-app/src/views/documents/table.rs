@@ -82,6 +82,8 @@ pub struct DocRows {
     pub query_error: Option<SharedString>,
     /// The ticked rows.
     pub selection: Selection,
+    /// How the last delete failed.
+    pub delete_error: Option<SharedString>,
     /// The last tick ran into `MAX_SELECTION`.
     pub selection_limit: bool,
     /// The last range passed over rows that are not loaded.
@@ -116,6 +118,7 @@ impl DocRows {
             answered: false,
             query_error: None,
             selection: Selection::default(),
+            delete_error: None,
             selection_limit: false,
             selection_unloaded: false,
             query_changed: false,
@@ -142,6 +145,11 @@ impl DocRows {
     /// The number of the current query.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// A new query has not answered yet, so the rows on screen are not its rows.
+    pub fn query_pending(&self) -> bool {
+        self.query_changed
     }
 
     /// Column `col_ix` of the table, unless it is the checkboxes'.
@@ -187,6 +195,7 @@ impl DocRows {
     /// stay until it answers.
     pub fn requery(&mut self, cx: &mut Context<TableState<Self>>) {
         self.clear_selection();
+        self.delete_error = None;
         self.query_changed = true;
         self.reload(cx);
     }
@@ -265,15 +274,16 @@ impl DocRows {
         }
         self.inflight.remove(&page);
         self.first_load = false;
+        // A refused query answers too: the old rows are then all there is.
+        if std::mem::take(&mut self.query_changed) {
+            self.clear_selection();
+        }
         match result {
             Ok(answer) => {
                 self.answered = true;
                 let replaced = std::mem::take(&mut self.replacing);
                 if replaced {
                     self.pages.clear();
-                }
-                if std::mem::take(&mut self.query_changed) {
-                    self.clear_selection();
                 }
                 let shown = self.columns.len();
                 merge_keys(&mut self.all_columns, &answer.page.keys);

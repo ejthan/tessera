@@ -85,38 +85,28 @@ impl Selection {
     }
 }
 
-/// ⌘⌫ / Ctrl+Backspace: asks, then deletes the ticked rows or the selected cell's row. A draft
-/// of a row going away is dropped first, after asking; one of another row stays.
+/// ⌘⌫ / Ctrl+Backspace: asks, then deletes the ticked rows or the selected cell's row. Not
+/// while a new query runs: the rows on screen are the old query's. A draft of a row going away
+/// is named in the question and stays until the row is gone.
 pub fn delete(view: &mut DocumentsView, window: &mut Window, cx: &mut Context<DocumentsView>) {
     let ids = view.delete_targets(cx);
-    if ids.is_empty() || view.deleting {
+    let pending = view.table.read(cx).delegate().query_pending();
+    if ids.is_empty() || view.deleting || pending {
         return;
     }
-    let doomed = view.inspector.read(cx).current_id();
-    if doomed.is_some_and(|id| ids.iter().any(|i| i == id)) {
-        // Deferred: Enter closes the discard dialog after this, and takes the newest one.
-        view.after_discard(window, cx, move |_, window, cx| {
-            let ids = ids.clone();
-            cx.defer_in(window, move |this, window, cx| ask(this, ids, window, cx));
-        });
-    } else {
-        ask(view, ids, window, cx);
+    let inspector = view.inspector.read(cx);
+    let doomed = inspector.current_id();
+    let draft = doomed.is_some_and(|id| ids.iter().any(|i| i == id)) && inspector.is_dirty(cx);
+    if draft && inspector.is_busy() {
+        let text = t!("documents.delete.busy").to_string();
+        return view.set_delete_error(Some(text.into()), cx);
     }
-}
-
-/// Unlocks if needed, then opens the confirmation that fits `ids`.
-fn ask(
-    view: &mut DocumentsView,
-    ids: Vec<String>,
-    window: &mut Window,
-    cx: &mut Context<DocumentsView>,
-) {
     let this = cx.entity().downgrade();
     let name = view.name.clone();
     view.connection.clone().update(cx, |c, cx| {
         let prod = c.profile.environment.is_prod();
         c.ensure_writable(window, cx, move |window, cx| {
-            confirm_delete(this, name, ids, prod, window, cx);
+            confirm_delete(this, name, ids, prod, draft, window, cx);
         });
     });
 }
@@ -126,6 +116,7 @@ fn confirm_delete(
     name: String,
     ids: Vec<String>,
     prod: bool,
+    draft: bool,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -153,13 +144,18 @@ fn confirm_delete(
             )
         }
     };
+    let mut consequences = vec![consequence];
+    if draft {
+        consequences.push(t!("documents.delete.draft").to_string());
+    }
     let action = t!("documents.delete.action").to_string();
-    let run = move |window: &mut Window, cx: &mut App| run(view.clone(), ids.clone(), window, cx);
+    let run =
+        move |window: &mut Window, cx: &mut App| run(view.clone(), ids.clone(), draft, window, cx);
     match danger_level(count, prod) {
         // The dialog is gone by then, so a failure shows in the view.
         Danger::Medium => confirm::open(
             title,
-            consequence,
+            consequences.join(" "),
             action,
             move |window, cx| run(window, cx).detach(),
             window,
@@ -168,7 +164,7 @@ fn confirm_delete(
         Danger::High => confirm_danger::open(
             DangerOptions {
                 title: title.into(),
-                consequences: vec![consequence.into()],
+                consequences: consequences.into_iter().map(Into::into).collect(),
                 expected: name.into(),
                 action_label: action.into(),
                 prod,
@@ -184,6 +180,7 @@ fn confirm_delete(
 fn run(
     view: WeakEntity<DocumentsView>,
     ids: Vec<String>,
+    draft: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> Task<Result<(), SharedString>> {
@@ -196,16 +193,13 @@ fn run(
     };
     let Some(client) = connection.read(cx).connected.as_ref() else {
         let text = SharedString::from(t!("status.not_connected").to_string());
-        view_ref.update(cx, |this, cx| {
-            this.delete_error = Some(text.clone());
-            cx.notify();
-        });
+        view_ref.update(cx, |this, cx| this.set_delete_error(Some(text.clone()), cx));
         return Task::ready(Err(text));
     };
     let client = client.client.clone();
     view_ref.update(cx, |this, cx| {
         this.deleting = true;
-        this.delete_error = None;
+        this.set_delete_error(None, cx);
         cx.notify();
     });
     let backend = cx.global::<DocumentsBackendGlobal>().0.clone();
@@ -213,24 +207,37 @@ fn run(
         let (done, result) = delete_ids(&*backend, client, name.clone(), &ids).await;
         cx.update(|window, cx| {
             let profile = connection.read(cx).profile.clone();
+            let count = ids.len() as u64;
+            let (shown_done, shown_count) = (grouped(done), grouped(count));
             let error: Option<SharedString> = result.err().map(|e| {
-                let detail = if ids.len() == 1 {
+                let detail = if count == 1 {
                     error_text(&e, &profile)
                 } else {
                     long_error_text(&e, &profile)
                 };
-                let (done, count) = (grouped(done), grouped(ids.len() as u64));
                 t!(
                     "documents.delete.partial",
-                    done = done,
-                    count = count,
+                    done = shown_done,
+                    count = shown_count,
                     error = detail
                 )
                 .to_string()
                 .into()
             });
+            // A filter that matched fewer ids than it names answers 200.
+            let error = error.or_else(|| {
+                (done < count).then(|| {
+                    t!(
+                        "documents.delete.short",
+                        done = shown_done,
+                        count = shown_count
+                    )
+                    .to_string()
+                    .into()
+                })
+            });
             view.update(cx, |this, cx| {
-                this.delete_finished(&ids, error.clone(), window, cx);
+                this.delete_finished(&ids, error.clone(), draft, window, cx);
             })
             .ok();
             // A failed batch may have deleted some, so this reloads either way.
@@ -242,18 +249,20 @@ fn run(
 }
 
 /// Deletes one id through its endpoint, several in `id_batches`, in sequence. Stops at the
-/// first failure: how many went, and that failure. Ids a filter cannot quote go one by one.
+/// first failure: how many went, and that failure. `.` and `..` have no endpoint, and ids a
+/// filter cannot name exactly go one by one.
 async fn delete_ids(
     backend: &dyn DocumentsBackend,
     client: Client,
     name: String,
     ids: &[String],
 ) -> (u64, Result<(), Error>) {
-    let (filters, single) = if ids.len() == 1 {
-        (Vec::new(), ids.to_vec())
-    } else {
-        let batches = id_batches(ids, ID_FILTER_BYTES);
-        (batches.filters, batches.single)
+    let (filters, single) = match ids {
+        [id] if !matches!(id.as_str(), "." | "..") => (Vec::new(), ids.to_vec()),
+        _ => {
+            let batches = id_batches(ids, ID_FILTER_BYTES);
+            (batches.filters, batches.single)
+        }
     };
     let mut done = 0;
     for filter in filters {

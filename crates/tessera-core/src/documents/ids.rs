@@ -9,13 +9,19 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 pub struct IdBatches {
     /// ``id:[`a`,`b`]`` filters, each at most `max_bytes` once percent-encoded.
     pub filters: Vec<String>,
-    /// Ids with a backtick, which `filter_by` cannot quote; delete these one by one.
+    /// Ids `filter_by` cannot name exactly; these go one by one.
     pub single: Vec<String>,
 }
 
 /// Percent-encoded length. Encodes every non-alphanumeric, so it never undercounts the client.
 fn encoded_len(s: &str) -> usize {
     utf8_percent_encode(s, NON_ALPHANUMERIC).map(str::len).sum()
+}
+
+/// Whether an `id:[...]` filter would miss `id` or hit others: a backtick cannot be quoted,
+/// `*` matches every document, and the server trims ids, so `a ` means the document `a`.
+fn needs_its_own_request(id: &str) -> bool {
+    id.contains(['`', '*']) || id.trim() != id
 }
 
 /// Groups `ids` in order into filters of at most `max_bytes` after percent-encoding.
@@ -33,7 +39,7 @@ pub fn id_batches(ids: &[String], max_bytes: usize) -> IdBatches {
         }
     };
     for id in ids {
-        if id.contains('`') {
+        if needs_its_own_request(id) {
             out.single.push(id.clone());
             continue;
         }
@@ -83,6 +89,27 @@ mod tests {
         let b = id_batches(&["a".into(), "x`y".into()], 1000);
         assert_eq!(b.filters, vec!["id:[`a`]"]);
         assert_eq!(b.single, vec!["x`y"]);
+    }
+
+    #[test]
+    fn ids_a_filter_would_not_match_exactly_go_to_single() {
+        // `*` matches every document, and the server trims ids in a filter, so `keep1 ` would
+        // delete `keep1` and leave itself.
+        let odd = [
+            "*", " * ", "a*", "*a", "keep1 ", " lead", "trail ", "  ", "tab\t", "\nx",
+        ];
+        let mut all: Vec<String> = odd.map(String::from).to_vec();
+        all.push("plain".into());
+        let b = id_batches(&all, 1000);
+        assert_eq!(b.filters, vec!["id:[`plain`]"]);
+        assert_eq!(b.single, odd);
+    }
+
+    #[test]
+    fn inner_spaces_and_dots_stay_in_filters() {
+        let b = id_batches(&["a b".into(), ".".into(), "..".into()], 1000);
+        assert_eq!(b.filters, vec!["id:[`a b`,`.`,`..`]"]);
+        assert!(b.single.is_empty());
     }
 
     #[test]

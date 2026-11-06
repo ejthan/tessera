@@ -425,6 +425,8 @@ pub struct FakeDocs {
     pub write_fail: Mutex<Option<(u16, String)>>,
     /// Deletes that still pass before `write_fail` applies to them.
     pub pass_deletes: Mutex<usize>,
+    /// A filter delete removes this many documents fewer than it names.
+    pub filter_short: Mutex<u64>,
     /// Ids of the first rows, in place of their numbers.
     pub ids: Mutex<Vec<String>>,
 }
@@ -659,7 +661,8 @@ impl DocumentsBackend for FakeDocsBackend {
         filter: String,
     ) -> tessera_app::collections::BoxFuture<Result<u64, Error>> {
         // Two backticks per id.
-        let removed = filter.matches('`').count() as u64 / 2;
+        let named = filter.matches('`').count() as u64 / 2;
+        let removed = named.saturating_sub(*self.0.filter_short.lock().unwrap());
         self.0.remove(
             "delete_by_filter",
             filter.clone(),

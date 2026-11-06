@@ -387,3 +387,21 @@ async fn a_missing_or_non_numeric_count_is_a_decode_error() {
         Err(Error::Decode(_))
     ));
 }
+
+#[tokio::test]
+async fn dot_ids_never_reach_the_server() {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = Client::new(&[&server.uri()], "k".to_string().into(), Default::default()).unwrap();
+    for id in [".", ".."] {
+        let refused = |e: &Error| matches!(e, Error::UnaddressableId(i) if i == id);
+        assert!(refused(&client.document("c", id).await.unwrap_err()));
+        assert!(refused(&client.delete_document("c", id).await.unwrap_err()));
+        let patched = client.patch_document("c", id, &serde_json::json!({})).await;
+        assert!(refused(&patched.unwrap_err()));
+    }
+}

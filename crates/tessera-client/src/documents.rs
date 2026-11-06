@@ -85,6 +85,18 @@ pub(crate) fn segment(s: &str) -> String {
     utf8_percent_encode(s, SEGMENT).to_string()
 }
 
+/// `collections/{c}/documents/{id}`. A URL drops `.` and `..` segments, percent-encoded or not,
+/// so `..` would address the collection itself and a DELETE would remove it.
+fn document_path(collection: &str, id: &str) -> Result<String, Error> {
+    if matches!(id, "." | "..") {
+        return Err(Error::UnaddressableId(id.to_string()));
+    }
+    Ok(collection_path(
+        collection,
+        &format!("/documents/{}", segment(id)),
+    ))
+}
+
 impl Client {
     async fn search_raw(&self, collection: &str, pairs: &[(&str, &str)]) -> Result<RawPage, Error> {
         let path = collection_path(collection, "/documents/search");
@@ -162,7 +174,7 @@ impl Client {
 
     /// `GET /collections/{c}/documents/{id}`.
     pub async fn document(&self, collection: &str, id: &str) -> Result<Value, Error> {
-        let path = collection_path(collection, &format!("/documents/{}", segment(id)));
+        let path = document_path(collection, id)?;
         let body = self.get_ok(None, &path, None).await?;
         serde_json::from_str(&body).map_err(Error::Decode)
     }
@@ -208,14 +220,14 @@ impl Client {
         id: &str,
         patch: &Value,
     ) -> Result<Value, Error> {
-        let path = collection_path(collection, &format!("/documents/{}", segment(id)));
+        let path = document_path(collection, id)?;
         self.write_document(crate::Method::PATCH, &path, None, Some(patch))
             .await
     }
 
     /// `DELETE /collections/{c}/documents/{id}`.
     pub async fn delete_document(&self, collection: &str, id: &str) -> Result<(), Error> {
-        let path = collection_path(collection, &format!("/documents/{}", segment(id)));
+        let path = document_path(collection, id)?;
         self.write(None, crate::Method::DELETE, &path, None, None, None)
             .await
             .map(drop)

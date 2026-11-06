@@ -2245,7 +2245,7 @@ async fn single_delete_of_a_gone_document_counts_as_done(cx: &mut TestAppContext
     f.tick(cx, "3");
     f.press(cx, DELETE);
     f.confirm_delete(cx);
-    assert!(!f.has(cx, "documents.error"));
+    assert!(!f.has(cx, "documents.delete.error"));
     assert!(f.ticked(cx).is_empty());
 }
 
@@ -2314,7 +2314,7 @@ async fn failed_backtick_id_is_reported(cx: &mut TestAppContext) {
     f.press(cx, SELECT_ALL);
     f.press(cx, DELETE);
     f.confirm_delete(cx);
-    let text = f.text_of(cx, "documents.error");
+    let text = f.text_of(cx, "documents.delete.error");
     assert!(
         text.contains("Deleted 2 of 3") && text.contains("boom"),
         "{text}"
@@ -2337,7 +2337,7 @@ async fn partial_failure_reports_and_reloads(cx: &mut TestAppContext) {
     let asked = f.docs.pages.lock().unwrap().len();
     f.confirm_delete(cx);
     assert_eq!(f.writes().len(), 2, "stops at the first failure");
-    let text = f.text_of(cx, "documents.error");
+    let text = f.text_of(cx, "documents.delete.error");
     assert!(
         text.contains("of 1,000") && text.contains("not ready"),
         "{text}"
@@ -2447,7 +2447,7 @@ async fn inspector_on_another_row_stays_open(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn draft_of_a_doomed_row_asks_before_the_delete(cx: &mut TestAppContext) {
+async fn draft_of_a_doomed_row_is_named_and_goes_only_with_the_row(cx: &mut TestAppContext) {
     let f = open_found(cx, plain_schema(), 10).await;
     f.open_document(cx);
     f.edit(cx, RENAMED);
@@ -2455,19 +2455,193 @@ async fn draft_of_a_doomed_row_asks_before_the_delete(cx: &mut TestAppContext) {
     f.settle(cx);
     let body = f.text_of(cx, "confirm.body");
     assert!(
-        !body.contains("document 3"),
-        "the discard comes first: {body}"
+        body.contains("document 3") && body.contains("unsaved"),
+        "{body}"
     );
-    f.click(cx, "confirm.ok");
-    f.settle(cx);
+    f.click(cx, "confirm.cancel");
+    wait_for_element(cx, f.handle, "confirm.ok".into(), false).await;
     cx.executor().advance_clock(Duration::from_secs(1));
     f.settle(cx);
-    assert!(!f.dirty(cx));
-    assert!(f.text_of(cx, "confirm.body").contains("document 3"));
-    assert!(f.writes().is_empty());
+    assert!(f.dirty(cx), "cancelling changes nothing");
+    assert!(f.inspector_text(cx).contains("\"new\""));
+
+    f.click(cx, "documents.delete");
+    f.settle(cx);
     f.confirm_delete(cx);
     assert_eq!(f.writes()[0].0, "delete");
+    // One question: a second one would keep it from going.
+    wait_for_element(cx, f.handle, "confirm.ok".into(), false).await;
     assert!(!f.has(cx, "documents.inspector"));
+    assert!(!f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn failed_delete_keeps_the_draft(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.write_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    f.confirm_delete(cx);
+    assert!(f.text_of(cx, "documents.delete.error").contains("boom"));
+    assert!(f.dirty(cx));
+    assert!(f.has(cx, "documents.inspector"));
+}
+
+#[gpui_kit::test]
+async fn cancelling_the_unlock_keeps_the_draft(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 10;
+    let f = open_profile(cx, plain_schema(), docs, true).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    assert!(f.has(cx, "danger.input"));
+    f.click(cx, "danger.cancel");
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    assert!(f.dirty(cx));
+    assert!(f.writes().is_empty());
+}
+
+#[gpui_kit::test]
+async fn draft_on_prod_is_a_consequence(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    assert!(f.text_of(cx, "danger.consequence.1").contains("unsaved"));
+}
+
+#[gpui_kit::test]
+async fn busy_inspector_says_why_nothing_opens(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    let hold = f.docs.hold_next();
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    assert!(!f.has(cx, "confirm.ok"));
+    assert!(
+        f.text_of(cx, "documents.delete.error")
+            .contains("inspector")
+    );
+    drop(hold);
+}
+
+#[gpui_kit::test]
+async fn short_filter_count_reports_and_keeps_the_ticks(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.filter_short.lock().unwrap() = 1;
+    f.open_document(cx);
+    f.tick(cx, "3");
+    f.tick(cx, "4");
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    f.confirm_delete(cx);
+    let text = f.text_of(cx, "documents.delete.error");
+    assert!(text.contains("Deleted 1 of 2"), "{text}");
+    assert_eq!(f.ticked(cx), ["3", "4"]);
+    assert!(f.has(cx, "documents.inspector"));
+}
+
+#[gpui_kit::test]
+async fn star_and_spaced_ids_never_reach_a_filter(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 4;
+    *docs.ids.lock().unwrap() = ["*", "keep1 ", " lead", "plain"].map(String::from).to_vec();
+    let f = open_tab(cx, plain_schema(), docs).await;
+    f.select_row(cx, 0);
+    f.press(cx, SELECT_ALL);
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    let writes = f.writes();
+    assert_eq!(writes[0].1, "id:[`plain`]");
+    let single: Vec<_> = writes[1..]
+        .iter()
+        .map(|w| (w.0.as_str(), w.1.as_str()))
+        .collect();
+    assert_eq!(
+        single,
+        [("delete", " lead"), ("delete", "*"), ("delete", "keep1 ")]
+    );
+}
+
+#[gpui_kit::test]
+async fn a_lone_dot_id_goes_through_a_filter(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 2;
+    *docs.ids.lock().unwrap() = ["..", "a"].map(String::from).to_vec();
+    let f = open_tab(cx, plain_schema(), docs).await;
+    f.select_row(cx, 0);
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    let writes = f.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].1, "id:[`..`]");
+    assert_eq!(writes[0].0, "delete_by_filter");
+}
+
+#[gpui_kit::test]
+async fn delete_waits_for_a_new_query(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 3);
+    let hold = f.docs.hold_next();
+    f.submit_filter(cx, "price:>1");
+    f.tick(cx, "4");
+    f.press(cx, DELETE);
+    assert!(!f.has(cx, "confirm.ok"));
+    assert!(f.act(cx, |window, _| {
+        window.find("documents.delete").disabled() == Some(true)
+    }));
+    hold.send(()).unwrap();
+    f.settle(cx);
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    assert!(f.has(cx, "confirm.ok"));
+}
+
+#[gpui_kit::test]
+async fn delete_works_again_after_a_refused_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.fail.lock().unwrap() = Some((400, "bad filter".into()));
+    f.submit_filter(cx, "nope:=1");
+    *f.docs.fail.lock().unwrap() = None;
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    assert!(f.has(cx, "confirm.ok"));
+}
+
+#[gpui_kit::test]
+async fn delete_error_goes_with_the_next_query_and_masks_nothing(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    *f.docs.write_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    assert!(f.text_of(cx, "documents.delete.error").contains("boom"));
+    *f.docs.fail.lock().unwrap() = Some((500, "pages down".into()));
+    f.scroll_to(cx, 900);
+    f.settle(cx);
+    assert!(f.text_of(cx, "documents.error").contains("pages down"));
+    assert!(f.text_of(cx, "documents.delete.error").contains("boom"));
+
+    *f.docs.fail.lock().unwrap() = None;
+    f.press(cx, REFRESH);
+    assert!(!f.has(cx, "documents.delete.error"), "refresh clears it");
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    assert!(f.has(cx, "documents.delete.error"));
+    f.submit_filter(cx, "price:>1");
+    assert!(
+        !f.has(cx, "documents.delete.error"),
+        "a new query clears it"
+    );
 }
 
 #[gpui_kit::test]
@@ -2523,22 +2697,4 @@ async fn count_refreshes_after_delete(cx: &mut TestAppContext) {
         *f.backend.lists.lock().unwrap() > listed,
         "the list reloads"
     );
-}
-
-#[gpui_kit::test]
-async fn enter_on_discard_leaves_the_delete_dialog_open(cx: &mut TestAppContext) {
-    let docs = fake_documents(cx);
-    *docs.found.lock().unwrap() = 10;
-    let f = open_profile(cx, plain_schema(), docs, true).await;
-    f.open_document(cx);
-    f.edit(cx, RENAMED);
-    f.click(cx, "documents.delete");
-    f.settle(cx);
-    f.press(cx, "tab");
-    f.press(cx, "enter");
-    cx.executor().advance_clock(Duration::from_secs(1));
-    f.settle(cx);
-    assert!(!f.dirty(cx));
-    assert!(f.has(cx, "danger.input"), "the unlock comes next");
-    assert!(f.writes().is_empty());
 }
