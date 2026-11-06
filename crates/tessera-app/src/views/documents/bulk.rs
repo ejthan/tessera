@@ -54,6 +54,8 @@ struct Job {
     /// The fields to set; none deletes.
     partial: Option<Value>,
     count: u64,
+    /// The confirmation said an unsaved draft may go with the documents.
+    draft: bool,
 }
 
 struct Bulk {
@@ -201,6 +203,19 @@ impl Bulk {
             && (self.mode == BulkMode::Delete || self.partial(cx).is_some())
     }
 
+    /// Whether the inspector holds unsaved changes to a stored document.
+    fn has_draft(&self, cx: &App) -> bool {
+        self.view.upgrade().is_some_and(|view| {
+            let inspector = view.read(cx).inspector.read(cx);
+            inspector.current_id().is_some() && inspector.is_dirty(cx)
+        })
+    }
+
+    fn inspector_busy(&self, cx: &App) -> bool {
+        let view = self.view.upgrade();
+        view.is_some_and(|view| view.read(cx).inspector.read(cx).is_busy())
+    }
+
     fn client(&self, cx: &App) -> Option<Client> {
         let connection = self.connection.read(cx);
         connection.connected.as_ref().map(|c| c.client.clone())
@@ -317,8 +332,21 @@ impl Bulk {
         else {
             return;
         };
+        // Whether the row matches is not known here, so the draft is named when it may go.
+        let draft = self.mode == BulkMode::Delete && self.has_draft(cx);
+        if draft && self.inspector_busy(cx) {
+            self.error = Some(t!("documents.delete.busy").to_string().into());
+            return cx.notify();
+        }
         let shown = grouped(count);
         let name = self.collection.clone();
+        let partial = self.partial(cx);
+        let fields = partial
+            .iter()
+            .filter_map(Value::as_object)
+            .flat_map(|fields| fields.keys().cloned())
+            .collect::<Vec<_>>()
+            .join(", ");
         let (title, consequence, action) = match self.mode {
             BulkMode::Delete => (
                 t!("documents.bulk.delete_title"),
@@ -336,7 +364,8 @@ impl Bulk {
                     "documents.bulk.consequence_update",
                     count = shown,
                     collection = name,
-                    filter = filter
+                    filter = filter,
+                    fields = fields
                 ),
                 t!("documents.bulk.update_action"),
             ),
@@ -346,10 +375,15 @@ impl Bulk {
             consequence.to_string(),
             action.to_string(),
         );
+        let mut consequences = vec![consequence];
+        if draft {
+            consequences.push(t!("documents.bulk.draft").to_string());
+        }
         let job = Job {
             filter,
-            partial: self.partial(cx),
+            partial,
             count,
+            draft,
         };
         let this = cx.entity().downgrade();
         let run = move |window: &mut Window, cx: &mut App| run(this.clone(), &job, window, cx);
@@ -358,7 +392,7 @@ impl Bulk {
             // The dialog is gone by then, so a failure shows here.
             Danger::Medium => confirm::open(
                 title,
-                consequence,
+                consequences.join(" "),
                 action,
                 move |window, cx| run(window, cx).detach(),
                 window,
@@ -367,7 +401,7 @@ impl Bulk {
             Danger::High => confirm_danger::open(
                 DangerOptions {
                     title: title.into(),
-                    consequences: vec![consequence.into()],
+                    consequences: consequences.into_iter().map(Into::into).collect(),
                     expected: name.into(),
                     action_label: action.into(),
                     prod,
@@ -440,13 +474,14 @@ impl Bulk {
                 self.error = Some(text.clone());
                 (false, None, Err(text))
             }
-            // A refused value answers 200 with fewer, or none (spec §4.4).
-            Ok(done) if job.partial.is_some() && done != job.count => {
-                let text = t!(
-                    "documents.bulk.update_mismatch",
-                    done = grouped(done),
-                    count = grouped(job.count)
-                );
+            // A refused value answers 200 with fewer, or none (spec §4.4). A delete falls short
+            // when others got there first.
+            Ok(done) if done != job.count => {
+                let (done, count) = (grouped(done), grouped(job.count));
+                let text = match job.partial {
+                    Some(_) => t!("documents.bulk.update_mismatch", done = done, count = count),
+                    None => t!("documents.bulk.delete_mismatch", done = done, count = count),
+                };
                 self.mismatch = Some(text.to_string().into());
                 (true, None, Ok(()))
             }
@@ -461,7 +496,9 @@ impl Bulk {
             }
         };
         self.view
-            .update(cx, |v, cx| v.bulk_finished(cleared, report, cx))
+            .update(cx, |v, cx| {
+                v.bulk_finished(cleared, report, job.draft, window, cx)
+            })
             .ok();
         if self.mode == BulkMode::Delete {
             let name = self.collection.clone();

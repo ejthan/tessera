@@ -186,20 +186,28 @@ pub fn quote_value(value: &str) -> Option<String> {
 /// server treats these spellings differently (design §4.4), so none of them may reach it: a
 /// blank filter counts everything and writes nothing, `*` has no count and updates everything,
 /// and a `*` among the values of `id` counts and writes everything.
+///
+/// Everything behind `id:` is searched for a lone `*`, because a quoted value can hold `]` or
+/// `&`, so the end of the list cannot be told without parsing it. A `*` in a later clause is
+/// refused too, which costs only that clause.
 pub fn names_everything(filter: &str) -> bool {
-    let text: String = filter
+    let bare: String = filter
         .chars()
         .filter(|c| !c.is_whitespace() && !"`()".contains(*c))
         .collect();
-    text.is_empty()
-        || text == "*"
-        || text.match_indices("id:").any(|(at, _)| {
-            let own_field =
-                !text[..at].ends_with(|c: char| c.is_alphanumeric() || "_.".contains(c));
-            let value = &text[at + "id:".len()..];
-            let value = value.strip_prefix('=').unwrap_or(value);
-            let value = value.split(['&', '|']).next().unwrap_or_default();
-            own_field && value.trim_matches(['[', ']']).split(',').any(|v| v == "*")
+    let own_field =
+        |at: usize| !filter[..at].ends_with(|c: char| c.is_alphanumeric() || "_.".contains(c));
+    let lone_star = |values: &str| {
+        !values.trim_start().starts_with("!=")
+            && values
+                .split(|c: char| c.is_whitespace() || ",[]&|=`()".contains(c))
+                .any(|value| value == "*")
+    };
+    bare.is_empty()
+        || bare == "*"
+        || filter.match_indices("id").any(|(at, _)| {
+            let values = filter[at + "id".len()..].trim_start().strip_prefix(':');
+            own_field(at) && values.is_some_and(lone_star)
         })
 }
 

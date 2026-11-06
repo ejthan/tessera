@@ -126,13 +126,14 @@ impl Client {
         })
     }
 
-    /// The number of documents matching `filter_by` (`per_page=0`).
+    /// The number of documents matching `filter_by` (`per_page=0`). Curation sets are off:
+    /// a rule attached to the collection changes `found`, but no write by filter sees it.
     pub async fn count_documents(
         &self,
         collection: &str,
         filter_by: Option<&str>,
     ) -> Result<u64, Error> {
-        let mut pairs = vec![("q", "*"), ("per_page", "0")];
+        let mut pairs = vec![("q", "*"), ("per_page", "0"), ("enable_curations", "false")];
         if let Some(filter) = filter_by {
             pairs.push(("filter_by", filter));
         }

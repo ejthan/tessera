@@ -70,6 +70,7 @@ async fn count_uses_per_page_zero() {
         .and(path("/collections/c/documents/search"))
         .and(query_param("per_page", "0"))
         .and(query_param("filter_by", "a:=1"))
+        .and(query_param("enable_curations", "false"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_string(r#"{"found":9,"out_of":9,"page":1,"search_time_ms":0,"hits":[]}"#),

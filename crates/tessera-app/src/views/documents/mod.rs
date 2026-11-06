@@ -30,7 +30,7 @@ use gpui_kit::{
     Window, anchored, deferred, div, prelude::*, px,
 };
 use rust_i18n::t;
-use tessera_client::Collection;
+use tessera_client::{Collection, Error};
 use tessera_core::documents::MAX_SELECTION;
 use tessera_core::documents::columns::{columns_from_schema, exclude_fields, merge_keys};
 use tessera_core::documents::template::template;
@@ -511,10 +511,13 @@ impl DocumentsView {
     }
 
     /// Takes in the end of a bulk call: `cleared` when it ran, `result` to report.
+    /// `draft_accepted`: the confirmation said an unsaved draft may go.
     fn bulk_finished(
         &mut self,
         cleared: bool,
         result: Option<SharedString>,
+        draft_accepted: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.deleting = false;
@@ -527,6 +530,45 @@ impl DocumentsView {
             }
             cx.notify();
         });
+        self.refresh_inspector(draft_accepted, window, cx);
+    }
+
+    /// The inspector's document may have changed or gone: closes on a gone one, and a draft
+    /// goes with it only if `draft_accepted`. A kept draft stays as it is; its review compares
+    /// with the server anyway.
+    fn refresh_inspector(
+        &mut self,
+        draft_accepted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inspector = self.inspector.read(cx);
+        let id = inspector.current_id().map(str::to_string);
+        let client = self.connection.read(cx).connected.as_ref();
+        let (Some(id), Some(client), true) = (id, client, self.inspector_open) else {
+            return;
+        };
+        let backend = cx.global::<DocumentsBackendGlobal>().0.clone();
+        let fetch = backend.document(client.client.clone(), self.name.clone(), id.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = fetch.await;
+            this.update_in(cx, |this, window, cx| {
+                let inspector = this.inspector.clone();
+                let dirty = inspector.read(cx).is_dirty(cx);
+                match answer {
+                    Err(Error::Http { status: 404, .. }) if !dirty || draft_accepted => {
+                        inspector.update(cx, |i, cx| i.revert(window, cx));
+                        this.close_inspector(window, cx);
+                    }
+                    Ok(document) if !dirty && !inspector.read(cx).is_busy() => {
+                        inspector.update(cx, |i, cx| i.show_found(id, document, window, cx));
+                    }
+                    _ => {}
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Takes in the end of a delete of `ids`: a failure stays with what is ticked and with the

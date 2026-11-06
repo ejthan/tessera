@@ -3009,7 +3009,10 @@ async fn update_sends_filter_and_partial(cx: &mut TestAppContext) {
     f.type_partial(cx, r#"{"title":"x"}"#);
     f.bulk_continue(cx);
     let body = f.text_of(cx, "confirm.body");
-    assert!(body.contains("5") && body.contains("price:>1"), "{body}");
+    assert!(
+        body.contains("5") && body.contains("price:>1") && body.contains("Sets: title"),
+        "{body}"
+    );
     f.confirm_delete(cx);
     wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
     let writes = f.writes();
@@ -3166,6 +3169,115 @@ async fn dialog_buttons_show_their_shortcuts(cx: &mut TestAppContext) {
         key("kbd:cmd-enter", "kbd:ctrl-enter"),
     );
     visual(&f, cx, "bulk.cancel", "kbd:escape");
+}
+
+#[gpui_kit::test]
+async fn short_delete_says_how_many_went(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    *f.docs.filter_short.lock().unwrap() = 2;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.confirm_delete(cx);
+    f.settle(cx);
+    assert!(f.has(cx, "bulk.continue"), "the dialog stays");
+    let text = f.text_of(cx, "bulk.partial");
+    assert!(text.contains("Deleted 3 of 5"), "{text}");
+    assert!(!f.has(cx, "bulk.result"));
+}
+
+#[gpui_kit::test]
+async fn a_draft_is_named_and_goes_only_with_its_row(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.delete_query");
+    f.settle(cx);
+    f.type_bulk_filter(cx, "price:>1");
+    f.wait(cx, 300);
+    f.bulk_continue(cx);
+    assert!(f.text_of(cx, "confirm.body").contains("unsaved"));
+    f.click(cx, "confirm.cancel");
+    wait_for_element(cx, f.handle, "confirm.ok".into(), false).await;
+    f.wait(cx, 1000);
+    assert!(f.dirty(cx), "cancelling changes nothing");
+
+    f.bulk_continue(cx);
+    *f.docs.document_fail.lock().unwrap() = Some((404, "gone".into()));
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert!(!f.has(cx, "documents.inspector"));
+    assert!(!f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn a_draft_of_a_row_that_stayed_is_kept(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.delete_query");
+    f.settle(cx);
+    f.type_bulk_filter(cx, "price:>1");
+    f.wait(cx, 300);
+    f.bulk_continue(cx);
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert!(f.has(cx, "documents.inspector"));
+    assert!(f.inspector_text(cx).contains("\"new\""));
+}
+
+#[gpui_kit::test]
+async fn an_update_never_mentions_a_draft_and_keeps_it(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.update_query");
+    f.settle(cx);
+    f.type_bulk_filter(cx, "price:>1");
+    f.wait(cx, 300);
+    f.type_partial(cx, r#"{"title":"x"}"#);
+    f.bulk_continue(cx);
+    assert!(!f.text_of(cx, "confirm.body").contains("unsaved"));
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert!(f.inspector_text(cx).contains("\"new\""));
+}
+
+#[gpui_kit::test]
+async fn a_clean_inspector_shows_the_stored_document_after_an_update(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.open_document(cx);
+    f.click(cx, "documents.update_query");
+    f.settle(cx);
+    f.type_bulk_filter(cx, "price:>1");
+    f.wait(cx, 300);
+    f.type_partial(cx, r#"{"title":"x"}"#);
+    f.bulk_continue(cx);
+    *f.docs.stored.lock().unwrap() = Some(json!({"id": "3", "title": "x"}));
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert!(f.inspector_text(cx).contains("\"x\""));
+    assert!(!f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn a_clean_inspector_closes_on_a_deleted_document(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.open_document(cx);
+    f.click(cx, "documents.delete_query");
+    f.settle(cx);
+    f.type_bulk_filter(cx, "price:>1");
+    f.wait(cx, 300);
+    f.bulk_continue(cx);
+    assert!(!f.text_of(cx, "confirm.body").contains("unsaved"));
+    *f.docs.document_fail.lock().unwrap() = Some((404, "gone".into()));
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert!(!f.has(cx, "documents.inspector"));
 }
 
 #[gpui_kit::test]

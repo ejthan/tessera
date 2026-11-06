@@ -618,3 +618,59 @@ async fn live_filters_that_name_everything() {
     assert_eq!(id_delete.unwrap(), 3);
     assert_eq!(left.unwrap(), 0);
 }
+
+/// The bulk dialog's preview must be what the write takes, whatever is attached.
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_count_is_what_a_delete_removes_under_a_curation_set() {
+    let client = client();
+    let (name, set) = ("tessera_it_curated", "tessera_it_curated_set");
+    let _ = client.delete_collection(name).await;
+    let rules = [
+        r#"{"items":[{"id":"r","rule":{"query":"*","match":"exact"},"filter_by":"n:<3"}]}"#,
+        r#"{"items":[{"id":"r","rule":{"query":"*","match":"exact"},
+            "excludes":[{"id":"1"},{"id":"2"}]}]}"#,
+        r#"{"items":[{"id":"r","rule":{"query":"*","match":"exact"},
+            "includes":[{"id":"1","position":1}]}]}"#,
+    ];
+    let mut seen = Vec::new();
+    for rule in rules {
+        admin(
+            reqwest::Method::PUT,
+            &format!("/curation_sets/{set}"),
+            Some(rule),
+        )
+        .await;
+        client
+            .create_collection(&serde_json::json!({
+                "name": name,
+                "fields": [{"name": "n", "type": "int32"}],
+                "curation_sets": [set],
+            }))
+            .await
+            .unwrap();
+        let docs: Vec<String> = (1..=12)
+            .map(|i| serde_json::json!({"id": i.to_string(), "n": i}).to_string())
+            .collect();
+        let imported = admin_request(
+            reqwest::Method::POST,
+            &format!("/collections/{name}/documents/import?action=create"),
+        )
+        .body(docs.join("\n"))
+        .send()
+        .await
+        .expect("import");
+        assert!(imported.status().is_success());
+        let counted = client.count_documents(name, Some("n:>5")).await;
+        let deleted = client.delete_by_filter(name, "n:>5").await;
+        let _ = client.delete_collection(name).await;
+        seen.push((counted.unwrap(), deleted.unwrap()));
+    }
+    admin(
+        reqwest::Method::DELETE,
+        &format!("/curation_sets/{set}"),
+        None,
+    )
+    .await;
+    assert_eq!(seen, [(7, 7), (7, 7), (7, 7)]);
+}
