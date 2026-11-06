@@ -137,7 +137,12 @@ gpui_kit::actions!(
         NewSetItem,
         DeleteSetItem,
         ShowItems,
-        ShowSetJson
+        ShowSetJson,
+        ShowAttachment,
+        ImportResource,
+        ExportResource,
+        DetachMissing,
+        CreateMissingSet
     ]
 );
 
@@ -219,6 +224,10 @@ pub const SET_ITEMS: &str = "SetItems";
 pub const SET_ITEM_DIALOG: &str = "SetItemDialog";
 /// An input in that dialog, which has its own ⌘↩.
 const SET_ITEM_INPUT: &str = "SetItemDialog > Input";
+/// Key context of the import and export dialogs of a set.
+pub const SET_IMPORT_DIALOG: &str = "SetImportDialog";
+/// An input in that dialog, which has its own ⌘↩.
+const SET_IMPORT_INPUT: &str = "SetImportDialog > Input";
 /// Key context of a list in a toolbar.
 pub const QUERY_LIST: &str = "QueryList";
 /// The filter of that list, which keeps the focus while the arrows move the selection.
@@ -598,6 +607,11 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     DeleteSetItem,
     ShowItems,
     ShowSetJson,
+    ShowAttachment,
+    ImportResource,
+    ExportResource,
+    DetachMissing,
+    CreateMissingSet,
     StopWaiting,
     RemoveBodyFile,
     ShowResponseBody,
@@ -859,6 +873,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(DELETE, DeleteSetItem, Some(SET_ITEMS)),
         KeyBinding::new(SHOW_FORM, ShowItems, Some(RESOURCES)),
         KeyBinding::new(SHOW_JSON, ShowSetJson, Some(RESOURCES)),
+        KeyBinding::new(SHOW_HITS, ShowAttachment, Some(RESOURCES)),
+        KeyBinding::new(IMPORT_DOCUMENTS, ImportResource, Some(RESOURCES)),
+        KeyBinding::new(EXPORT_DOCUMENTS, ExportResource, Some(RESOURCES)),
+        KeyBinding::new(DELETE_QUERY, DetachMissing, Some(RESOURCES)),
+        KeyBinding::new(SAVE_MODE, CreateMissingSet, Some(RESOURCES)),
+        KeyBinding::new(SAVE, StartTransfer, Some(SET_IMPORT_DIALOG)),
+        KeyBinding::new(SAVE, StartTransfer, Some(SET_IMPORT_INPUT)),
         KeyBinding::new(SHOW_FULL_BODY, ShowFullBody, Some(REQUEST_LOG)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(CONSOLE)),
         KeyBinding::new(SAVE, SendRequest, Some(CONSOLE)),

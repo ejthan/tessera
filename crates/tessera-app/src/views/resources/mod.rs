@@ -3,8 +3,10 @@
 //! The views of the relevance resources, one tab per connection and kind.
 
 pub mod aliases;
+pub mod attachment;
 pub mod name_dialog;
 pub mod presets;
+pub mod set_file;
 pub mod sets;
 pub mod stopwords;
 pub mod synonyms;

@@ -14,13 +14,14 @@ use gpui_kit::component::dock::DockPlacement;
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
 use serde_json::{Value, json};
-use tessera_app::state::ResourceKind;
+use tessera_app::state::{AppState, ResourceKind};
 use tessera_app::views::dock::ResourcePanel;
 use tessera_app::views::resources::ResourceView;
 use tessera_app::views::resources::sets::SetsView;
 use tessera_app::views::root::RootView;
 use tessera_client::{Collection, ItemSet};
 use tessera_core::profile::{Environment, Profile};
+use tessera_core::relevance::synonym_file::SetFileError;
 
 use common::*;
 
@@ -44,22 +45,36 @@ fn two() -> Vec<ItemSet> {
 
 struct Fixture {
     handle: WindowHandle<Root>,
+    state: Entity<AppState>,
+    id: uuid::Uuid,
     relevance: Arc<FakeRelevance>,
     _rt: tokio::runtime::Runtime,
 }
 
 impl Fixture {
     async fn with(cx: &mut TestAppContext, profile: Profile, sets: Vec<ItemSet>) -> Self {
-        let mut books = Collection {
-            name: "books".into(),
+        let lists = [("books", &["s"][..]), ("films", &[])];
+        Self::on(cx, profile, sets, &lists).await
+    }
+
+    /// `collections` with the sets each names.
+    async fn on(
+        cx: &mut TestAppContext,
+        profile: Profile,
+        sets: Vec<ItemSet>,
+        collections: &[(&str, &[&str])],
+    ) -> Self {
+        let collections = collections.iter().map(|(name, attached)| Collection {
+            name: (*name).into(),
+            synonym_sets: attached.iter().map(ToString::to_string).collect(),
             ..Collection::default()
-        };
-        books.synonym_sets = vec!["s".into()];
-        fake_backend(cx, Some((vec![books], vec![])));
+        });
+        let data = fake_backend(cx, Some((collections.collect(), vec![])));
         fake_documents(cx);
         install_search_fake(cx);
         let relevance = fake_relevance(cx);
         *relevance.sets.lock().unwrap() = sets;
+        *relevance.data.lock().unwrap() = Some(data);
         let id = profile.id;
         fake_connector(cx, |_| Ok(server("30.2", true)));
         let secrets = Arc::new(tessera_core::secrets::MemoryStore::default());
@@ -78,6 +93,8 @@ impl Fixture {
         wait_for_element(cx, handle, "synonyms.new".into(), true).await;
         let f = Self {
             handle,
+            state,
+            id,
             relevance,
             _rt: rt,
         };
@@ -190,6 +207,26 @@ impl Fixture {
 
     fn calls(&self) -> Vec<String> {
         self.relevance.calls.lock().unwrap().clone()
+    }
+
+    fn ticked(&self, cx: &mut TestAppContext, collection: &str) -> bool {
+        self.settle(cx);
+        let view = self.view(cx);
+        cx.update(|cx| view.read(cx).box_ticked(collection))
+    }
+
+    fn open_collections(&self, cx: &mut TestAppContext) {
+        self.click(cx, "synonyms.row.s");
+        self.click(cx, "sets.tab.collections");
+    }
+
+    /// Opens the import dialog on a file that holds `text`.
+    fn import(&self, cx: &mut TestAppContext, name: &str, text: &str) {
+        *self.relevance.file_text.lock().unwrap() = Some(Ok(text.to_string()));
+        self.click(cx, "synonyms.import");
+        let picked = std::path::PathBuf::from(name);
+        cx.simulate_path_prompt_response(|_| Some(vec![picked]));
+        self.settle(cx);
     }
 
     fn open_json(&self, cx: &mut TestAppContext) {
@@ -486,4 +523,294 @@ async fn cancelling_sends_nothing(cx: &mut TestAppContext) {
     f.click(cx, "resources.name.ok");
     f.click(cx, "confirm.cancel");
     assert!(f.calls().is_empty());
+}
+
+const ONE: &[(&str, &[&str])] = &[("books", &["s"]), ("films", &["s"])];
+
+#[gpui_kit::test]
+async fn toggling_asks_the_backend_and_shows_the_answer(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.open_collections(cx);
+    assert!(f.ticked(cx, "books") && !f.ticked(cx, "films"));
+    f.click(cx, "sets.attach.films");
+    assert_eq!(f.calls(), ["attach films s true"]);
+    assert!(f.ticked(cx, "films"));
+    f.click(cx, "sets.attach.books");
+    assert_eq!(f.calls()[1], "attach books s false");
+    assert!(!f.ticked(cx, "books"));
+}
+
+#[gpui_kit::test]
+async fn box_shows_the_answer_not_the_click(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    *f.relevance.attach_ignored.lock().unwrap() = true;
+    f.open_collections(cx);
+    f.click(cx, "sets.attach.films");
+    assert!(!f.ticked(cx, "films"));
+}
+
+#[gpui_kit::test]
+async fn a_failed_toggle_shows_and_the_box_stays(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    *f.relevance.fail.lock().unwrap() = Some((400, "no way".into()));
+    f.open_collections(cx);
+    f.click(cx, "sets.attach.films");
+    assert!(f.label(cx, "sets.error").contains("no way"));
+    assert!(!f.ticked(cx, "films"));
+}
+
+#[gpui_kit::test]
+async fn attach_on_prod_confirms(cx: &mut TestAppContext) {
+    let f = Fixture::prod(cx, two()).await;
+    f.open_collections(cx);
+    f.click(cx, "sets.attach.films");
+    assert!(f.calls().is_empty());
+    f.click(cx, "confirm.ok");
+    assert_eq!(f.calls(), ["attach films s true"]);
+}
+
+#[gpui_kit::test]
+async fn dropped_names_show(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    *f.relevance.attach_dropped.lock().unwrap() = vec!["old".into()];
+    f.open_collections(cx);
+    f.click(cx, "sets.attach.films");
+    assert!(f.label(cx, "sets.note").contains("old"));
+}
+
+#[gpui_kit::test]
+async fn mismatch_shows(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    *f.relevance.attach_mismatch.lock().unwrap() = true;
+    f.open_collections(cx);
+    f.click(cx, "sets.attach.films");
+    assert!(f.label(cx, "sets.error").contains("not what was sent"));
+}
+
+#[gpui_kit::test]
+async fn missing_sets_show_with_detach(cx: &mut TestAppContext) {
+    let lists: &[(&str, &[&str])] = &[("books", &["gone"]), ("films", &["gone"])];
+    let profile = Profile::new("test", vec![node()]);
+    let f = Fixture::on(cx, profile, two(), lists).await;
+    let text = f.label(cx, "sets.missing.gone");
+    assert!(
+        text.contains("books, films") && text.contains("Every search"),
+        "{text}"
+    );
+    f.press(cx, DETACH_MISSING);
+    assert_eq!(
+        f.calls(),
+        ["attach books gone false", "attach films gone false"]
+    );
+    assert!(!f.has(cx, "sets.missing.gone"));
+}
+
+#[gpui_kit::test]
+async fn a_failed_detach_of_a_missing_set_stops(cx: &mut TestAppContext) {
+    let lists: &[(&str, &[&str])] = &[("books", &["gone"]), ("films", &["gone"])];
+    let profile = Profile::new("test", vec![node()]);
+    let f = Fixture::on(cx, profile, two(), lists).await;
+    *f.relevance.fail_call.lock().unwrap() = Some(("attach books".into(), "no way".into()));
+    f.click(cx, "sets.missing.detach.gone");
+    assert_eq!(f.calls(), ["attach books gone false"]);
+}
+
+#[gpui_kit::test]
+async fn new_from_a_missing_set_is_prefilled(cx: &mut TestAppContext) {
+    let lists: &[(&str, &[&str])] = &[("books", &["gone"])];
+    let profile = Profile::new("test", vec![node()]);
+    let f = Fixture::on(cx, profile, two(), lists).await;
+    f.click(cx, "sets.missing.new.gone");
+    f.click(cx, "resources.name.ok");
+    assert_eq!(f.calls(), ["save_set gone 0"]);
+    assert!(!f.has(cx, "sets.missing.gone"));
+}
+
+#[gpui_kit::test]
+async fn a_failed_list_names_no_set_missing(cx: &mut TestAppContext) {
+    let profile = Profile::new("test", vec![node()]);
+    let lists: &[(&str, &[&str])] = &[("books", &["s"])];
+    let f = Fixture::on(cx, profile, two(), lists).await;
+    *f.relevance.fail_reads.lock().unwrap() = true;
+    f.press(cx, REFRESH);
+    assert!(f.has(cx, "sets.list_error"));
+    assert!(!f.has(cx, "sets.missing.s"));
+}
+
+#[gpui_kit::test]
+async fn delete_detaches_then_deletes(cx: &mut TestAppContext) {
+    let profile = Profile::new("test", vec![node()]);
+    let f = Fixture::on(cx, profile, two(), ONE).await;
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.delete");
+    let line = f.label(cx, "danger.consequence.0");
+    assert!(
+        line.contains("books, films") && line.contains("cannot stay"),
+        "{line}"
+    );
+    f.fill(cx, "danger.input", "s");
+    f.click(cx, "danger.ok");
+    assert_eq!(
+        f.calls(),
+        [
+            "attach books s false",
+            "attach films s false",
+            "delete_set s"
+        ]
+    );
+    assert!(!f.has(cx, "synonyms.row.s"));
+    assert!(!f.has(cx, "sets.current"));
+}
+
+#[gpui_kit::test]
+async fn delete_stops_at_a_failed_detach(cx: &mut TestAppContext) {
+    let profile = Profile::new("test", vec![node()]);
+    let f = Fixture::on(cx, profile, two(), ONE).await;
+    *f.relevance.fail_call.lock().unwrap() = Some(("attach films".into(), "no way".into()));
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.delete");
+    f.fill(cx, "danger.input", "s");
+    f.click(cx, "danger.ok");
+    assert_eq!(f.calls(), ["attach books s false", "attach films s false"]);
+    let error = f.label(cx, "danger.error");
+    assert!(
+        error.contains("films") && error.contains("books"),
+        "{error}"
+    );
+    assert!(error.contains("still exists"), "{error}");
+}
+
+#[gpui_kit::test]
+async fn delete_checks_afterwards(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    *f.relevance.attach_ignored.lock().unwrap() = true;
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.delete");
+    f.fill(cx, "danger.input", "s");
+    f.click(cx, "danger.ok");
+    assert!(f.label(cx, "danger.error").contains("still name"));
+}
+
+#[gpui_kit::test]
+async fn delete_without_users_asks_plainly(cx: &mut TestAppContext) {
+    let profile = Profile::new("test", vec![node()]);
+    let lists: &[(&str, &[&str])] = &[("books", &[])];
+    let f = Fixture::on(cx, profile, two(), lists).await;
+    f.click(cx, "synonyms.row.s");
+    f.press(cx, DELETE);
+    f.click(cx, "confirm.ok");
+    assert_eq!(f.calls(), ["delete_set s"]);
+}
+
+#[gpui_kit::test]
+async fn cancelling_delete_sends_nothing(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.delete");
+    f.press(cx, "escape");
+    assert!(f.calls().is_empty());
+}
+
+const INCOMING: &str =
+    r#"{"items":[{"id":"a","synonyms":["x","z"]},{"id":"c","synonyms":["r","s"]}]}"#;
+
+#[gpui_kit::test]
+async fn import_merge_counts(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.click(cx, "synonyms.row.s");
+    f.import(cx, "in.json", INCOMING);
+    let counts = f.label(cx, "sets.import.counts");
+    assert!(
+        counts.contains("Adds 1, changes 1 and removes 0"),
+        "{counts}"
+    );
+    f.click(cx, "sets.import.start");
+    assert_eq!(f.calls(), ["save_set s 3"]);
+}
+
+#[gpui_kit::test]
+async fn import_into_a_new_set_refuses_an_existing_name(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.import(cx, "in.csv", "id,synonyms\na,x;y\n");
+    f.fill(cx, "sets.import.name", "s");
+    f.press(cx, SAVE);
+    assert!(f.label(cx, "sets.import.error").contains("already exists"));
+    f.fill(cx, "sets.import.name", "fresh");
+    f.click(cx, "sets.import.start");
+    assert_eq!(f.calls(), ["save_set fresh 1"]);
+}
+
+#[gpui_kit::test]
+async fn import_replace_on_prod_needs_the_name(cx: &mut TestAppContext) {
+    let f = Fixture::prod(cx, two()).await;
+    f.click(cx, "synonyms.row.s");
+    f.import(cx, "in.json", INCOMING);
+    f.click(cx, "sets.import.replace");
+    let counts = f.label(cx, "sets.import.counts");
+    assert!(counts.contains("removes 1"), "{counts}");
+    f.click(cx, "sets.import.start");
+    assert!(f.calls().is_empty());
+    f.fill(cx, "danger.input", "s");
+    f.click(cx, "danger.ok");
+    assert_eq!(f.calls(), ["save_set s 2"]);
+}
+
+#[gpui_kit::test]
+async fn import_refuses_duplicate_ids(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.import(cx, "in.csv", "id,synonyms\na,x;y\na,p;q\n");
+    assert!(f.label(cx, "sets.import.problem").contains("Rows 1 and 2"));
+    f.click(cx, "sets.import.start");
+    f.press(cx, SAVE);
+    assert!(f.calls().is_empty());
+}
+
+#[gpui_kit::test]
+async fn import_says_why_a_file_cannot_be_read(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.import(cx, "in.json", "");
+    f.click(cx, "sets.import.cancel");
+    *f.relevance.file_text.lock().unwrap() = Some(Err(SetFileError::TooLarge(99)));
+    f.click(cx, "synonyms.import");
+    let picked = std::path::PathBuf::from("big.json");
+    cx.simulate_path_prompt_response(|_| Some(vec![picked]));
+    assert!(f.label(cx, "sets.error").contains("99"));
+}
+
+#[gpui_kit::test]
+async fn export_writes_csv(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.export");
+    f.click(cx, "sets.export.format.csv");
+    assert!(f.has(cx, "sets.export.note"));
+    f.click(cx, "sets.export.start");
+    let path = std::path::PathBuf::from("/tmp/s.csv");
+    let chosen = path.clone();
+    cx.simulate_new_path_selection(move |_| Some(chosen));
+    f.settle(cx);
+    let written = f.relevance.written.lock().unwrap().clone();
+    assert_eq!(written[0].0, path);
+    assert!(
+        written[0].1.starts_with("id,root,synonyms"),
+        "{}",
+        written[0].1
+    );
+    assert!(written[0].1.contains("a,,x;y"), "{}", written[0].1);
+    assert!(f.label(cx, "sets.note").contains("s.csv"));
+}
+
+#[gpui_kit::test]
+async fn import_has_no_control_on_curations(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    assert!(f.has(cx, "synonyms.import"));
+    cx.update(|cx| {
+        f.state.update(cx, |s, cx| {
+            s.open_resource(f.id, ResourceKind::Curations, cx)
+        });
+    });
+    assert!(!f.has(cx, "synonyms.import"));
+    assert!(!f.has(cx, "sets.import.start"));
+    f.press(cx, key("cmd-shift-i", "ctrl-shift-i"));
+    assert!(!cx.did_prompt_for_paths());
 }

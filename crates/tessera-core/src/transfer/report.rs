@@ -121,6 +121,15 @@ impl Drop for PartFile {
     }
 }
 
+/// Writes `text` to `path`, for the owner only: an existing file is replaced only once the new
+/// one is complete on disk.
+pub async fn write_text(path: &Path, text: &str) -> io::Result<()> {
+    let (part, file) = PartFile::create(path, true).await?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(text.as_bytes()).await?;
+    part.persist(writer, path).await
+}
+
 /// The failed rows of one job. `Send + Sync`: shared as `Arc<Report>` once the job ended.
 #[derive(Debug)]
 pub struct Report {
@@ -256,6 +265,37 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[tokio::test]
+    async fn write_text_replaces_a_file_and_is_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("set.csv");
+        write_text(&path, "one").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        write_text(&path, "two").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_write_text_leaves_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real");
+        std::fs::write(&target, "kept").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(write_text(&link, "new").await.is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
+        let missing = dir.path().join("no_dir").join("file");
+        assert!(write_text(&missing, "new").await.is_err());
+    }
 
     fn row(line: u64, raw: &str) -> ReportRow {
         ReportRow {

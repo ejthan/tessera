@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{
@@ -18,7 +19,7 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use serde_json::Value;
-use tessera_client::{ItemSet, SetKind};
+use tessera_client::{Collection, ItemSet, SetKind};
 use tessera_core::relevance::attachment::users;
 use tessera_core::relevance::changes::{ItemIssue, changes};
 use tessera_core::relevance::synonym_file::{
@@ -34,11 +35,12 @@ use super::name_dialog::NameDialog;
 use super::synonyms::{ITEM_COLUMNS, SynonymItemDialog, item_row};
 use super::{
     Danger, ErrorSlot, ListRow, ResourceColumn, ResourceList, client_of, confirm_write,
-    empty_state, list_error_text, notice, report_to, toolbar,
+    empty_state, list_error_text, notice, report_to, row_button, toolbar,
 };
 use crate::actions::{
-    DeleteSetItem, EditResource, FocusResourceFilter, NewResource, NewSetItem, RESOURCES,
-    ReloadResource, SET_ITEMS, SaveResource, ShowItems, ShowSetJson,
+    CreateMissingSet, DeleteResource, DeleteSetItem, DetachMissing, EditResource, ExportResource,
+    FocusResourceFilter, ImportResource, NewResource, NewSetItem, RESOURCES, ReloadResource,
+    SET_ITEMS, SaveResource, ShowAttachment, ShowItems, ShowSetJson,
 };
 use crate::connection::{ConnectionState, error_text};
 use crate::relevance::RelevanceBackendGlobal;
@@ -54,11 +56,12 @@ const COLUMNS: &[ResourceColumn] = &[
 /// Width of the list side.
 const LIST_WIDTH: f32 = 480.;
 
-/// What a whole-set save asks for.
+/// The tabs of the right side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SetTab {
     Items,
     Json,
+    Collections,
 }
 
 /// What `issue` means, in words.
@@ -104,6 +107,7 @@ pub(super) fn file_error_text(error: &SetFileError) -> String {
             let lines: Vec<String> = issues.iter().map(issue_text).collect();
             lines.join(" ")
         }
+        SetFileError::Read(detail) => t!("sets.file.read", detail = detail).to_string(),
         SetFileError::TooLarge(size) => {
             t!("sets.file.too_large", size = size, limit = SET_FILE_LIMIT).to_string()
         }
@@ -112,20 +116,24 @@ pub(super) fn file_error_text(error: &SetFileError) -> String {
 
 /// The content of a sets tab. `kind` decides the endpoints, the items do the rest.
 pub struct SetsView {
-    kind: SetKind,
-    connection: Entity<ConnectionState>,
-    list: Entity<ResourceList>,
+    pub(super) kind: SetKind,
+    pub(super) connection: Entity<ConnectionState>,
+    pub(super) list: Entity<ResourceList>,
     items: Entity<ResourceList>,
-    sets: Vec<ItemSet>,
+    pub(super) sets: Vec<ItemSet>,
     /// The first answer arrived.
-    loaded: bool,
-    list_error: Option<SharedString>,
+    pub(super) loaded: bool,
+    pub(super) list_error: Option<SharedString>,
     load_task: Option<Task<()>>,
-    /// The collection list the Collections column shows.
+    /// The last collection list. An invalidated one stays until the next arrives.
+    pub(super) collections: Vec<Collection>,
     collections_loaded: Option<Instant>,
     /// The set on the right, which the selection follows.
-    followed: Option<String>,
+    pub(super) followed: Option<String>,
     tab: SetTab,
+    pub(super) attach_filter: Entity<InputState>,
+    /// The collection a toggle is running for.
+    pub(super) pending: Option<String>,
     json: Entity<JsonEditor>,
     /// What the JSON tab held when it was filled.
     json_loaded: String,
@@ -133,12 +141,12 @@ pub struct SetsView {
     saving: bool,
     review_task: Option<Task<()>>,
     /// Why the last write failed, or what it left.
-    error: Option<SharedString>,
-    note: Option<SharedString>,
+    pub(super) error: Option<SharedString>,
+    pub(super) note: Option<SharedString>,
     dialog: Option<Entity<SynonymItemDialog>>,
     items_focus: FocusHandle,
     focus_handle: FocusHandle,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 impl SetsView {
@@ -151,7 +159,11 @@ impl SetsView {
     ) -> Self {
         let list = cx.new(|cx| ResourceList::new("synonyms", COLUMNS, window, cx));
         let items = cx.new(|cx| ResourceList::new("synonyms.items", ITEM_COLUMNS, window, cx));
+        let attach_filter = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("sets.attach.filter").to_string())
+        });
         let subscriptions = [
+            cx.subscribe(&attach_filter, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.observe_in(&list, window, |this, _, window, cx| {
                 this.follow_selection(window, cx);
             }),
@@ -169,9 +181,12 @@ impl SetsView {
             loaded: false,
             list_error: None,
             load_task: None,
+            collections: Vec::new(),
             collections_loaded: None,
             followed: None,
             tab: SetTab::Items,
+            attach_filter,
+            pending: None,
             json: cx.new(|cx| JsonEditor::new("", false, window, cx)),
             json_loaded: String::new(),
             saving: false,
@@ -230,16 +245,17 @@ impl SetsView {
 
     /// The Collections column follows a new collection list; the rest of a poll changes nothing.
     fn take_collections(&mut self, cx: &mut Context<Self>) {
-        let loaded = self.connection.read(cx).collection_cache.loaded_at;
-        if loaded != self.collections_loaded {
+        let cache = &self.connection.read(cx).collection_cache;
+        let (loaded, collections) = (cache.loaded_at, cache.collections.clone());
+        if let (true, Some(collections)) = (loaded != self.collections_loaded, collections) {
             self.collections_loaded = loaded;
+            self.collections = collections;
             self.show_rows(cx);
+            cx.notify();
         }
     }
 
     fn show_rows(&mut self, cx: &mut Context<Self>) {
-        let cache = &self.connection.read(cx).collection_cache;
-        let collections = cache.collections.as_deref().unwrap_or_default();
         let rows: Vec<ListRow> = self
             .sets
             .iter()
@@ -248,7 +264,7 @@ impl SetsView {
                 cells: vec![
                     set.name.clone(),
                     set.items.len().to_string(),
-                    users(collections, self.kind, &set.name).join(", "),
+                    users(&self.collections, self.kind, &set.name).join(", "),
                 ],
                 warning: None,
             })
@@ -256,7 +272,7 @@ impl SetsView {
         self.list.update(cx, |l, cx| l.set_rows(rows, cx));
     }
 
-    fn current(&self) -> Option<&ItemSet> {
+    pub(super) fn current(&self) -> Option<&ItemSet> {
         let name = self.followed.as_ref()?;
         self.sets.iter().find(|s| &s.name == name)
     }
@@ -324,11 +340,18 @@ impl SetsView {
         match tab {
             SetTab::Items => self.items_focus.focus(window, cx),
             SetTab::Json => self.json.update(cx, |e, cx| e.focus(window, cx)),
+            SetTab::Collections => {}
         }
         cx.notify();
     }
 
-    fn ask_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Asks for a name, with `prefill` in the input, and creates the empty set.
+    pub(super) fn ask_new(
+        &mut self,
+        prefill: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (this, kind) = (cx.entity().downgrade(), self.kind);
         let connection = self.connection.clone();
         self.connection.update(cx, |c, cx| {
@@ -353,7 +376,8 @@ impl SetsView {
                     write_after_prod_confirm(danger, &this, &conn, run, window, cx);
                 };
                 let title = t!("sets.new_title").to_string();
-                NameDialog::open(title, connection, check, on_name, window, cx);
+                let prefill = prefill.unwrap_or_default();
+                NameDialog::prefilled(prefill, title, connection, check, on_name, window, cx);
             });
         });
     }
@@ -472,7 +496,7 @@ impl SetsView {
     }
 
     /// D62: a save that removes items asks, by name on prod; on prod any save asks.
-    fn review(
+    pub(super) fn review(
         &mut self,
         stored: ItemSet,
         items: Vec<Value>,
@@ -530,11 +554,43 @@ impl SetsView {
         }
     }
 
+    /// The server no longer holds `name`.
+    pub(super) fn set_deleted(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.followed.as_deref() == Some(name) {
+            self.followed = None;
+            self.list.update(cx, |l, cx| l.select(None, cx));
+            self.forget_json(cx);
+        }
+        self.sets.retain(|s| s.name != name);
+        self.show_rows(cx);
+        self.show_items(window, cx);
+        self.reload(window, cx);
+    }
+
+    /// Detaches the first missing set, which carries the shortcut.
+    fn detach_first_missing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(row) = self.missing_sets().into_iter().next() {
+            self.ask_detach_missing(row.set, window, cx);
+        }
+    }
+
+    fn create_first_missing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(row) = self.missing_sets().into_iter().next() {
+            self.ask_new(Some(row.set), window, cx);
+        }
+    }
+
     /// Actions with no target now, for [`gated`](crate::actions::gated).
     pub fn gates(&self, cx: &App) -> Vec<(bool, &'static dyn Action)> {
         let no_set = self.current().is_none();
         let no_item = self.items.read(cx).selected(cx).is_none();
+        let no_row = self.list.read(cx).selected(cx).is_none();
+        let none_missing = self.missing_sets().is_empty();
         vec![
+            (no_row, &DeleteResource),
+            (no_set, &ExportResource),
+            (none_missing, &DetachMissing),
+            (none_missing, &CreateMissingSet),
             (no_set, &NewSetItem),
             (no_item, &EditResource),
             (no_item, &DeleteSetItem),
@@ -615,21 +671,26 @@ impl SetsView {
         let theme = cx.theme();
         let (danger, muted) = (theme.danger, theme.muted_foreground);
         let Some(name) = self.current().map(|s| s.name.clone()) else {
-            return div()
-                .p_4()
-                .text_sm()
-                .text_color(muted)
-                .child(t!("sets.pick").to_string())
+            return v_flex()
+                .children(self.error.clone().map(|e| notice("sets.error", e, danger)))
+                .children(self.note.clone().map(|e| notice("sets.note", e, muted)))
+                .child(
+                    div()
+                        .p_4()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(t!("sets.pick").to_string()),
+                )
                 .into_any_element();
         };
         let tabs = TabBar::new("sets.tabs")
             .underline()
-            .selected_index(usize::from(self.tab == SetTab::Json))
+            .selected_index(self.tab as usize)
             .on_click(cx.listener(|this, ix: &usize, window, cx| {
-                let tab = if *ix == 0 {
-                    SetTab::Items
-                } else {
-                    SetTab::Json
+                let tab = match ix {
+                    0 => SetTab::Items,
+                    1 => SetTab::Json,
+                    _ => SetTab::Collections,
                 };
                 this.show_tab(tab, window, cx);
             }))
@@ -646,10 +707,18 @@ impl SetsView {
                 &ShowSetJson,
                 RESOURCES,
                 window,
+            ))
+            .child(view_tab(
+                "sets.tab.collections",
+                t!("sets.tab.collections").to_string().into(),
+                &ShowAttachment,
+                RESOURCES,
+                window,
             ));
         let content = match self.tab {
             SetTab::Items => self.items_tab(window, cx).into_any_element(),
             SetTab::Json => self.json_tab(window, cx).into_any_element(),
+            SetTab::Collections => self.attachment_tab(&name, cx).into_any_element(),
         };
         v_flex()
             .size_full()
@@ -689,6 +758,10 @@ impl Render for SetsView {
         let locked = self.connection.read(cx).writes_locked();
         let empty = self.loaded && self.list_error.is_none() && self.sets.is_empty();
         let right = self.right_pane(window, cx);
+        let no_row = self.list.read(cx).selected(cx).is_none();
+        let no_set = self.current().is_none();
+        let synonyms = self.kind == SetKind::Synonym;
+        let missing = self.missing_rows(window, cx);
         let left = v_flex()
             .size_full()
             .child(toolbar(
@@ -704,6 +777,7 @@ impl Render for SetsView {
                     .clone()
                     .map(|e| notice("sets.list_error", e, danger)),
             )
+            .children(missing)
             .child(if empty {
                 empty_state("synonyms", DOCS_URL).into_any_element()
             } else {
@@ -712,11 +786,71 @@ impl Render for SetsView {
                     .min_h_0()
                     .child(self.list.clone())
                     .into_any_element()
-            });
+            })
+            .child(
+                h_flex()
+                    .flex_none()
+                    .flex_wrap()
+                    .gap_2()
+                    .p_2()
+                    .child(row_button(
+                        "synonyms.delete".into(),
+                        t!("sets.delete").to_string(),
+                        &DeleteResource,
+                        (no_row, locked),
+                        &self.focus_handle,
+                        window,
+                        cx,
+                    ))
+                    .when(synonyms, |el| {
+                        el.child(row_button(
+                            "synonyms.import".into(),
+                            t!("sets.import").to_string(),
+                            &ImportResource,
+                            (false, locked),
+                            &self.focus_handle,
+                            window,
+                            cx,
+                        ))
+                        .child(row_button(
+                            "synonyms.export".into(),
+                            t!("sets.export").to_string(),
+                            &ExportResource,
+                            (no_set, false),
+                            &self.focus_handle,
+                            window,
+                            cx,
+                        ))
+                    }),
+            );
         div()
             .track_focus(&self.focus_handle)
             .size_full()
-            .on_action(cx.listener(|this, _: &NewResource, window, cx| this.ask_new(window, cx)))
+            .on_action(cx.listener(|this, _: &NewResource, window, cx| {
+                this.ask_new(None, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteResource, window, cx| {
+                this.ask_delete(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DetachMissing, window, cx| {
+                this.detach_first_missing(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CreateMissingSet, window, cx| {
+                this.create_first_missing(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowAttachment, window, cx| {
+                this.show_tab(SetTab::Collections, window, cx);
+            }))
+            .when(synonyms, |el| {
+                el.on_action(cx.listener(|this, _: &ImportResource, window, cx| {
+                    this.ask_import(window, cx);
+                }))
+                .on_action(cx.listener(
+                    |this, _: &ExportResource, window, cx| {
+                        this.ask_export(window, cx);
+                    },
+                ))
+            })
             .on_action(cx.listener(|this, _: &NewSetItem, window, cx| {
                 this.open_dialog(false, window, cx);
             }))
@@ -756,7 +890,7 @@ impl Render for SetsView {
 }
 
 /// Runs `run` at once, or on prod after a plain confirmation (D62).
-fn write_after_prod_confirm(
+pub(super) fn write_after_prod_confirm(
     danger: Danger,
     view: &WeakEntity<SetsView>,
     connection: &Entity<ConnectionState>,
@@ -778,7 +912,7 @@ fn write_after_prod_confirm(
 }
 
 /// Refuses a name that exists, after a fresh list.
-fn exists(
+pub(super) fn exists(
     connection: &Entity<ConnectionState>,
     kind: SetKind,
     name: String,
@@ -802,7 +936,7 @@ fn exists(
 
 /// `PUT`s the whole set and compares the count read back: the server keeps the last of equal
 /// ids without a word. Runs on through a closed tab.
-fn send_set(
+pub(super) fn send_set(
     view: WeakEntity<SetsView>,
     name: String,
     items: Vec<Value>,

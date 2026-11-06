@@ -24,7 +24,9 @@ use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
 use tessera_app::documents::{DocumentsBackend, DocumentsBackendGlobal, PageResult};
 use tessera_app::jobs::{self, JobId, JobsGlobal};
 use tessera_app::poller::{CollectionsFetcherGlobal, NodeSample, PollFetcherGlobal, SampleFuture};
-use tessera_app::relevance::{RelevanceBackend, RelevanceBackendGlobal};
+use tessera_app::relevance::{
+    AttachError, AttachOutcome, RelevanceBackend, RelevanceBackendGlobal,
+};
 use tessera_app::runtime::Tokio;
 use tessera_app::search::{MultiAnswer, SearchAnswer, SearchBackend, SearchBackendGlobal};
 use tessera_app::state::AppState;
@@ -38,6 +40,7 @@ use tessera_client::{
 };
 use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
+use tessera_core::relevance::synonym_file::SetFileError;
 use tessera_core::search::results::{parse_multi, parse_result};
 use tessera_core::secrets::{MemoryStore, SecretStore};
 use tessera_core::store::{ConnectionsFile, StoreError};
@@ -1286,6 +1289,20 @@ pub struct FakeRelevance {
     pub keep_items: Mutex<Option<usize>>,
     /// Calls that start with this fail with this message, whatever `fail` says.
     pub fail_call: Mutex<Option<(String, String)>>,
+    /// `sets` and `set` fail.
+    pub fail_reads: Mutex<bool>,
+    /// The collections `attach` edits and `list` reads, while `attach_ignored` is off.
+    pub data: Mutex<Option<Arc<FakeData>>>,
+    /// `attach` changes nothing on the server.
+    pub attach_ignored: Mutex<bool>,
+    /// `attach` reports these names as left out.
+    pub attach_dropped: Mutex<Vec<String>>,
+    /// `attach` reports a list unlike the one sent.
+    pub attach_mismatch: Mutex<bool>,
+    /// What `read_set_file` answers.
+    pub file_text: Mutex<Option<Result<String, SetFileError>>>,
+    /// What `write_set_file` was given.
+    pub written: Mutex<Vec<(PathBuf, String)>>,
     /// The next `save_stopwords` answers once this resolves.
     pub hold: Mutex<Option<oneshot::Receiver<()>>>,
 }
@@ -1323,7 +1340,13 @@ impl RelevanceBackend for FakeRelevanceBackend {
         _: SetKind,
     ) -> tessera_app::collections::BoxFuture<Result<Vec<ItemSet>, Error>> {
         let sets = self.0.sets.lock().unwrap().clone();
-        Box::pin(async move { Ok(sets) })
+        let fail = *self.0.fail_reads.lock().unwrap();
+        Box::pin(async move {
+            if fail {
+                return Err(http_error((500, "no list".into())));
+            }
+            Ok(sets)
+        })
     }
 
     fn set(
@@ -1362,6 +1385,67 @@ impl RelevanceBackend for FakeRelevanceBackend {
             set
         });
         Box::pin(async move { answer })
+    }
+
+    fn delete_set(
+        &self,
+        _: Client,
+        _: SetKind,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        let answer = self.0.write(format!("delete_set {name}"));
+        if answer.is_ok() {
+            self.0.sets.lock().unwrap().retain(|s| s.name != name);
+        }
+        Box::pin(async move { answer })
+    }
+
+    fn attach(
+        &self,
+        _: Client,
+        _: SetKind,
+        collection: String,
+        set: String,
+        attach: bool,
+    ) -> tessera_app::collections::BoxFuture<Result<AttachOutcome, AttachError>> {
+        let answer = self.0.write(format!("attach {collection} {set} {attach}"));
+        let mut list = Vec::new();
+        if let Some(data) = &*self.0.data.lock().unwrap() {
+            let mut data = data.data.lock().unwrap();
+            let all = &mut data.as_mut().unwrap().0;
+            if let Some(found) = all.iter_mut().find(|c| c.name == collection) {
+                if answer.is_ok() && !*self.0.attach_ignored.lock().unwrap() {
+                    found.synonym_sets.retain(|n| *n != set);
+                    if attach {
+                        found.synonym_sets.push(set);
+                    }
+                }
+                list.clone_from(&found.synonym_sets);
+            }
+        }
+        let outcome = AttachOutcome {
+            list,
+            dropped: self.0.attach_dropped.lock().unwrap().clone(),
+            mismatch: *self.0.attach_mismatch.lock().unwrap(),
+        };
+        Box::pin(async move { answer.map(|()| outcome).map_err(Into::into) })
+    }
+
+    fn read_set_file(
+        &self,
+        _: PathBuf,
+    ) -> tessera_app::collections::BoxFuture<Result<String, SetFileError>> {
+        let text = self.0.file_text.lock().unwrap().clone();
+        Box::pin(async move { text.unwrap_or_else(|| Ok(String::new())) })
+    }
+
+    fn write_set_file(
+        &self,
+        path: PathBuf,
+        text: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), String>> {
+        self.0.written.lock().unwrap().push((path, text));
+        Box::pin(async move { Ok(()) })
     }
 
     fn save_item(
@@ -1609,6 +1693,7 @@ pub const OPEN_HISTORY: &str = key("cmd-shift-h", "ctrl-shift-h");
 pub const OPEN_SAVED: &str = key("cmd-o", "ctrl-o");
 pub const SAVE_QUERY: &str = key("cmd-s", "ctrl-s");
 pub const LEAVE_PRESET: &str = key("cmd-shift-g", "ctrl-shift-g");
+pub const DETACH_MISSING: &str = key("cmd-shift-k", "ctrl-shift-k");
 pub const OPEN_PRESETS_TAB: &str = key("alt-cmd-5", "ctrl-alt-5");
 pub const OPEN_PRESETS: &str = key("cmd-alt-p", "ctrl-alt-p");
 pub const OPEN_EXPORT: &str = key("cmd-alt-e", "ctrl-alt-e");

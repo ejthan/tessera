@@ -50,8 +50,21 @@ impl NameDialog {
         window: &mut Window,
         cx: &mut App,
     ) {
+        Self::prefilled(String::new(), title, connection, check, on_name, window, cx);
+    }
+
+    /// [`Self::open`] with `prefill` in the input.
+    pub fn prefilled(
+        prefill: String,
+        title: String,
+        connection: Entity<ConnectionState>,
+        check: impl Fn(String, &mut App) -> Task<Result<(), SharedString>> + 'static,
+        on_name: impl Fn(String, &mut Window, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let view = cx.new(|cx| {
-            let name = cx.new(|cx| InputState::new(window, cx));
+            let name = cx.new(|cx| InputState::new(window, cx).default_value(prefill));
             Self {
                 _subscription: cx.subscribe_in(
                     &name,

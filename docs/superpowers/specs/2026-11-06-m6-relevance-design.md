@@ -329,7 +329,7 @@ pub trait RelevanceBackend: Send + Sync {
     fn alias(&self, client: Client, name: String) -> BoxFuture<Result<Alias, Error>>;
     fn delete_alias(&self, client: Client, name: String) -> BoxFuture<Result<(), Error>>;
     fn delete_preset(&self, client: Client, name: String) -> BoxFuture<Result<(), Error>>;
-    fn attach(&self, client: Client, kind: SetKind, collection: String, set: String, attach: bool) -> BoxFuture<Result<AttachOutcome, Error>>;
+    fn attach(&self, client: Client, kind: SetKind, collection: String, set: String, attach: bool) -> BoxFuture<Result<AttachOutcome, AttachError>>;
     fn read_set_file(&self, path: PathBuf) -> BoxFuture<Result<String, SetFileError>>;
     fn write_set_file(&self, path: PathBuf, text: String) -> BoxFuture<Result<(), String>>;
     fn copy_dir(&self) -> BoxFuture<Result<Arc<TempDir>, String>>;

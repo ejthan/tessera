@@ -49,6 +49,8 @@ pub enum SetFileError {
     },
     /// The items parse, and some cannot be sent.
     Items(Vec<ItemIssue>),
+    /// The file could not be read.
+    Read(String),
     /// More than [`SET_FILE_LIMIT`] bytes; holds the size.
     TooLarge(u64),
 }
