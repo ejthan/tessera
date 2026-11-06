@@ -178,7 +178,7 @@ All crates set `publish = false`. Tessera is an application, and the names `tess
 
 ### 5.2 Layers
 
-1. **tessera-client.** One `TypesenseClient` per connection, with a node list, round robin or failover, timeouts, retries (exponential backoff, idempotent requests only) and request hooks for the request log. Each resource has its own module: `collections`, `documents`, `search`, `multi_search`, `aliases`, `synonym_sets`, `curation_sets`, `stopwords`, `presets`, `stemming`, `keys`, `analytics`, `conversations`, `nl_search_models`, `operations`, `metrics`, `debug`, `raw`.
+1. **tessera-client.** One `TypesenseClient` per connection, with a node list, round robin or failover, timeouts, retries (exponential backoff, idempotent requests only) and request hooks for the request log. Each resource has its own module: `collections`, `documents`, `search`, `multi_search`, `aliases`, `sets` (synonym and curation sets, same endpoints, D60), `stopwords`, `presets`, `stemming`, `keys`, `analytics`, `conversations`, `nl_search_models`, `operations`, `metrics`, `debug`, `raw`.
 2. **tessera-core.** Connection profiles, `ServerCapabilities` (version → feature flags), query history, saved queries, import/export pipelines (UI independent, progress events over channels), schema inference from sample data, scoped key generator.
 3. **tessera-widgets.** Reusable GPUI Kit compositions without app state.
 4. **tessera-app.** Views as GPUI entities, global `AppState`, actions and keybindings, dock layout, window management.
@@ -212,7 +212,8 @@ GPUI has its own executor, integrated into the platform event loop. `reqwest` ne
 
 - On connect, Tessera calls `GET /debug`; the response contains `version` and the Raft `state`. This produces `ServerCapabilities`.
 - Features that need a newer version are hidden or disabled with the note "requires Typesense ≥ x.y".
-- **v1.0 requires Typesense ≥ 30.0.** Older versions get a warning, and the app runs in a limited mode: collections, documents, search, aliases and keys work; the legacy endpoints for synonyms and overrides arrive in v1.x (§14).
+- **v1.0 requires Typesense ≥ 30.0.** Older versions get a warning, and the app runs in a limited mode: collections, documents, search, aliases and keys work; the legacy endpoints for synonyms and overrides arrive in v1.x (§14). Sidebar rows for synonyms and curations hide there.
+- Curation rule flags `rule.stem` and `rule.synonyms` need 30.2: 30.0 accepts and drops them, so the form hides them below 30.2.
 
 ---
 
@@ -240,10 +241,11 @@ GPUI has its own executor, integrated into the platform event loop. `reqwest` ne
 | Export | `GET /collections/{c}/documents/export?filter_by=&include_fields=&exclude_fields=` | §7.7 |
 | Search | `GET /collections/{c}/documents/search` (or POST via multi_search for long parameters) | §7.5 |
 | Multi/union search | `POST /multi_search` (a read: allowed on read-only clients and fails over, D34; `page` and `per_page` of a union go in the URL) | §7.5 |
-| Aliases | `GET /aliases`, `PUT/GET/DELETE /aliases/{name}` | §7.8 |
-| Synonym sets | `GET /synonym_sets`, `PUT/GET/DELETE /synonym_sets/{name}`, item endpoints ⚠ verify | §7.9 |
-| Curation sets | `GET /curation_sets`, `PUT/GET/DELETE /curation_sets/{name}`, item endpoints ⚠ verify | §7.10 |
-| Stopwords | `GET /stopwords`, `PUT/GET/DELETE /stopwords/{id}` | §7.11 |
+| Aliases | `GET /aliases`, `PUT/GET/DELETE /aliases/{name}` (`PUT` is an upsert and takes any target unchecked) | §7.8 |
+| Synonym sets | `GET /synonym_sets`, `PUT/GET/DELETE /synonym_sets/{name}`, `GET …/{name}/items`, `PUT/GET/DELETE …/{name}/items/{id}` (verified on 30.0 and 30.2) | §7.9 |
+| Curation sets | `GET /curation_sets`, `PUT/GET/DELETE /curation_sets/{name}`, `GET …/{name}/items`, `PUT/GET/DELETE …/{name}/items/{id}` (verified on 30.0 and 30.2) | §7.10 |
+| Set attachment | `synonym_sets` and `curation_sets` arrays on the collection: `POST /collections`, `PATCH /collections/{name}` replaces the array (verified on 30.0 and 30.2) | §7.9, §7.10 |
+| Stopwords | `GET /stopwords`, `PUT/GET/DELETE /stopwords/{id}` (`GET` of one wraps the answer in `stopwords`) | §7.11 |
 | Presets | `GET /presets`, `PUT/GET/DELETE /presets/{name}` | §7.12 |
 | Stemming dictionaries | `GET /stemming/dictionaries`, `GET …/{id}`, `POST /stemming/dictionaries/import?id=…` | §7.13 |
 | API keys | `GET/POST /keys`, `GET/DELETE /keys/{id}` | §7.14 |
@@ -253,7 +255,7 @@ GPUI has its own executor, integrated into the platform event loop. `reqwest` ne
 | NL search models | `GET/POST /nl_search_models`, `GET/PUT/DELETE …/{id}` | §7.16 |
 | Raw | anything | §7.17 |
 
-**v30 specifics (important):** From v30 on, synonyms and curation rules (formerly "overrides") are **global resources** (`/synonym_sets`, `/curation_sets`). They can be attached to several collections or passed as a search parameter. API keys with the old `overrides:*` actions do not grant access to the new endpoints. The key editor must offer the new actions (`curation_sets:*`, `synonym_sets:*`).
+**v30 specifics (important):** From v30 on, synonyms and curation rules (formerly "overrides") are **global resources** (`/synonym_sets`, `/curation_sets`). They can be attached to several collections. A synonym set can also be passed as the search parameter `synonym_sets`, which adds to the attached sets; a curation set cannot: `curation_sets` is not a search parameter on 30.0 or 30.2 (D57). Deleting an attached synonym set makes every search on that collection answer 404 (D58). API keys with the old `overrides:*` actions do not grant access to the new endpoints. The key editor must offer the new actions (`curation_sets:*`, `synonym_sets:*`).
 
 ---
 
@@ -363,36 +365,39 @@ Each module lists acceptance criteria (AC).
 
 ### 7.8 Aliases (P0)
 
-- List with target collection; create, repoint (upsert), delete.
-- **Reindex assistant** (P1) for switching without downtime:
-  1. New collection from the existing or a changed schema (name with timestamp suffix)
-  2. Import data (from a file, or export/import from the old collection)
+- List with target collection and a state for broken aliases (target missing or empty, target is an alias, hidden by a collection of the same name); create, repoint (upsert), delete.
+- **Reindex assistant** (P1) for switching without downtime, started from an alias. A collection without an alias must get one first, since a name cannot be both:
+  1. New collection from the existing or a changed schema (name with timestamp suffix). A preflight names unstored fields, joins from other collections, other aliases, missing sets, embedding fields and blanked keys (D64)
+  2. Import data (from a file, or export to a private temp directory and import from there, D63)
   3. Compare document counts
-  4. Switch the alias
+  4. Switch the alias, after reading it again; a difference in the counts raises the confirmation (D65). A switch back stays available until step 5
   5. Optionally delete the old collection after confirmation
+
+The assistant is a tab per alias, and closing it keeps its state and jobs (D66). Joins from other collections fail after a switch, and upserting their documents does not repair them, so the confirmation names them.
 
 ### 7.9 Synonym sets (P0, v30+)
 
 - List of all sets, CRUD.
 - **Item editor:** multi-way (`synonyms[]`) and one-way (`root` + `synonyms[]`), `locale`, `symbols_to_index`. As a table and as JSON.
-- **Attachment** to collections (collection schema attribute ⚠ verify), and a view of which collections use a set.
-- **Test panel:** a search against a chosen collection with and without the set, results side by side.
-- Import and export of a set as JSON and as CSV (for business teams).
+- Table rows save through the item endpoints, the JSON view and imports through the whole set, with a review of adds, changes and removals (D60). Duplicate ids are refused before sending: the server keeps the last and answers 200.
+- **Attachment** to collections (the `synonym_sets` array of the collection, D59), and a view of which collections use a set. Sets attached but missing are shown with a way to detach them. Deleting a set detaches it first (D58).
+- **Test panel:** a search against a chosen collection with and without the set, results side by side. For an attached set "without" means no synonyms at all, and the panel says so, because a search cannot leave out one attached set (D56).
+- Import and export of a set as JSON and as CSV (for business teams, D67).
 
 ### 7.10 Curation sets (P0, v30+)
 
 - List of all sets, CRUD.
-- **Rule editor** with all rule attributes: `rule.query`, `rule.match` (`exact`/`contains`), `rule.filter_by`, `rule.tags`, `includes[]` (`id` + `position`, reorder by drag and drop), `excludes[]`, `filter_by`, `sort_by`, `replace_query`, `remove_matched_tokens`, `filter_curated_hits`, `effective_from_ts` / `effective_to_ts` (date picker), `stop_processing`, `synonyms`, `stem`, diversification (MMR) and other fields new in v30. Unknown fields are kept as a raw JSON block.
+- **Rule editor** with all rule attributes: `rule.query`, `rule.match` (`exact`/`contains`), `rule.filter_by`, `rule.tags`, `includes[]` (`id` + `position`, reorder by drag and drop), `excludes[]`, `filter_by`, `sort_by`, `replace_query`, `remove_matched_tokens`, `filter_curated_hits`, `effective_from_ts` / `effective_to_ts` (date picker), `stop_processing`, `synonyms`, `stem`, diversification (MMR) and other fields new in v30. Fields that came from the server and have no control are kept as a raw JSON block; the server itself drops keys it does not know, and the editor reports that after saving. Rules the server would store but that can never work are refused first (bad `match`, reversed dates, position below 1), and a `sort_by` field missing from an attached collection warns, because such a rule fails every search it matches.
 - **Document picker** for `includes`/`excludes`: search the collection, add hits with a click.
-- **Attachment** to collections and a **test panel** as in §7.9, plus testing `curation_tags`.
+- **Attachment** to collections as in §7.9, and a **test panel** with `enable_curations=false` against the plain search, plus testing `curation_tags`. It needs an attached set, because a search cannot name a curation set (D57). Dates are shown in UTC.
 
 ### 7.11 Stopwords (P1)
 
-CRUD for stopword sets (`id`, `stopwords[]`, `locale`). Bulk editing in a text area (one word per line).
+CRUD for stopword sets (`id`, `stopwords[]`, `locale`). Bulk editing in a text area (one word per line). The server lowercases, splits at spaces and removes duplicates, so the editor shows the stored words after saving and says when they differ.
 
 ### 7.12 Presets (P1)
 
-CRUD for search presets (`value` = search parameters or a multi-search body). The editor is the search workbench (§7.5) in preset mode.
+CRUD for search presets (`value` = search parameters or a multi-search body). The editor is the search workbench (§7.5) in preset mode. A preset whose `value` the workbench cannot read stays listed and can be deleted. A search naming a deleted preset keeps working without its parameters, which the delete dialog says.
 
 ### 7.13 Stemming dictionaries (P2)
 
@@ -493,6 +498,8 @@ Mockups: [Tessera UX canvas](https://claude.ai/artifact/DucJnCzM4SMUhUo5UvVk1d).
 │     Aliases   │                                       │              │
 │     Synonyms  │                                       │              │
 │     Curations │                                       │              │
+│     Stopwords │                                       │              │
+│     Presets   │                                       │              │
 │     Keys      │                                       │              │
 │     Analytics │                                       │              │
 │     AI        │                                       │              │
@@ -602,7 +609,7 @@ Location via `directories::ProjectDirs::from("org", "tessera", "Tessera")`:
 - `authors` + `books_ref` (JOINs)
 - `places` (geo)
 - `articles_vec` (vector field)
-- plus synonym sets, curation sets, aliases, keys
+- plus synonym sets, curation sets, stopwords, presets, aliases, keys
 
 ### 12.3 Code quality
 
@@ -652,7 +659,7 @@ Each milestone ends with green CI, an updated CHANGELOG and a short demo (GIF in
 | **M3 Document browser** | §7.4: DataTable, infinite scroll, filter with autocompletion, inspector with JSON editor, CRUD, multi-select, delete by query with preview. `xtask seed` gains the 200k `products` set. Details: `docs/superpowers/specs/2026-11-05-m3-documents-design.md` | NF2 met (200k rows); measurement still open, steps in `docs/building.md` |
 | **M4 Search and raw console** | §7.5 (without P2 parts), multi-search, history, saved queries, code export. §7.17 raw console. §7.20 command palette. §7.19 full view of truncated bodies. Details: `docs/superpowers/specs/2026-11-06-m4-search-design.md`, decisions D33–D44 | Exported curl reproduces the response (live test, 30.0 and 30.2); the checks on screen are still open, steps in `docs/building.md` |
 | **M5 Import/export** | §7.6, §7.7 including schema inference, error report, cancel. Jobs panel. The backup and restore assistant is M8. Details: `docs/superpowers/specs/2026-11-06-m5-import-export-design.md`, decisions D45–D54 | NF3 met headlessly: 1,000,000 documents in JSONL, JSON and CSV add at most 25 MB to the process and total at most 118 MB with the app's baseline, limit 300 MB (`cargo xtask nf3`, D53, record in `docs/building.md`); the run through the window and the Linux binary size (NF5) are still open |
-| **M6 Relevance resources** | §7.8 aliases including the reindex assistant, §7.9 synonym sets, §7.10 curation sets, §7.11 stopwords, §7.12 presets | CRUD and test panels work against 30.0 and 30.2 |
+| **M6 Relevance resources** | §7.8 aliases including the reindex assistant, §7.9 synonym sets, §7.10 curation sets, §7.11 stopwords, §7.12 presets. Details: `docs/superpowers/specs/2026-11-06-m6-relevance-design.md`, decisions D56–D68 | CRUD and test panels work against 30.0 and 30.2 |
 | **M7 Keys, analytics, AI** | §7.14 including the scoped key generator and decoder, §7.15, §7.16, §7.13 | Scoped key test vectors identical to typesense-js |
 | **M8 Operations and hardening** | §7.18, safety UX §8.2 complete, backup/restore assistant, §9 audit (redaction tests) | Security checklist done |
 | **M9 Release 1.0** | i18n EN/DE complete, accessibility pass, onboarding, packaging for all platforms (`cargo-packager`, `xtask dist`), docs website (mdBook), QA checklist | v1.0.0 published |
@@ -741,6 +748,19 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D53 | How is NF3 measured? | `cargo xtask nf3` runs the real pipeline with a real request log against a real server and adds the app's baseline from the `TESSERA_SMOKE` run. Nightly on Linux, and one run through the UI by hand in M5's last PR |
 | D54 | When is a new collection created? | At Start, after the confirmation. The schema dialog gets a pick mode that sends nothing, so cancelling the import leaves the server untouched |
 | D55 | Are CSV cells neutralised against spreadsheet formulas? | No, cells stay verbatim. Tessera is an admin tool, and prefixing a cell would break the round trip: a re-import would store changed text. The risk stays: a cell starting with `=`, `+`, `-` or `@` runs as a formula when the file opens in a spreadsheet, and documents can hold what strangers typed. So the export dialog says so for CSV |
+| D56 | What does "with and without the set" mean in a synonym test panel? | For a set not attached, without is the plain search and with adds `synonym_sets=`. For an attached set the left side is `enable_synonyms=false`, because the parameter only adds; with other sets attached the panel says that side has no synonyms at all |
+| D57 | How is a curation set tested? | Only on a collection it is attached to, as `enable_curations=false` against the plain search, plus `curation_tags`. `curation_sets` is not a search parameter on 30.0 or 30.2. A test never attaches anything |
+| D58 | What happens to attachments when a set is deleted? | The delete detaches it from every collection first, stops at a failure, deletes, and checks afterwards. A missing attached synonym set makes every search on the collection fail, while a missing curation set only blocks later `PATCH`es that list it. Missing sets show in the view with Detach |
+| D59 | How is an attachment written? | `PATCH` of the whole array, right after reading the collection and the set names fresh. Names that no longer exist are dropped and named, because the `PATCH` would fail on them. There is no compare-and-swap |
+| D60 | Item endpoints or whole-set `PUT`? | The table saves item by item, so a row edit cannot overwrite a colleague's other rows. JSON, import and Replace use the whole-set `PUT` with a review of adds, changes and removals. New refuses an existing name after a fresh list, because every `PUT` is an upsert. Both set kinds share one client module |
+| D61 | Which names can Tessera create? | `[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}` for aliases, sets, stopwords and presets. Existing names stay usable whatever they hold; one with a comma cannot go into `synonym_sets=` |
+| D62 | Confirmations in M6 | New, item save, attach, detach: none, a plain confirmation on prod. Item delete: a plain confirmation. Whole-set save that removes items: a plain confirmation, typed on prod. Alias repoint or delete, stopwords delete, preset delete: a plain confirmation, typed on prod. Set delete: a plain confirmation, typed when attached or on prod. Reindex switch: a plain confirmation, typed on prod, when the counts differ or when joins would fail |
+| D63 | Does the reindex copy go through a temp file? | Yes: export to a private temp directory, then import that file, as two ordinary jobs, with no change to either pipeline. One stream was the first design, but the server closes an export whose reader stalls for 50 to 70 s (30.0 and 30.2), and one slow batch does that. The cost is free disk of about the export's size while the copy runs |
+| D64 | What blocks a reindex? | A required `store: false` field for a copy from the old collection, a blank embedding key, or a bad or taken name. Optional unstored fields, joins from other collections and other aliases are warnings: the operator may accept them |
+| D65 | What guards the switch? | Counts are compared and shown; a difference raises the confirmation to typing the alias. The alias is read right before the `PUT`, and the assistant stops if it moved. The `PUT` is read back. A switch back stays until clean-up |
+| D66 | Where does the assistant live? | A center tab per alias, with its state on the connection, so closing the tab keeps it, and the copy in the jobs panel. Nothing can be half-switched, so a disconnect loses only the wizard |
+| D67 | CSV of a synonym set | `id,root,synonyms,locale,symbols_to_index`, lists joined by `;`, or a JSON array in the cell when a value holds `;` or the list starts with `[`. Lossless and readable for business teams. D55 applies |
+| D68 | Where do stopwords and presets go in the sidebar? | Their own rows after Curations. One tab per kind and connection, one panel type |
 
 ---
 
