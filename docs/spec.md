@@ -238,7 +238,7 @@ GPUI has its own executor, integrated into the platform event loop. `reqwest` ne
 | Import | `POST /collections/{c}/documents/import?action=&batch_size=&dirty_values=&return_id=&return_doc=` | §7.6 |
 | Export | `GET /collections/{c}/documents/export?filter_by=&include_fields=&exclude_fields=` | §7.7 |
 | Search | `GET /collections/{c}/documents/search` (or POST via multi_search for long parameters) | §7.5 |
-| Multi/union search | `POST /multi_search` | §7.5 |
+| Multi/union search | `POST /multi_search` (a read: allowed on read-only clients and fails over, D34; `page` and `per_page` of a union go in the URL) | §7.5 |
 | Aliases | `GET /aliases`, `PUT/GET/DELETE /aliases/{name}` | §7.8 |
 | Synonym sets | `GET /synonym_sets`, `PUT/GET/DELETE /synonym_sets/{name}`, item endpoints ⚠ verify | §7.9 |
 | Curation sets | `GET /curation_sets`, `PUT/GET/DELETE /curation_sets/{name}`, item endpoints ⚠ verify | §7.10 |
@@ -337,7 +337,9 @@ Each module lists acceptance criteria (AC).
 - **Compare mode** (P2): two parameter sets side by side, with rank difference per document (↑↓), for relevance tuning.
 - **Elasticsearch helper** (P2): pasting an ES `_search` query produces a suggested translation (match/multi_match → q/query_by, bool.filter/term/range → filter_by, sort, terms agg → facet_by). Parts that cannot be translated are clearly marked.
 
-**AC:** Every request run from the workbench appears 1:1 in the request log. An exported `curl` command returns the same response when run.
+- **Server-side effects:** the workbench sends `enable_analytics=false` unless the user changes it, so tuning does not feed production analytics. `conversation`, `nl_query` and `query_by` on an embedding field call a model, so they pause instant search; `conversation` also writes, so a read-only profile unlocks first (D35).
+
+**AC:** Every request run from the workbench appears 1:1 in the request log. An exported `curl` command returns the same response when run, `search_time_ms` aside.
 
 ### 7.6 Import (P0)
 
@@ -431,7 +433,9 @@ List, detail view and import (JSONL with `word`/`root`) via `POST /stemming/dict
 - Method, path (autocompleted from the vendored OpenAPI spec), query parameter table, and body in the JSON editor or from a file (for JSONL).
 - Response with status, headers, time and body (JSON formatted; large bodies virtualized or folded).
 - History, favorites, "Copy as curl".
-- Read-only profiles allow `GET` only.
+- Read-only profiles allow `GET` only (and `HEAD`, which reads nothing more) until unlocked.
+- The path is validated by allowlist and cannot leave the configured node. Writes confirm by danger (D40), and the response body is masked until the user reveals it (D41).
+- The console is a center tab of one connection, not a bottom panel (D33).
 
 ### 7.18 Server operations (P1)
 
@@ -443,15 +447,15 @@ List, detail view and import (JSONL with `word`/`root`) via `POST /stemming/dict
 ### 7.19 Request log (P0)
 
 - Bottom dock panel listing every request: time, connection, method, path, status, duration, size.
-- Detail view with request and response bodies (truncated above 1 MB, full view on demand from M4 on). Document page responses keep no body (D24).
+- Detail view with request and response bodies (truncated above 1 MB, full view on demand from M4 on, kept in memory up to 32 MiB per body and 64 MiB in all, D42). Document page responses keep no body (D24).
 - **Redaction:** the `X-TYPESENSE-API-KEY` header always shows as `abcd••••`. Known secret fields in bodies (`api_key`, `value` on keys) are masked.
 - Filter by status, method and connection. "Copy as curl" uses the placeholder `$TYPESENSE_API_KEY` instead of the real key.
 
 ### 7.20 Command palette and navigation (P0)
 
-- ⌘K / Ctrl+K: fuzzy search over actions, collections, saved queries, connections and settings.
+- ⌘K / Ctrl+K: fuzzy search over the actions available at the current focus, collections, saved queries and connections, and settings once §7.21 exists (D44).
 - ⌘P / Ctrl+P: quick switch to a collection.
-- Full keyboard control, configurable keymap (`keymap.toml`).
+- Full keyboard control, configurable keymap (`keymap.toml`, `[[binding]]` entries with `key`, `action`, `context`; no action unbinds; loaded at start, D43).
 
 ### 7.21 Settings (P0)
 
@@ -492,12 +496,13 @@ Mockups: [Tessera UX canvas](https://claude.ai/artifact/DucJnCzM4SMUhUo5UvVk1d).
 │     AI        │                                       │              │
 │     Ops       │                                       │              │
 ├───────────────┴───────────────────────────────────────┴──────────────┤
-│ Bottom panel: Request log | Import/export jobs | Raw console          │
+│ Bottom panel: Request log | Import/export jobs                        │
 ├───────────────────────────────────────────────────────────────────────┤
 │ Status bar: ● connected · v30.2 · leader · 12 ms · 3 jobs             │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
+- Search and Raw console are center tabs of one connection (D33).
 - Panels can be moved, closed and zoomed. The layout is serialized per window and restored on the next start.
 - Several windows are possible (for example prod and staging side by side).
 
@@ -564,9 +569,9 @@ Location via `directories::ProjectDirs::from("org", "tessera", "Tessera")`:
 |---|---|---|
 | `config/settings.toml` | settings | TOML |
 | `config/connections.json` | profiles **without** keys | JSON, versioned (`schema_version`) |
-| `config/keymap.toml` | key bindings | TOML |
+| `config/keymap.toml` | key bindings, on top of the defaults (D43) | TOML |
 | `data/history.jsonl` | search and raw console history | JSONL, rotated |
-| `data/saved_queries.json` | saved queries | JSON |
+| `data/saved_queries.json` | saved queries and console favorites | JSON, versioned (`schema_version`) |
 | `data/document_views.json` | column choice, pins and widths per profile and collection (D25) | JSON |
 | `data/layout/*.json` | dock layouts | JSON (GPUI Kit format) |
 | `logs/tessera.log*` | logs | text, rotated (7 days) |
@@ -643,7 +648,7 @@ Each milestone ends with green CI, an updated CHANGELOG and a short demo (GIF in
 | **M1 Connections and overview** | §7.1 complete (keychain, profiles, tags, read-only, import from bfritscher config), §7.2 (metrics, stats, cluster view), §7.19 request log. Details: `docs/superpowers/specs/2026-11-04-m1-connections-design.md` | AC from §7.1 and §7.2 met |
 | **M2 Collections** | §7.3 without the JOIN graph and schema inference (M5, D19): list, schema view, create (form and JSON), clone, PATCH with diff, delete, truncate, read-only unlock (D10). Creates `tessera-widgets`; `xtask seed` with small data sets. Details: `docs/superpowers/specs/2026-11-05-m2-collections-design.md` | Integration tests for all collection endpoints green |
 | **M3 Document browser** | §7.4: DataTable, infinite scroll, filter with autocompletion, inspector with JSON editor, CRUD, multi-select, delete by query with preview. `xtask seed` gains the 200k `products` set. Details: `docs/superpowers/specs/2026-11-05-m3-documents-design.md` | NF2 met (200k rows); measurement still open, steps in `docs/building.md` |
-| **M4 Search and raw console** | §7.5 (without P2 parts), multi-search, history, saved queries, code export. §7.17 raw console. §7.20 command palette | Exported curl reproduces the response |
+| **M4 Search and raw console** | §7.5 (without P2 parts), multi-search, history, saved queries, code export. §7.17 raw console. §7.20 command palette. §7.19 full view of truncated bodies. Details: `docs/superpowers/specs/2026-11-06-m4-search-design.md`, decisions D33–D44 | Exported curl reproduces the response |
 | **M5 Import/export** | §7.6, §7.7 including schema inference, error report, cancel. Jobs panel | NF3 met |
 | **M6 Relevance resources** | §7.8 aliases including the reindex assistant, §7.9 synonym sets, §7.10 curation sets, §7.11 stopwords, §7.12 presets | CRUD and test panels work against 30.0 and 30.2 |
 | **M7 Keys, analytics, AI** | §7.14 including the scoped key generator and decoder, §7.15, §7.16, §7.13 | Scoped key test vectors identical to typesense-js |
@@ -708,9 +713,21 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D27 | Does schema validation block saving? | No. Marks are advisory and the server decides. Only a parse error, a changed `id` or an empty diff stop a save |
 | D28 | Which confirmation for document deletes and bulk updates? | Medium dialog; type the collection name above 1,000 documents or on prod, for single and multi delete, delete by query and update by query |
 | D29 | NF2 names a GPUI Kit FPS HUD that does not exist | Measured with GPUI's debug frame overlay behind a `frame-overlay` cargo feature, by hand, p95 draw time ≤ 16.6 ms |
-| D30 | `filter_by` over 4,000 bytes in the browser | Not supported in M3: the server's message shows inline. `POST /multi_search` is a read, but the read-only guard refuses POST and failover skips it. M4 needs it and should allow that one path in the guard |
+| D30 | `filter_by` over 4,000 bytes in the browser | Not supported in M3: the server's message shows inline. `POST /multi_search` is a read, but the read-only guard refuses POST and failover skips it. M4 needs it and should allow that one path in the guard. Closed by D34: long filters go through `POST /multi_search` |
 | D31 | Unsaved changes in the inspector when a tab, connection or app closes | ⌘W / Ctrl+W asks, with focus in the tab. The kit's other closes cannot ask, so `closable` vetoes them and the tab hides its close button until the changes are saved or reverted. Disconnect and quit have no veto in the pinned kit, and they discard without asking |
 | D32 | Delete or update by query with a filter that matches every document | Refused only when the text itself names everything: blank, `*`, or `*` among the values of `id`. A predicate that happens to match all, such as `n:>=0`, keeps its count and the danger level, because an update of a whole collection has no other way in. Open for the maintainer: refuse those too? |
+| D33 | Where do the search workbench and the raw console live? | Center tabs of one connection, with its color and badges. A bottom panel would follow the active tab, and a `DELETE` typed against staging would go to prod after a tab switch |
+| D34 | `POST /multi_search` on a read-only client | Allowed through a private client flag set only inside the search methods, which also makes it fail over. The raw console cannot set it, so a console POST stays refused. A search whose query exceeds 4,000 bytes takes this route, in the workbench and in the document browser |
+| D35 | Server-side effects of a search | The workbench writes `enable_analytics: false` into a new draft, visible and changeable. Curations stay on, to show what clients get, unlike the browser. A query that calls a model pauses instant search, and `conversation` needs an unlocked profile |
+| D36 | Instant search default | On, except on prod profiles, where each keystroke would load the production cluster |
+| D37 | Presets: M4 or M6? | M4 loads and saves from the workbench, as §7.5 says. Listing as a resource, delete and preset mode stay in M6 with §7.12 |
+| D38 | Filter builder and facet clicks | The `filter_by` text is the only filter state. The builder and facet clicks rewrite it, so what runs is what shows. Facet values pass an allowlist first; one that `filter_by` cannot hold is disabled |
+| D39 | What enters history | A run started by the user, or an instant run that stood for 2 s. 500 per kind (search, console). Console queries and bodies are redacted, bodies over 64 KiB are not kept, temporary connections write nothing, Clear history exists |
+| D40 | Confirmations in the raw console | `DELETE` of a collection or of its documents by filter or truncate: type the name, everywhere. Other `DELETE` and `POST operations/*`: confirm, and type the last path segment on prod. Other writes: nothing, and confirm on prod. `POST /multi_search` is a read |
+| D41 | Secrets in console responses | Masked by default, with Reveal until the next Send, because `POST /keys` answers with the only copy of a key. Workbench results are never masked: `value` is an ordinary document field there |
+| D42 | Keeping full bodies for §7.19 | In memory, at most 32 MiB per body and 64 MiB in all, oldest evicted. Refetching would show a different answer and cannot repeat a write. Disk is ruled out by §9 |
+| D43 | `keymap.toml` shape | `[[binding]]` with `key`, `action` (`tessera::Name`), optional `context`. No action unbinds. Loaded once at start, on top of the defaults. A bad entry is skipped and named in a toast |
+| D44 | Settings in the palette, and §7.21's milestone | No entry until a settings view exists (UX rule 4). §14 names no milestone for §7.21. Recommendation: M8. Open for the maintainer |
 
 ---
 
