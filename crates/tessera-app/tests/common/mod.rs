@@ -783,6 +783,10 @@ pub struct FakeSearch {
     pub multi_calls: Mutex<Vec<tessera_client::MultiSearch>>,
     /// The body of each multi-search answer; by default [`search_body`] of 12 per search.
     pub multi_body: Mutex<Option<String>>,
+    /// The presets on the server.
+    pub presets: Mutex<Vec<tessera_client::Preset>>,
+    /// Every preset saved, in order.
+    pub saved_presets: Mutex<Vec<(String, serde_json::Value)>>,
 }
 
 impl FakeSearch {
@@ -876,6 +880,28 @@ impl SearchBackend for FakeSearchBackend {
             })
         })
     }
+
+    fn presets(
+        &self,
+        _: Client,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<tessera_client::Preset>, Error>> {
+        let fake = &self.0;
+        let presets = fake.presets.lock().unwrap().clone();
+        let fail = fake.fail.lock().unwrap().clone();
+        Box::pin(async move { fail.map_or(Ok(presets), |e| Err(http_error(e))) })
+    }
+
+    fn save_preset(
+        &self,
+        _: Client,
+        name: String,
+        value: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        let fake = &self.0;
+        fake.saved_presets.lock().unwrap().push((name, value));
+        let fail = fake.fail.lock().unwrap().clone();
+        Box::pin(async move { fail.map_or(Ok(()), |e| Err(http_error(e))) })
+    }
 }
 
 /// Installs a search backend answering with [`search_body`] of 12 documents.
@@ -887,6 +913,8 @@ pub fn install_search_fake(cx: &mut TestAppContext) -> Arc<FakeSearch> {
         hold: Mutex::default(),
         multi_calls: Mutex::default(),
         multi_body: Mutex::default(),
+        presets: Mutex::default(),
+        saved_presets: Mutex::default(),
     });
     let installed = FakeSearchBackend(fake.clone());
     cx.update(|cx| cx.set_global(SearchBackendGlobal(Arc::new(installed))));
@@ -989,6 +1017,10 @@ pub const NEW_DOCUMENT: &str = key("cmd-shift-n", "ctrl-shift-n");
 pub const SAVE_MODE: &str = key("cmd-shift-m", "ctrl-shift-m");
 pub const REVERT: &str = key("cmd-shift-r", "ctrl-shift-r");
 pub const OPEN_SEARCH: &str = key("cmd-shift-e", "ctrl-shift-e");
+pub const OPEN_HISTORY: &str = key("cmd-shift-h", "ctrl-shift-h");
+pub const OPEN_SAVED: &str = key("cmd-o", "ctrl-o");
+pub const SAVE_QUERY: &str = key("cmd-s", "ctrl-s");
+pub const OPEN_PRESETS: &str = key("cmd-alt-p", "ctrl-alt-p");
 pub const SHOW_FORM: &str = key("cmd-1", "ctrl-1");
 pub const SHOW_JSON: &str = key("cmd-2", "ctrl-2");
 pub const SHOW_HITS: &str = key("cmd-3", "ctrl-3");

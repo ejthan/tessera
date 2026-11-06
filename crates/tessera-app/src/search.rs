@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use gpui_kit::Global;
-use tessera_client::{Client, Error, MultiSearch};
+use serde_json::Value;
+use tessera_client::{Client, Error, MultiSearch, Preset};
 use tessera_core::search::results::{MultiResult, SearchResult, parse_multi, parse_result};
 use tokio::runtime::Handle;
 
@@ -50,6 +51,17 @@ pub trait SearchBackend: Send + Sync {
         request: MultiSearch,
         tags: Vec<(String, String)>,
     ) -> BoxFuture<Result<MultiAnswer, Error>>;
+
+    /// The stored presets.
+    fn presets(&self, client: Client) -> BoxFuture<Result<Vec<Preset>, Error>>;
+
+    /// Stores `value` as preset `name`, replacing one of that name. A write: run it detached.
+    fn save_preset(
+        &self,
+        client: Client,
+        name: String,
+        value: Value,
+    ) -> BoxFuture<Result<(), Error>>;
 }
 
 /// The backend the views use.
@@ -91,6 +103,19 @@ impl SearchBackend for TokioBackend {
                 result,
             })
         })
+    }
+
+    fn presets(&self, client: Client) -> BoxFuture<Result<Vec<Preset>, Error>> {
+        self.run(async move { client.presets().await })
+    }
+
+    fn save_preset(
+        &self,
+        client: Client,
+        name: String,
+        value: Value,
+    ) -> BoxFuture<Result<(), Error>> {
+        self.run(async move { client.upsert_preset(&name, &value).await })
     }
 }
 

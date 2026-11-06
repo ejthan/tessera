@@ -18,10 +18,12 @@ use tessera_app::state::AppState;
 use tessera_app::views::dock::SearchPanel;
 use tessera_app::views::root::RootView;
 use tessera_app::views::search::SearchWorkbench;
-use tessera_client::Collection;
+use tessera_client::{Collection, Preset};
 use tessera_core::profile::{Environment, Profile};
+use tessera_core::search::history::HistoryEntry;
 use tessera_core::search::params::SearchDraft;
 use tessera_core::search::results::SearchResult;
+use tessera_core::search::saved::SavedQuery;
 use tessera_widgets::Shown;
 
 use common::*;
@@ -206,6 +208,63 @@ impl Fixture {
 
     fn instant_off(&self, cx: &mut TestAppContext) {
         self.press(cx, TOGGLE_INSTANT);
+    }
+
+    /// The `q` of each search in the history, newest first.
+    fn history(&self, cx: &mut TestAppContext) -> Vec<String> {
+        let id = self.id;
+        cx.update(|cx| {
+            let state = self.state.read(cx);
+            let items = state.history.searches(id, "");
+            let entries = items.iter().map(|item| match &item.entry {
+                HistoryEntry::Search { searches, .. } => searches[0].params["q"].to_string(),
+                HistoryEntry::Raw { .. } => unreachable!(),
+            });
+            entries.collect()
+        })
+    }
+
+    fn saved(&self, cx: &mut TestAppContext) -> Vec<SavedQuery> {
+        cx.update(|cx| self.state.read(cx).saved.queries.clone())
+    }
+
+    fn add_saved(&self, cx: &mut TestAppContext, name: &str, collection: &str, tags: &[&str]) {
+        let query = SavedQuery {
+            id: uuid::Uuid::new_v4(),
+            profile: self.id,
+            name: name.into(),
+            tags: tags.iter().map(ToString::to_string).collect(),
+            union: false,
+            searches: vec![SearchDraft::new(collection)],
+        };
+        cx.update(|cx| {
+            self.state
+                .update(cx, |s, cx| s.save_query(query, cx))
+                .detach();
+        });
+        self.settle(cx);
+    }
+
+    /// Saves the draft through the dialog; the name may ask to replace.
+    fn save_as(&self, cx: &mut TestAppContext, name: &str, tags: &str) {
+        self.press(cx, SAVE_QUERY);
+        self.fill(cx, "search.save.name", name);
+        self.fill(cx, "search.save.tags", tags);
+        self.click(cx, "search.save.ok");
+    }
+
+    fn set_presets(&self, presets: &[(&str, Value)]) {
+        *self.search.presets.lock().unwrap() = presets
+            .iter()
+            .map(|(name, value)| Preset {
+                name: (*name).to_string(),
+                value: value.clone(),
+            })
+            .collect();
+    }
+
+    fn saved_presets(&self) -> Vec<(String, Value)> {
+        self.search.saved_presets.lock().unwrap().clone()
     }
 }
 
@@ -1298,4 +1357,379 @@ async fn removing_a_search_drops_its_answer_and_the_running_read(cx: &mut TestAp
     f.run(cx);
     f.press(cx, REMOVE_SEARCH);
     assert!(held.is_closed());
+}
+
+#[gpui_kit::test]
+async fn instant_run_records_only_after_settling(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.fill(cx, "search.param.q", "dune");
+    f.wait(cx, 150);
+    assert_eq!(f.search.calls().last().unwrap().param("q"), Some("dune"));
+    f.wait(cx, 1999);
+    assert!(f.history(cx).is_empty());
+    f.wait(cx, 1);
+    assert_eq!(f.history(cx), [r#""dune""#]);
+
+    // A newer run replaces the wait, so what was only passing through stays out.
+    f.fill(cx, "search.param.q", "arrakis");
+    f.wait(cx, 150);
+    f.wait(cx, 1000);
+    f.fill(cx, "search.param.q", "caladan");
+    f.wait(cx, 150);
+    f.wait(cx, 1999);
+    assert_eq!(f.history(cx).len(), 1);
+    f.wait(cx, 1);
+    assert_eq!(f.history(cx), [r#""caladan""#, r#""dune""#]);
+}
+
+#[gpui_kit::test]
+async fn explicit_run_records_at_once(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.fill(cx, "search.param.q", "dune");
+    f.run(cx);
+    assert_eq!(f.history(cx), [r#""dune""#]);
+}
+
+#[gpui_kit::test]
+async fn a_slow_instant_answer_records_when_it_arrives(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    let held = f.search.hold_next();
+    f.fill(cx, "search.param.q", "dune");
+    f.wait(cx, 150);
+    f.wait(cx, 2500);
+    assert!(f.history(cx).is_empty());
+    held.send(()).unwrap();
+    f.wait(cx, 1);
+    assert_eq!(f.history(cx), [r#""dune""#]);
+}
+
+#[gpui_kit::test]
+async fn failed_run_records_nothing(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    *f.search.fail.lock().unwrap() = Some((400, "no".into()));
+    f.fill(cx, "search.param.q", "dune");
+    f.wait(cx, 150);
+    f.wait(cx, 3000);
+    f.run(cx);
+    f.wait(cx, 3000);
+    assert!(f.has(cx, "search.error"));
+    assert!(f.history(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn history_never_holds_a_key(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.press(cx, SHOW_JSON);
+    f.set_json(
+        cx,
+        r#"{"q": "dune", "api_key": "topsecret", "scoped_key": "topsecret"}"#,
+    );
+    f.run(cx);
+    assert_eq!(f.history(cx), [r#""dune""#]);
+    let line = cx.update(|cx| format!("{:?}", f.state.read(cx).history));
+    assert!(!line.contains("topsecret"), "{line}");
+}
+
+#[gpui_kit::test]
+async fn history_load_runs_nothing(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.fill(cx, "search.param.q", "dune");
+    f.run(cx);
+    f.fill(cx, "search.param.q", "other");
+    f.wait(cx, 150);
+    let calls = f.search.calls().len();
+
+    f.press(cx, OPEN_HISTORY);
+    assert!(f.text_of(cx, "search.history.row.0").contains("dune"));
+    f.press(cx, "enter");
+    f.wait(cx, 1000);
+    assert!(!f.has(cx, "search.history.row.0"));
+    assert_eq!(f.params(cx)["q"], "dune");
+    assert_eq!(f.search.calls().len(), calls);
+}
+
+#[gpui_kit::test]
+async fn escape_closes_a_list_and_the_arrows_pick_a_row(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    for q in ["one", "two"] {
+        f.fill(cx, "search.param.q", q);
+        f.run(cx);
+    }
+    f.press(cx, OPEN_HISTORY);
+    f.press(cx, "escape");
+    assert!(!f.has(cx, "search.history.row.0"));
+
+    f.press(cx, OPEN_HISTORY);
+    f.press(cx, "down");
+    f.press(cx, "enter");
+    assert_eq!(f.params(cx)["q"], "one");
+}
+
+#[gpui_kit::test]
+async fn clear_history_asks(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.run(cx);
+    f.press(cx, OPEN_HISTORY);
+    f.click(cx, "search.history.clear");
+    assert!(f.has(cx, "confirm.body"));
+    f.click(cx, "confirm.cancel");
+    assert_eq!(f.history(cx).len(), 1);
+
+    f.press(cx, OPEN_HISTORY);
+    f.click(cx, "search.history.clear");
+    f.click(cx, "confirm.ok");
+    assert!(f.history(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn saved_filters_by_collection_and_tag(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.add_saved(cx, "alpha", "books", &["fiction"]);
+    f.add_saved(cx, "beta", "books", &["science"]);
+    f.add_saved(cx, "gamma", "films", &[]);
+
+    f.press(cx, OPEN_SAVED);
+    assert!(f.text_of(cx, "search.saved.row.0").contains("fiction"));
+    assert!(f.has(cx, "search.saved.row.1"));
+    assert!(!f.has(cx, "search.saved.row.2"));
+
+    f.click(cx, "search.saved.all");
+    assert!(f.text_of(cx, "search.saved.row.2").contains("gamma"));
+
+    f.fill(cx, "search.queries.filter", "SCIEN");
+    assert!(f.text_of(cx, "search.saved.row.0").contains("beta"));
+    assert!(!f.has(cx, "search.saved.row.1"));
+}
+
+#[gpui_kit::test]
+async fn saved_load_replaces_the_drafts_and_runs_nothing(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.add_saved(cx, "alpha", "books", &[]);
+    f.fill(cx, "search.param.q", "dune");
+    f.wait(cx, 150);
+    let calls = f.search.calls().len();
+    f.press(cx, OPEN_SAVED);
+    f.press(cx, "enter");
+    f.wait(cx, 1000);
+    assert_eq!(f.params(cx)["q"], "*");
+    assert_eq!(f.search.calls().len(), calls);
+}
+
+#[gpui_kit::test]
+async fn delete_saved_asks(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.add_saved(cx, "alpha", "books", &[]);
+    f.press(cx, OPEN_SAVED);
+    f.press(cx, DELETE);
+    assert!(f.has(cx, "confirm.body"));
+    f.click(cx, "confirm.cancel");
+    assert_eq!(f.saved(cx).len(), 1);
+
+    f.press(cx, OPEN_SAVED);
+    f.click(cx, "search.saved.delete");
+    f.click(cx, "confirm.ok");
+    assert!(f.saved(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn save_trims_the_name_and_splits_the_tags(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.save_as(cx, "  mine ", " a, ,b ,");
+    let saved = f.saved(cx);
+    assert_eq!(saved[0].name, "mine");
+    assert_eq!(saved[0].tags, ["a", "b"]);
+    assert_eq!(saved[0].profile, f.id);
+}
+
+#[gpui_kit::test]
+async fn save_needs_a_name_and_keeps_no_key(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.press(cx, SHOW_JSON);
+    f.set_json(cx, r#"{"q": "dune", "api_key": "topsecret"}"#);
+    f.press(cx, SAVE_QUERY);
+    f.click(cx, "search.save.ok");
+    assert!(f.has(cx, "search.save.error"));
+    f.fill(cx, "search.save.name", "mine");
+    f.click(cx, "search.save.ok");
+    let saved = f.saved(cx);
+    assert!(!saved[0].searches[0].params.contains_key("api_key"));
+}
+
+#[gpui_kit::test]
+async fn save_replaces_after_asking(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.save_as(cx, "mine", "");
+    let id = f.saved(cx)[0].id;
+    f.fill(cx, "search.param.q", "dune");
+
+    f.save_as(cx, "mine", "");
+    assert!(f.has(cx, "confirm.body"));
+    f.click(cx, "confirm.cancel");
+    assert_eq!(f.saved(cx)[0].searches[0].params["q"], "*");
+
+    f.save_as(cx, "mine", "");
+    f.click(cx, "confirm.ok");
+    let saved = f.saved(cx);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].id, id);
+    assert_eq!(saved[0].searches[0].params["q"], "dune");
+}
+
+#[gpui_kit::test]
+async fn saved_error_shows_in_the_list_and_disables_save(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    cx.update(|cx| {
+        f.state
+            .update(cx, |s, _| s.saved_error = Some("the file is bad".into()));
+    });
+    f.settle(cx);
+    assert!(f.disabled(cx, "search.save"));
+    f.press(cx, SAVE_QUERY);
+    assert!(!f.has(cx, "search.save.name"));
+    f.press(cx, OPEN_SAVED);
+    assert_eq!(f.text_of(cx, "search.saved.error"), "the file is bad");
+}
+
+#[gpui_kit::test]
+async fn preset_with_searches_makes_drafts(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.set_presets(&[(
+        "two",
+        json!({"searches": [
+            {"collection": "books", "q": "a", "per_page": 3},
+            {"collection": "films", "q": "b"},
+        ]}),
+    )]);
+    f.press(cx, OPEN_PRESETS);
+    f.settle(cx);
+    f.press(cx, "enter");
+    let drafts = f.drafts(cx);
+    assert_eq!(drafts.len(), 2);
+    assert_eq!(drafts[0].collection, "books");
+    assert_eq!(drafts[0].params["per_page"], 3);
+    assert!(!drafts[0].params.contains_key("collection"));
+    assert_eq!(drafts[1].collection, "films");
+    assert!(f.search.calls().is_empty());
+}
+
+#[gpui_kit::test]
+async fn preset_of_parameters_stays_on_the_current_collection(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.set_presets(&[("one", json!({"q": "a"}))]);
+    f.press(cx, OPEN_PRESETS);
+    f.click(cx, "search.preset.row.0");
+    let drafts = f.drafts(cx);
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].collection, "books");
+    assert_eq!(drafts[0].params["q"], "a");
+}
+
+#[gpui_kit::test]
+async fn preset_not_an_object_shows_inline(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.set_presets(&[
+        ("text", json!("nope")),
+        ("bad", json!({"searches": [{"Bad-Key": 1}]})),
+    ]);
+    f.press(cx, OPEN_PRESETS);
+    f.press(cx, "enter");
+    assert!(f.has(cx, "search.preset.error"));
+    assert!(f.text_of(cx, "search.preset.error").contains("object"));
+    f.press(cx, "down");
+    f.press(cx, "enter");
+    assert!(f.text_of(cx, "search.preset.error").contains("Bad-Key"));
+    assert_eq!(f.drafts(cx).len(), 1);
+    assert_eq!(f.params(cx)["q"], "*");
+}
+
+#[gpui_kit::test]
+async fn presets_error_shows_inline(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    *f.search.fail.lock().unwrap() = Some((401, "no way".into()));
+    f.press(cx, OPEN_PRESETS);
+    assert!(f.text_of(cx, "search.preset.error").contains("no way"));
+    assert!(f.disabled(cx, "search.preset.save"));
+}
+
+#[gpui_kit::test]
+async fn preset_save_sends_the_search_without_its_collection(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.fill(cx, "search.param.q", "dune");
+    f.press(cx, OPEN_PRESETS);
+    f.click(cx, "search.preset.save");
+    f.fill(cx, "search.save.name", " mine ");
+    f.click(cx, "search.save.ok");
+    let saved = f.saved_presets();
+    assert_eq!(saved[0].0, "mine");
+    assert_eq!(saved[0].1["q"], "dune");
+    assert!(saved[0].1.get("collection").is_none());
+
+    f.press(cx, ADD_SEARCH);
+    f.press(cx, OPEN_PRESETS);
+    f.click(cx, "search.preset.save");
+    f.fill(cx, "search.save.name", "two");
+    f.click(cx, "search.save.ok");
+    let searches = f.saved_presets()[1].1["searches"].clone();
+    assert_eq!(searches[1]["collection"], "books");
+}
+
+#[gpui_kit::test]
+async fn preset_save_failure_shows_inline(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.press(cx, OPEN_PRESETS);
+    f.click(cx, "search.preset.save");
+    *f.search.fail.lock().unwrap() = Some((400, "refused".into()));
+    f.fill(cx, "search.save.name", "mine");
+    f.click(cx, "search.save.ok");
+    assert!(f.text_of(cx, "search.queries.error").contains("refused"));
+}
+
+#[gpui_kit::test]
+async fn preset_save_on_locked_profile_unlocks_first(cx: &mut TestAppContext) {
+    let mut profile = Profile::new("test", vec![node()]);
+    profile.read_only = true;
+    let f = Fixture::with(cx, profile).await;
+    f.press(cx, OPEN_PRESETS);
+    assert!(f.has(cx, "search.preset.save.readonly"));
+    f.click(cx, "search.preset.save");
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+    assert!(!f.has(cx, "search.save.name"));
+    f.act(cx, |window, cx| {
+        window.click("danger.input".to_string(), cx);
+        window.input("test", cx);
+        window.render_frame(cx);
+        window.click("danger.ok".to_string(), cx);
+    });
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    f.settle(cx);
+    f.fill(cx, "search.save.name", "mine");
+    f.click(cx, "search.save.ok");
+    assert_eq!(f.saved_presets().len(), 1);
+}
+
+#[gpui_kit::test]
+async fn preset_replace_cancel_sends_nothing(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.set_presets(&[("mine", json!({"q": "old"}))]);
+    f.press(cx, OPEN_PRESETS);
+    f.click(cx, "search.preset.save");
+    f.fill(cx, "search.save.name", "mine");
+    f.click(cx, "search.save.ok");
+    assert!(f.has(cx, "confirm.body"));
+    f.click(cx, "confirm.cancel");
+    assert!(f.saved_presets().is_empty());
+
+    f.press(cx, OPEN_PRESETS);
+    f.click(cx, "search.preset.save");
+    f.fill(cx, "search.save.name", "mine");
+    f.click(cx, "search.save.ok");
+    f.click(cx, "confirm.ok");
+    assert_eq!(f.saved_presets().len(), 1);
 }

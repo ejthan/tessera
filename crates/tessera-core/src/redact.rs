@@ -13,6 +13,16 @@ const SECRET_KEYS: [&str; 5] = [
     "client_secret",
 ];
 
+/// Whether a request parameter of this name would hold a key: `api_key`, `x-typesense-api-key`,
+/// `scoped_key` and the like, or a name in `SECRET_KEYS`, in any case and with `-` or `_`.
+pub fn is_secret_param(name: &str) -> bool {
+    let name = name.to_ascii_lowercase().replace('-', "_");
+    ["api_key", "apikey", "scoped_key"]
+        .iter()
+        .any(|part| name.contains(part))
+        || SECRET_KEYS.contains(&name.as_str())
+}
+
 /// Masks the string values of the keys in `SECRET_KEYS` (`api_key`, `value` and the
 /// embedding model credentials) at any depth.
 ///

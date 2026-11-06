@@ -135,6 +135,23 @@ impl History {
     }
 }
 
+/// `drafts` without the parameters that would hold a key: what ends up in a plain file must not.
+pub fn without_secrets(drafts: &[SearchDraft]) -> Vec<SearchDraft> {
+    let mut drafts = drafts.to_vec();
+    for draft in &mut drafts {
+        draft.params.retain(|key, _| !redact::is_secret_param(key));
+    }
+    drafts
+}
+
+/// The entry of a search of `drafts`, without keys: see [`without_secrets`].
+pub fn search_entry(union: bool, drafts: &[SearchDraft]) -> HistoryEntry {
+    HistoryEntry::Search {
+        union,
+        searches: without_secrets(drafts),
+    }
+}
+
 /// `history.jsonl` in the platform data directory.
 pub fn history_path() -> Option<PathBuf> {
     Some(
@@ -306,6 +323,24 @@ mod tests {
         );
         h.clear(id);
         assert_eq!((q(&h, ""), h.searches(other, "").len()), (0, 1));
+    }
+
+    #[test]
+    fn search_entry_drops_every_key_parameter() {
+        let mut draft = SearchDraft::new("books");
+        for key in ["api_key", "x_typesense_api_key", "scoped_key", "API_KEY"] {
+            draft.params.insert(key.into(), "topsecret".into());
+        }
+        draft.params.insert("api_key_number".into(), 12_345.into());
+        let item = HistoryItem {
+            at: 1,
+            profile: Uuid::new_v4(),
+            entry: search_entry(false, &[draft]),
+        };
+        let line = to_line(&item).unwrap();
+        assert!(!line.contains("topsecret"), "{line}");
+        assert!(!line.contains("12345"), "{line}");
+        assert!(line.contains("enable_analytics"));
     }
 
     #[test]

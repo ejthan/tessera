@@ -5,12 +5,14 @@
 pub mod form;
 pub mod hits;
 mod multi;
+mod queries;
 mod results;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::base::actions::{SelectDown, SelectUp};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::kbd::Kbd;
@@ -38,12 +40,13 @@ use tessera_widgets::{BodyView, JsonEditor, JsonEditorEvent};
 use self::form::{FormEvent, SearchForm};
 use self::hits::HitsView;
 use self::multi::multi_request;
+use self::queries::{PendingHistory, Queries, QueryList};
 use super::dock::view_tab;
 use super::env_badge;
 use crate::actions::{
-    AddSearch, FocusQuery, NextResultPage, NextSearch, PreviousResultPage, PreviousSearch,
-    RemoveSearch, RunSearch, ShowForm, ShowHits, ShowJson, ShowRawResult, ToggleInstant,
-    ToggleUnion, WORKBENCH,
+    AddSearch, DeleteSavedQuery, FocusQuery, LoadQuery, NextResultPage, NextSearch, OpenHistory,
+    OpenPresets, OpenSaved, PreviousResultPage, PreviousSearch, RemoveSearch, RunSearch, SaveQuery,
+    ShowForm, ShowHits, ShowJson, ShowRawResult, ToggleInstant, ToggleUnion, WORKBENCH,
 };
 use crate::collections::BoxFuture;
 use crate::connection::{ConnectionState, error_text};
@@ -110,7 +113,7 @@ fn param_error_text(error: &ParamError) -> String {
 
 /// A connection's searches.
 pub struct SearchWorkbench {
-    _state: Entity<AppState>,
+    state: Entity<AppState>,
     connection: Entity<ConnectionState>,
     drafts: Vec<SearchDraft>,
     active: usize,
@@ -145,8 +148,13 @@ pub struct SearchWorkbench {
     instant: bool,
     /// The wait before an instant run; a newer change replaces it.
     instant_task: Option<Task<()>>,
+    /// The run on its way into the history.
+    pending_history: Option<PendingHistory>,
+    /// The wait until an instant run counts as settled.
+    history_task: Option<Task<()>>,
+    queries: Queries,
     focus_handle: FocusHandle,
-    _subscriptions: [Subscription; 4],
+    _subscriptions: [Subscription; 5],
 }
 
 impl SearchWorkbench {
@@ -167,8 +175,10 @@ impl SearchWorkbench {
         if connection.read(cx).collection_cache.collections.is_none() {
             connection.update(cx, |c, cx| c.load_collection_list(cx));
         }
+        let (queries, queries_changed) = Queries::new(window, cx);
         let mut this = Self {
             _subscriptions: [
+                queries_changed,
                 cx.observe_in(&connection, window, |this, _, window, cx| {
                     this.take_collection_list(window, cx);
                     cx.notify();
@@ -197,7 +207,7 @@ impl SearchWorkbench {
                     },
                 ),
             ],
-            _state: state,
+            state,
             connection,
             drafts: vec![draft],
             active: 0,
@@ -222,6 +232,9 @@ impl SearchWorkbench {
             run_task: None,
             instant,
             instant_task: None,
+            pending_history: None,
+            history_task: None,
+            queries,
             focus_handle: cx.focus_handle(),
         };
         this.sync_editors(window, cx);
@@ -248,11 +261,13 @@ impl SearchWorkbench {
         self.drop_run();
         self.results.clear();
         self.result_tab = 0;
+        self.error = None;
         self.json_error = None;
         self.sync_draft(window, cx);
     }
 
     fn drop_run(&mut self) {
+        self.forget_run();
         self.run_task = None;
         self.generation += 1;
         self.running = false;
@@ -500,7 +515,7 @@ impl SearchWorkbench {
             // The schema may have arrived during the wait.
             this.update_in(cx, |this, window, cx| {
                 if this.instant_allowed(cx) {
-                    this.run(window, cx);
+                    this.start(false, window, cx);
                 }
             })
             .ok();
@@ -510,17 +525,23 @@ impl SearchWorkbench {
     /// Runs the draft, replacing a run going or waiting. A conversation writes, so it first
     /// asks to unlock a read-only connection.
     pub fn run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start(true, window, cx);
+    }
+
+    /// `explicit`: the user asked for this run, so its success enters the history at once.
+    fn start(&mut self, explicit: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.instant_task = None;
         if self.run_blocked() {
             return;
         }
         if !self.side_effects(cx).contains(&SideEffect::Conversation) {
-            return self.send(window, cx);
+            return self.send(explicit, window, cx);
         }
         let this = cx.entity().downgrade();
         self.connection.update(cx, |c, cx| {
             c.ensure_writable(window, cx, move |window, cx| {
-                this.update(cx, |this, cx| this.send(window, cx)).ok();
+                this.update(cx, |this, cx| this.send(explicit, window, cx))
+                    .ok();
             });
         });
     }
@@ -550,7 +571,7 @@ impl SearchWorkbench {
         }))
     }
 
-    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn send(&mut self, explicit: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(connected) = &self.connection.read(cx).connected else {
             return;
         };
@@ -564,6 +585,7 @@ impl SearchWorkbench {
         self.generation += 1;
         let generation = self.generation;
         self.running = true;
+        self.follow_for_history(explicit, cx);
         self.run_task = Some(cx.spawn_in(window, async move |this, cx| {
             let answer = search.await;
             this.update_in(cx, |this, window, cx| {
@@ -589,10 +611,12 @@ impl SearchWorkbench {
                 self.show_result_tab(self.result_tab, cx);
                 self.raw_pending = Some(text);
                 self.fill_raw(window, cx);
+                self.history_answer(self.results.iter().any(Result::is_ok), cx);
             }
             Err(error) => {
                 let profile = &self.connection.read(cx).profile;
                 self.error = Some(error_text(&error, profile).into());
+                self.history_answer(false, cx);
             }
         }
         cx.notify();
@@ -635,6 +659,7 @@ impl SearchWorkbench {
             && self.connection.read(cx).writes_locked();
         h_flex()
             .flex_none()
+            .flex_wrap()
             .gap_3()
             .p_2()
             .items_center()
@@ -657,6 +682,36 @@ impl SearchWorkbench {
                     .disabled(self.run_blocked())
                     .on_click(cx.listener(|this, _, window, cx| this.run(window, cx))),
             )
+            .child(self.list_button(
+                QueryList::History,
+                t!("search.history").to_string(),
+                &OpenHistory,
+                window,
+                cx,
+            ))
+            .child(self.list_button(
+                QueryList::Saved,
+                t!("search.saved").to_string(),
+                &OpenSaved,
+                window,
+                cx,
+            ))
+            .child(
+                Button::new("search.save")
+                    .ghost()
+                    .small()
+                    .label(t!("search.save").to_string())
+                    .children(Kbd::binding_for_action(&SaveQuery, Some(WORKBENCH), window))
+                    .disabled(self.save_blocked(cx))
+                    .on_click(cx.listener(|this, _, window, cx| this.ask_save(window, cx))),
+            )
+            .child(self.list_button(
+                QueryList::Presets,
+                t!("search.presets").to_string(),
+                &OpenPresets,
+                window,
+                cx,
+            ))
             .child(
                 Checkbox::new("search.instant")
                     .checked(self.instant)
@@ -936,10 +991,29 @@ impl Render for SearchWorkbench {
             .on_action(cx.listener(|this, _: &ToggleUnion, window, cx| {
                 this.toggle_union(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenHistory, window, cx| {
+                this.toggle_list(QueryList::History, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenSaved, window, cx| {
+                this.toggle_list(QueryList::Saved, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenPresets, window, cx| {
+                this.toggle_list(QueryList::Presets, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SaveQuery, window, cx| this.ask_save(window, cx)))
+            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.step_list(-1, cx)))
+            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.step_list(1, cx)))
+            .on_action(cx.listener(|this, _: &LoadQuery, window, cx| {
+                this.load_selected(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteSavedQuery, window, cx| {
+                this.ask_delete_saved(window, cx);
+            }))
             .size_full()
             .child(tabs)
             .children(self.limit_note(cx))
             .child(toolbar)
+            .children(self.write_note(cx))
             .children(self.instant_note(cx))
             .children(self.collections_note(cx))
             .child(

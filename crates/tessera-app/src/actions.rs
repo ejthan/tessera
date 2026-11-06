@@ -83,7 +83,13 @@ gpui_kit::actions!(
         RemoveSearch,
         NextSearch,
         PreviousSearch,
-        ToggleUnion
+        ToggleUnion,
+        OpenHistory,
+        OpenSaved,
+        SaveQuery,
+        OpenPresets,
+        LoadQuery,
+        DeleteSavedQuery
     ]
 );
 
@@ -135,6 +141,10 @@ const WORKBENCH_INPUT: &str = "Workbench > Input";
 pub const CONDITION_ROW: &str = "ConditionRow";
 /// The value input of that row.
 const CONDITION_INPUT: &str = "ConditionRow > Input";
+/// Key context of a list in a search tab's toolbar.
+pub const QUERY_LIST: &str = "QueryList";
+/// The filter of that list, which keeps the focus while the arrows move the selection.
+const QUERY_LIST_INPUT: &str = "QueryList > Input";
 /// Key context of the hit list.
 pub const SEARCH_HITS: &str = "SearchHits";
 /// Key context of a focused `query_by` chip.
@@ -334,6 +344,22 @@ const NEXT_SEARCH: &str = "ctrl-alt-right";
 const PREVIOUS_SEARCH: &str = "cmd-alt-left";
 #[cfg(not(target_os = "macos"))]
 const PREVIOUS_SEARCH: &str = "ctrl-alt-left";
+#[cfg(target_os = "macos")]
+const OPEN_HISTORY: &str = "cmd-shift-h";
+#[cfg(not(target_os = "macos"))]
+const OPEN_HISTORY: &str = "ctrl-shift-h";
+#[cfg(target_os = "macos")]
+const OPEN_SAVED: &str = "cmd-o";
+#[cfg(not(target_os = "macos"))]
+const OPEN_SAVED: &str = "ctrl-o";
+#[cfg(target_os = "macos")]
+const SAVE_QUERY: &str = "cmd-s";
+#[cfg(not(target_os = "macos"))]
+const SAVE_QUERY: &str = "ctrl-s";
+#[cfg(target_os = "macos")]
+const OPEN_PRESETS: &str = "cmd-alt-p";
+#[cfg(not(target_os = "macos"))]
+const OPEN_PRESETS: &str = "ctrl-alt-p";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -449,6 +475,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(NEXT_SEARCH, NextSearch, Some(WORKBENCH)),
         KeyBinding::new(PREVIOUS_SEARCH, PreviousSearch, Some(WORKBENCH)),
         KeyBinding::new(SAVE_MODE, ToggleUnion, Some(WORKBENCH)),
+        KeyBinding::new(OPEN_HISTORY, OpenHistory, Some(WORKBENCH)),
+        KeyBinding::new(OPEN_SAVED, OpenSaved, Some(WORKBENCH)),
+        KeyBinding::new(SAVE_QUERY, SaveQuery, Some(WORKBENCH)),
+        KeyBinding::new(OPEN_PRESETS, OpenPresets, Some(WORKBENCH)),
+        // Deeper than the input's own keys, so the filter keeps the focus.
+        KeyBinding::new("up", SelectUp, Some(QUERY_LIST_INPUT)),
+        KeyBinding::new("down", SelectDown, Some(QUERY_LIST_INPUT)),
+        KeyBinding::new("enter", LoadQuery, Some(QUERY_LIST_INPUT)),
+        KeyBinding::new(DELETE, DeleteSavedQuery, Some(QUERY_LIST_INPUT)),
         // Deeper than Run, so in the row ⌘↩ adds the condition.
         KeyBinding::new(SAVE, AddCondition, Some(CONDITION_ROW)),
         KeyBinding::new(SAVE, AddCondition, Some(CONDITION_INPUT)),
