@@ -5,7 +5,9 @@
 pub mod aliases;
 pub mod name_dialog;
 pub mod presets;
+pub mod sets;
 pub mod stopwords;
+pub mod synonyms;
 
 use std::rc::Rc;
 
@@ -21,13 +23,14 @@ use gpui_kit::{
     Task, WeakEntity, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
-use tessera_client::{Client, Error};
+use tessera_client::{Client, Error, SetKind};
 use tessera_core::profile::Profile;
 use tessera_widgets::confirm;
 use tessera_widgets::confirm_danger::{self, DangerOptions};
 
 use self::aliases::AliasesView;
 use self::presets::PresetsView;
+use self::sets::SetsView;
 use self::stopwords::StopwordsView;
 use super::env_badge;
 use crate::actions::{FocusResourceFilter, NewResource, RESOURCES, ReloadResource};
@@ -42,6 +45,8 @@ pub enum ResourceView {
     Stopwords(Entity<StopwordsView>),
     /// See [`PresetsView`].
     Presets(Entity<PresetsView>),
+    /// See [`SetsView`].
+    Sets(Entity<SetsView>),
     /// A kind whose view has not arrived: no sidebar row, shortcut or palette entry reaches it.
     Pending(Entity<PendingView>),
 }
@@ -65,12 +70,13 @@ impl ResourceView {
             ResourceKind::Presets => {
                 Self::Presets(cx.new(|cx| PresetsView::new(connection, state, window, cx)))
             }
-            ResourceKind::Synonyms | ResourceKind::Curations => {
-                Self::Pending(cx.new(|cx| PendingView {
-                    kind,
-                    focus_handle: cx.focus_handle(),
-                }))
+            ResourceKind::Synonyms => {
+                Self::Sets(cx.new(|cx| SetsView::new(SetKind::Synonym, connection, window, cx)))
             }
+            ResourceKind::Curations => Self::Pending(cx.new(|cx| PendingView {
+                kind,
+                focus_handle: cx.focus_handle(),
+            })),
         }
     }
 
@@ -80,6 +86,7 @@ impl ResourceView {
             Self::Aliases(view) => view.clone().into(),
             Self::Stopwords(view) => view.clone().into(),
             Self::Presets(view) => view.clone().into(),
+            Self::Sets(view) => view.clone().into(),
             Self::Pending(view) => view.clone().into(),
         }
     }
@@ -90,6 +97,7 @@ impl ResourceView {
             Self::Aliases(view) => view.focus_handle(cx),
             Self::Stopwords(view) => view.focus_handle(cx),
             Self::Presets(view) => view.focus_handle(cx),
+            Self::Sets(view) => view.focus_handle(cx),
             Self::Pending(view) => view.read(cx).focus_handle.clone(),
         }
     }
@@ -100,6 +108,7 @@ impl ResourceView {
             Self::Aliases(view) => view.read(cx).gates(cx),
             Self::Stopwords(view) => view.read(cx).gates(cx),
             Self::Presets(view) => view.read(cx).gates(cx),
+            Self::Sets(view) => view.read(cx).gates(cx),
             Self::Pending(_) => Vec::new(),
         }
     }

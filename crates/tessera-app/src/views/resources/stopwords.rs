@@ -42,7 +42,7 @@ const COLUMNS: &[ResourceColumn] = &[
 const LIST_WIDTH: f32 = 500.;
 
 /// The words of `text`: one per line, trimmed, empties dropped.
-fn words_of(text: &str) -> Vec<String> {
+pub(super) fn words_of(text: &str) -> Vec<String> {
     let lines = text.lines().map(str::trim).filter(|w| !w.is_empty());
     lines.map(str::to_string).collect()
 }

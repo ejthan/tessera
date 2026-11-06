@@ -33,7 +33,8 @@ use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::root::RootView;
 use tessera_client::{
     Alias, Client, ClientOptions, Collection, CollectionSummary, Debug, DocumentQuery, Error,
-    Health, KeyAccess, Metrics, NodeClient, Origin, SchemaChange, Stats, StopwordSet,
+    Health, ItemSet, KeyAccess, Metrics, NodeClient, Origin, SchemaChange, SetKind, Stats,
+    StopwordSet,
 };
 use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
@@ -1277,6 +1278,14 @@ pub struct FakeRelevance {
     pub stopwords: Mutex<Vec<StopwordSet>>,
     /// `save_stopwords` stores these words instead of the ones sent.
     pub stored_words: Mutex<Option<Vec<String>>>,
+    /// The sets on the server.
+    pub sets: Mutex<Vec<ItemSet>>,
+    /// `save_item` reads back this instead of the item sent.
+    pub stored_item: Mutex<Option<serde_json::Value>>,
+    /// `save_set` keeps only this many items.
+    pub keep_items: Mutex<Option<usize>>,
+    /// Calls that start with this fail with this message, whatever `fail` says.
+    pub fail_call: Mutex<Option<(String, String)>>,
     /// The next `save_stopwords` answers once this resolves.
     pub hold: Mutex<Option<oneshot::Receiver<()>>>,
 }
@@ -1284,6 +1293,17 @@ pub struct FakeRelevance {
 impl FakeRelevance {
     fn record(&self, call: String) {
         self.calls.lock().unwrap().push(call);
+    }
+
+    /// `outcome` for `call`, which is recorded.
+    fn write(&self, call: String) -> Result<(), Error> {
+        let refused = self.fail_call.lock().unwrap().clone();
+        let refused = refused.filter(|(start, _)| call.starts_with(start));
+        self.record(call);
+        match refused {
+            Some((_, message)) => Err(http_error((500, message))),
+            None => self.outcome(),
+        }
     }
 
     fn outcome(&self) -> Result<(), Error> {
@@ -1297,6 +1317,91 @@ impl FakeRelevance {
 pub struct FakeRelevanceBackend(pub Arc<FakeRelevance>);
 
 impl RelevanceBackend for FakeRelevanceBackend {
+    fn sets(
+        &self,
+        _: Client,
+        _: SetKind,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<ItemSet>, Error>> {
+        let sets = self.0.sets.lock().unwrap().clone();
+        Box::pin(async move { Ok(sets) })
+    }
+
+    fn set(
+        &self,
+        _: Client,
+        _: SetKind,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<ItemSet, Error>> {
+        let set = self
+            .0
+            .sets
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.name == name)
+            .cloned();
+        Box::pin(async move { set.ok_or_else(|| http_error((404, "Not found.".into()))) })
+    }
+
+    fn save_set(
+        &self,
+        _: Client,
+        _: SetKind,
+        name: String,
+        mut items: Vec<serde_json::Value>,
+    ) -> tessera_app::collections::BoxFuture<Result<ItemSet, Error>> {
+        let answer = self.0.write(format!("save_set {name} {}", items.len()));
+        let answer = answer.map(|()| {
+            if let Some(keep) = *self.0.keep_items.lock().unwrap() {
+                items.truncate(keep);
+            }
+            let set = ItemSet { name, items };
+            let mut sets = self.0.sets.lock().unwrap();
+            sets.retain(|s| s.name != set.name);
+            sets.push(set.clone());
+            set
+        });
+        Box::pin(async move { answer })
+    }
+
+    fn save_item(
+        &self,
+        _: Client,
+        _: SetKind,
+        name: String,
+        id: String,
+        item: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
+        let answer = self.0.write(format!("save_item {name} {id}"));
+        let stored = self.0.stored_item.lock().unwrap().clone().unwrap_or(item);
+        let answer = answer.map(|()| {
+            let mut sets = self.0.sets.lock().unwrap();
+            if let Some(set) = sets.iter_mut().find(|s| s.name == name) {
+                set.items.retain(|i| i["id"] != id.as_str());
+                set.items.push(stored.clone());
+            }
+            stored
+        });
+        Box::pin(async move { answer })
+    }
+
+    fn delete_item(
+        &self,
+        _: Client,
+        _: SetKind,
+        name: String,
+        id: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        let answer = self.0.write(format!("delete_item {name} {id}"));
+        if answer.is_ok() {
+            let mut sets = self.0.sets.lock().unwrap();
+            if let Some(set) = sets.iter_mut().find(|s| s.name == name) {
+                set.items.retain(|i| i["id"] != id.as_str());
+            }
+        }
+        Box::pin(async move { answer })
+    }
+
     fn stopwords(
         &self,
         _: Client,

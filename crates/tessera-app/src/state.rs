@@ -155,7 +155,7 @@ impl ResourceKind {
     /// Whether a server of that support gets a row: a kind appears with its view (UX rule 4),
     /// and synonym and curation sets do not exist below v30.
     pub fn shown(self, supported: bool) -> bool {
-        let arrived = matches!(self, Self::Aliases | Self::Stopwords | Self::Presets);
+        let arrived = !matches!(self, Self::Curations);
         arrived && (supported || !matches!(self, Self::Synonyms | Self::Curations))
     }
 }

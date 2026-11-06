@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use gpui_kit::Global;
-use tessera_client::{Alias, Client, Error, StopwordSet};
+use serde_json::Value;
+use tessera_client::{Alias, Client, Error, ItemSet, SetKind, StopwordSet};
 use tokio::runtime::Handle;
 
 use crate::collections::{BoxFuture, TokioBackend};
@@ -13,6 +14,41 @@ use crate::collections::{BoxFuture, TokioBackend};
 /// Everything the resource views ask of the server. Every write here is one the caller runs
 /// detached, so closing a tab cannot abort it.
 pub trait RelevanceBackend: Send + Sync {
+    /// The sets of `kind`, with their items.
+    fn sets(&self, client: Client, kind: SetKind) -> BoxFuture<Result<Vec<ItemSet>, Error>>;
+
+    /// Set `name` as the server holds it now.
+    fn set(&self, client: Client, kind: SetKind, name: String)
+    -> BoxFuture<Result<ItemSet, Error>>;
+
+    /// Replaces set `name`, or creates it, then reads it back: the answer echoes the input.
+    fn save_set(
+        &self,
+        client: Client,
+        kind: SetKind,
+        name: String,
+        items: Vec<Value>,
+    ) -> BoxFuture<Result<ItemSet, Error>>;
+
+    /// Stores one item, then reads it back, because the answer echoes the input.
+    fn save_item(
+        &self,
+        client: Client,
+        kind: SetKind,
+        name: String,
+        id: String,
+        item: Value,
+    ) -> BoxFuture<Result<Value, Error>>;
+
+    /// Deletes one item.
+    fn delete_item(
+        &self,
+        client: Client,
+        kind: SetKind,
+        name: String,
+        id: String,
+    ) -> BoxFuture<Result<(), Error>>;
+
     /// The stopword sets.
     fn stopwords(&self, client: Client) -> BoxFuture<Result<Vec<StopwordSet>, Error>>;
 
@@ -52,6 +88,56 @@ pub struct RelevanceBackendGlobal(pub Arc<dyn RelevanceBackend>);
 impl Global for RelevanceBackendGlobal {}
 
 impl RelevanceBackend for TokioBackend {
+    fn sets(&self, client: Client, kind: SetKind) -> BoxFuture<Result<Vec<ItemSet>, Error>> {
+        self.run(async move { client.sets(kind).await })
+    }
+
+    fn set(
+        &self,
+        client: Client,
+        kind: SetKind,
+        name: String,
+    ) -> BoxFuture<Result<ItemSet, Error>> {
+        self.run(async move { client.set(kind, &name).await })
+    }
+
+    fn save_set(
+        &self,
+        client: Client,
+        kind: SetKind,
+        name: String,
+        items: Vec<Value>,
+    ) -> BoxFuture<Result<ItemSet, Error>> {
+        self.run(async move {
+            client.upsert_set(kind, &name, &items).await?;
+            client.set(kind, &name).await
+        })
+    }
+
+    fn save_item(
+        &self,
+        client: Client,
+        kind: SetKind,
+        name: String,
+        id: String,
+        item: Value,
+    ) -> BoxFuture<Result<Value, Error>> {
+        self.run(async move {
+            client.upsert_set_item(kind, &name, &id, &item).await?;
+            client.set_item(kind, &name, &id).await
+        })
+    }
+
+    fn delete_item(
+        &self,
+        client: Client,
+        kind: SetKind,
+        name: String,
+        id: String,
+    ) -> BoxFuture<Result<(), Error>> {
+        self.run(async move { client.delete_set_item(kind, &name, &id).await })
+    }
+
     fn stopwords(&self, client: Client) -> BoxFuture<Result<Vec<StopwordSet>, Error>> {
         self.run(async move { client.stopwords().await })
     }

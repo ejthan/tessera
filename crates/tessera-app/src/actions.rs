@@ -133,7 +133,11 @@ gpui_kit::actions!(
         ReloadResource,
         FocusResourceFilter,
         SaveResource,
-        LeavePreset
+        LeavePreset,
+        NewSetItem,
+        DeleteSetItem,
+        ShowItems,
+        ShowSetJson
     ]
 );
 
@@ -209,6 +213,12 @@ const RESOURCES_INPUT: &str = "Resources > Input";
 pub const ALIAS_DIALOG: &str = "AliasDialog";
 /// An input in that dialog, which has its own ⌘↩.
 const ALIAS_INPUT: &str = "AliasDialog > Input";
+/// Key context of the items of a set, where New and Delete mean an item.
+pub const SET_ITEMS: &str = "SetItems";
+/// Key context of the item dialog.
+pub const SET_ITEM_DIALOG: &str = "SetItemDialog";
+/// An input in that dialog, which has its own ⌘↩.
+const SET_ITEM_INPUT: &str = "SetItemDialog > Input";
 /// Key context of a list in a toolbar.
 pub const QUERY_LIST: &str = "QueryList";
 /// The filter of that list, which keeps the focus while the arrows move the selection.
@@ -584,6 +594,10 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     FocusResourceFilter,
     SaveResource,
     LeavePreset,
+    NewSetItem,
+    DeleteSetItem,
+    ShowItems,
+    ShowSetJson,
     StopWaiting,
     RemoveBodyFile,
     ShowResponseBody,
@@ -839,6 +853,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SAVE, SaveResource, Some(RESOURCES_INPUT)),
         KeyBinding::new(SAVE, SaveResource, Some(ALIAS_DIALOG)),
         KeyBinding::new(SAVE, SaveResource, Some(ALIAS_INPUT)),
+        KeyBinding::new(SAVE, SaveResource, Some(SET_ITEM_DIALOG)),
+        KeyBinding::new(SAVE, SaveResource, Some(SET_ITEM_INPUT)),
+        KeyBinding::new(NEW_COLLECTION, NewSetItem, Some(SET_ITEMS)),
+        KeyBinding::new(DELETE, DeleteSetItem, Some(SET_ITEMS)),
+        KeyBinding::new(SHOW_FORM, ShowItems, Some(RESOURCES)),
+        KeyBinding::new(SHOW_JSON, ShowSetJson, Some(RESOURCES)),
         KeyBinding::new(SHOW_FULL_BODY, ShowFullBody, Some(REQUEST_LOG)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(CONSOLE)),
         KeyBinding::new(SAVE, SendRequest, Some(CONSOLE)),

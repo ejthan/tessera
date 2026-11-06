@@ -226,8 +226,8 @@ async fn lists_actions_of_the_focused_view_only(cx: &mut TestAppContext) {
 async fn resource_tabs_are_listed_for_the_selected_connection(cx: &mut TestAppContext) {
     let f = Fixture::on_search(cx).await;
     f.palette(cx);
-    f.query(cx, "synonyms");
-    assert!(!f.has_action(cx, "OpenSynonyms"));
+    f.query(cx, "curations");
+    assert!(!f.has_action(cx, "OpenCurations"));
     f.press(cx, SELECT_ALL);
     f.press(cx, "backspace");
     f.query(cx, "aliases");
