@@ -162,7 +162,7 @@ impl Report {
     }
 
     /// Adds a row to the spool and, while the table has room, to the table.
-    pub(super) async fn add(&mut self, row: ReportRow) -> io::Result<()> {
+    pub async fn add(&mut self, row: ReportRow) -> io::Result<()> {
         let spool = self.spool.as_mut().ok_or_else(no_spool)?;
         let mut line = serde_json::to_vec(&row)?;
         line.push(b'\n');
@@ -178,7 +178,7 @@ impl Report {
     }
 
     /// Writes out what `add` buffered; saving sees only what is flushed.
-    pub(super) async fn finish(&mut self) -> io::Result<()> {
+    pub async fn finish(&mut self) -> io::Result<()> {
         match &mut self.spool {
             Some(spool) => spool.writer.flush().await,
             None => Ok(()),

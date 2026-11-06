@@ -7,10 +7,12 @@ pub mod collections;
 pub mod connection;
 pub mod documents;
 pub mod i18n;
+pub mod jobs;
 pub mod poller;
 pub mod runtime;
 pub mod search;
 pub mod state;
+pub mod transfer;
 pub mod views;
 
 use std::io::BufRead;
@@ -119,8 +121,12 @@ pub fn run(launch: Launch) -> Result<(), String> {
         cx.set_global(search::SearchBackendGlobal(search::tokio_backend(
             handle.clone(),
         )));
+        cx.set_global(transfer::TransferBackendGlobal(transfer::tokio_backend(
+            handle.clone(),
+        )));
         cx.set_global(runtime::Tokio(handle));
         gpui_kit::init(cx);
+        jobs::init(cx);
         i18n::init();
         actions::bind_keys(cx);
         // A file that does not parse changes nothing: the default shortcuts stay.

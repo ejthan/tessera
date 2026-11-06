@@ -7,6 +7,8 @@
 // Helpers unwrap; a panic is the test failure we want.
 #![allow(clippy::unwrap_used)]
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,10 +22,12 @@ use secrecy::ExposeSecret as _;
 use tessera_app::collections::{CollectionsBackend, CollectionsBackendGlobal};
 use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
 use tessera_app::documents::{DocumentsBackend, DocumentsBackendGlobal, PageResult};
+use tessera_app::jobs::{self, JobId, JobsGlobal};
 use tessera_app::poller::{CollectionsFetcherGlobal, NodeSample, PollFetcherGlobal, SampleFuture};
 use tessera_app::runtime::Tokio;
 use tessera_app::search::{MultiAnswer, SearchAnswer, SearchBackend, SearchBackendGlobal};
 use tessera_app::state::AppState;
+use tessera_app::transfer::{TransferBackend, TransferBackendGlobal};
 use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::root::RootView;
 use tessera_client::{
@@ -35,6 +39,14 @@ use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::search::results::{parse_multi, parse_result};
 use tessera_core::secrets::{MemoryStore, SecretStore};
 use tessera_core::store::{ConnectionsFile, StoreError};
+use tessera_core::transfer::export::{ExportJob, ExportOutcome, ExportProgress};
+use tessera_core::transfer::import::{ImportJob, ImportOutcome, ImportProgress};
+use tessera_core::transfer::infer::InferredSchema;
+use tessera_core::transfer::preview::Preview;
+use tessera_core::transfer::report::{Report, ReportRow};
+use tessera_core::transfer::source::{ReadError, ReadOptions, Source};
+use tessera_core::transfer::{JobControl, JobEnd};
+use tokio::sync::{oneshot, watch};
 
 pub fn open(cx: &mut TestAppContext) -> WindowHandle<Root> {
     open_with(cx, Ok(ConnectionsFile::default()))
@@ -67,6 +79,9 @@ pub fn open_state_at(
         gpui_kit::component::set_locale("en");
         tessera_app::actions::bind_keys(cx);
         install_poll_fakes(cx);
+        if !cx.has_global::<JobsGlobal>() {
+            jobs::init(cx);
+        }
         let bounds = Bounds {
             origin: Point::default(),
             size: size(px(1200.), px(800.)),
@@ -172,6 +187,11 @@ fn install_poll_fakes(cx: &mut gpui_kit::App) {
     }
     if !cx.has_global::<DocumentsBackendGlobal>() {
         cx.set_global(DocumentsBackendGlobal(Arc::new(FakeDocsBackend(
+            Arc::default(),
+        ))));
+    }
+    if !cx.has_global::<TransferBackendGlobal>() {
+        cx.set_global(TransferBackendGlobal(Arc::new(FakeTransferBackend(
             Arc::default(),
         ))));
     }
@@ -750,6 +770,221 @@ pub fn fake_documents(cx: &mut TestAppContext) -> Arc<FakeDocs> {
     let installed = FakeDocsBackend(docs.clone());
     cx.update(|cx| cx.set_global(DocumentsBackendGlobal(Arc::new(installed))));
     docs
+}
+
+/// A running job of a [`FakeTransfer`]: its progress sender and how to end it.
+enum FakeJob {
+    Import(
+        watch::Sender<ImportProgress>,
+        oneshot::Sender<ImportOutcome>,
+    ),
+    Export(
+        watch::Sender<ExportProgress>,
+        oneshot::Sender<ExportOutcome>,
+    ),
+}
+
+/// What a transfer fake answers and has been asked. Its jobs run until the test ends them.
+#[derive(Default)]
+pub struct FakeTransfer {
+    jobs: Mutex<HashMap<u64, FakeJob>>,
+    /// What `preview` answers; `None` holds it open.
+    pub preview: Mutex<Option<Result<Preview, ReadError>>>,
+    /// What `infer` answers; `None` holds it open.
+    pub infer: Mutex<Option<Result<InferredSchema, ReadError>>>,
+    /// What `save_report` answers; `None` answers with [`Self::saved_lines`].
+    pub save_error: Mutex<Option<String>>,
+    /// Lines a successful `save_report` says it wrote.
+    pub saved_lines: Mutex<u64>,
+    /// `preview` calls.
+    pub previews: Mutex<Vec<(Source, ReadOptions, Option<Collection>)>>,
+    /// `infer` calls.
+    pub infers: Mutex<Vec<(Source, ReadOptions)>>,
+    /// `import` calls.
+    pub imports: Mutex<Vec<ImportJob>>,
+    /// `export` calls.
+    pub exports: Mutex<Vec<ExportJob>>,
+    /// `save_report` calls: the path and whether only failed lines.
+    pub saves: Mutex<Vec<(PathBuf, bool)>>,
+}
+
+impl FakeTransfer {
+    /// Publishes import progress of job `id`.
+    pub fn progress(&self, id: JobId, progress: ImportProgress) {
+        match self.jobs.lock().unwrap().get(&id.0) {
+            Some(FakeJob::Import(tx, _)) => {
+                tx.send_replace(progress);
+            }
+            _ => panic!("no import {id:?}"),
+        }
+    }
+
+    /// Publishes export progress of job `id`.
+    pub fn export_progress(&self, id: JobId, progress: ExportProgress) {
+        match self.jobs.lock().unwrap().get(&id.0) {
+            Some(FakeJob::Export(tx, _)) => {
+                tx.send_replace(progress);
+            }
+            _ => panic!("no export {id:?}"),
+        }
+    }
+
+    /// Ends import `id` with `outcome`.
+    pub fn finish(&self, id: JobId, outcome: ImportOutcome) {
+        match self.jobs.lock().unwrap().remove(&id.0) {
+            Some(FakeJob::Import(_, done)) => drop(done.send(outcome)),
+            _ => panic!("no import {id:?}"),
+        }
+    }
+
+    /// Ends export `id` with `outcome`.
+    pub fn finish_export(&self, id: JobId, outcome: ExportOutcome) {
+        match self.jobs.lock().unwrap().remove(&id.0) {
+            Some(FakeJob::Export(_, done)) => drop(done.send(outcome)),
+            _ => panic!("no export {id:?}"),
+        }
+    }
+}
+
+/// The installed backend; the test keeps the [`FakeTransfer`] handle.
+pub struct FakeTransferBackend(pub Arc<FakeTransfer>);
+
+impl TransferBackend for FakeTransferBackend {
+    fn preview(
+        &self,
+        source: Source,
+        options: ReadOptions,
+        schema: Option<Collection>,
+    ) -> tessera_app::collections::BoxFuture<Result<Preview, ReadError>> {
+        self.0
+            .previews
+            .lock()
+            .unwrap()
+            .push((source, options, schema));
+        let answer = self.0.preview.lock().unwrap().clone();
+        Box::pin(async move {
+            match answer {
+                Some(answer) => answer,
+                None => std::future::pending().await,
+            }
+        })
+    }
+
+    fn infer(
+        &self,
+        source: Source,
+        options: ReadOptions,
+    ) -> tessera_app::collections::BoxFuture<Result<InferredSchema, ReadError>> {
+        self.0.infers.lock().unwrap().push((source, options));
+        let answer = self.0.infer.lock().unwrap().clone();
+        Box::pin(async move {
+            match answer {
+                Some(answer) => answer,
+                None => std::future::pending().await,
+            }
+        })
+    }
+
+    fn import(
+        &self,
+        _: Client,
+        job: ImportJob,
+        _: JobControl,
+        progress: watch::Sender<ImportProgress>,
+    ) -> tessera_app::collections::BoxFuture<ImportOutcome> {
+        let (done, outcome) = oneshot::channel();
+        let id = {
+            let mut imports = self.0.imports.lock().unwrap();
+            imports.push(job);
+            let id = imports.len() + self.0.exports.lock().unwrap().len() - 1;
+            id as u64
+        };
+        self.0
+            .jobs
+            .lock()
+            .unwrap()
+            .insert(id, FakeJob::Import(progress, done));
+        Box::pin(async move { outcome.await.unwrap() })
+    }
+
+    fn export(
+        &self,
+        _: Client,
+        job: ExportJob,
+        _: JobControl,
+        progress: watch::Sender<ExportProgress>,
+    ) -> tessera_app::collections::BoxFuture<ExportOutcome> {
+        let (done, outcome) = oneshot::channel();
+        let id = {
+            let mut exports = self.0.exports.lock().unwrap();
+            exports.push(job);
+            let id = exports.len() + self.0.imports.lock().unwrap().len() - 1;
+            id as u64
+        };
+        self.0
+            .jobs
+            .lock()
+            .unwrap()
+            .insert(id, FakeJob::Export(progress, done));
+        Box::pin(async move { outcome.await.unwrap() })
+    }
+
+    fn save_report(
+        &self,
+        _: Arc<Report>,
+        path: PathBuf,
+        failed_only: bool,
+    ) -> tessera_app::collections::BoxFuture<Result<u64, String>> {
+        self.0.saves.lock().unwrap().push((path, failed_only));
+        let answer = match self.0.save_error.lock().unwrap().clone() {
+            Some(error) => Err(error),
+            None => Ok(*self.0.saved_lines.lock().unwrap()),
+        };
+        Box::pin(async move { answer })
+    }
+}
+
+/// Installs a transfer backend with scripted answers and the jobs entity.
+pub fn fake_transfer(cx: &mut TestAppContext) -> Arc<FakeTransfer> {
+    let fake = Arc::new(FakeTransfer::default());
+    let installed = FakeTransferBackend(fake.clone());
+    cx.update(|cx| {
+        cx.set_global(TransferBackendGlobal(Arc::new(installed)));
+        if !cx.has_global::<JobsGlobal>() {
+            jobs::init(cx);
+        }
+    });
+    fake
+}
+
+/// A report holding `rows`.
+pub fn report_with(rows: Vec<ReportRow>) -> Arc<Report> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut report = Report::new().await.unwrap();
+        for row in rows {
+            report.add(row).await.unwrap();
+        }
+        report.finish().await.unwrap();
+        Arc::new(report)
+    })
+}
+
+/// The outcome of an import that ended with `end` after `progress`.
+pub fn import_outcome(
+    end: JobEnd<tessera_core::transfer::TransferError>,
+    progress: ImportProgress,
+) -> ImportOutcome {
+    ImportOutcome {
+        end,
+        progress,
+        report: report_with(Vec::new()),
+        stopped_at_line: None,
+        count: None,
+    }
 }
 
 /// One search the fake was asked.
