@@ -162,6 +162,9 @@ impl ResourceKind {
 /// Asks the window to show a resource tab of a profile.
 pub struct OpenResource(pub Uuid, pub ResourceKind);
 
+/// Asks the window to show the reindex tab of an alias of a profile.
+pub struct OpenReindex(pub Uuid, pub String);
+
 /// Asks the window to close the tab of one collection of a profile, which no longer exists.
 pub struct CloseCollection(pub Uuid, pub String);
 
@@ -912,6 +915,13 @@ impl AppState {
         cx.notify();
     }
 
+    /// Asks for the reindex tab of `alias` of profile `id`.
+    pub fn open_reindex(&mut self, id: Uuid, alias: String, cx: &mut Context<Self>) {
+        self.selected = Some(id);
+        cx.emit(OpenReindex(id, alias));
+        cx.notify();
+    }
+
     /// Asks for the tab of collection `name` of profile `id` to close.
     pub fn close_collection(&mut self, id: Uuid, name: String, cx: &mut Context<Self>) {
         cx.emit(CloseCollection(id, name));
@@ -960,6 +970,7 @@ impl EventEmitter<OpenCollection> for AppState {}
 impl EventEmitter<OpenSearch> for AppState {}
 impl EventEmitter<OpenConsole> for AppState {}
 impl EventEmitter<OpenResource> for AppState {}
+impl EventEmitter<OpenReindex> for AppState {}
 impl EventEmitter<CloseCollection> for AppState {}
 
 /// Runs a blocking secret-store or file call on tokio's blocking pool.

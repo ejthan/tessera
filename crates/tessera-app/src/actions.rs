@@ -148,7 +148,10 @@ gpui_kit::actions!(
         MoveRowUp,
         MoveRowDown,
         NextControl,
-        PreviousControl
+        PreviousControl,
+        ReindexAlias,
+        NextStep,
+        StepBack
     ]
 );
 
@@ -224,6 +227,10 @@ const RESOURCES_INPUT: &str = "Resources > Input";
 pub const ALIAS_DIALOG: &str = "AliasDialog";
 /// An input in that dialog, which has its own ⌘↩.
 const ALIAS_INPUT: &str = "AliasDialog > Input";
+/// Key context of a reindex tab.
+pub const REINDEX: &str = "Reindex";
+/// An input in that tab, which has its own ⌘↩.
+const REINDEX_INPUT: &str = "Reindex > Input";
 /// Key context of the items of a set, where New and Delete mean an item.
 pub const SET_ITEMS: &str = "SetItems";
 /// Key context of the item dialog.
@@ -667,6 +674,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     SaveFailedLines,
     ImportDocuments,
     ExportDocuments,
+    ReindexAlias,
 ];
 
 /// Actions the palette never lists: steps that mean nothing outside their control, and
@@ -699,6 +707,8 @@ pub const PALETTE_HIDDEN: &[&str] = &[
     "tessera::PasteImport",
     "tessera::StartTransfer",
     "tessera::InferFromFile",
+    "tessera::NextStep",
+    "tessera::StepBack",
     "tessera::MoveRowUp",
     "tessera::MoveRowDown",
     "tessera::NextControl",
@@ -882,6 +892,19 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_RESOURCES[3], OpenStopwords, None),
         KeyBinding::new(OPEN_RESOURCES[4], OpenPresetsTab, None),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(RESOURCES)),
+        KeyBinding::new(REVERT, ReindexAlias, Some(RESOURCES)),
+        KeyBinding::new(LOCK_AGAIN, LockAgain, Some(REINDEX)),
+        KeyBinding::new(SAVE, NextStep, Some(REINDEX)),
+        KeyBinding::new(SAVE, NextStep, Some(REINDEX_INPUT)),
+        KeyBinding::new(REVERT, StepBack, Some(REINDEX)),
+        KeyBinding::new(EDIT, EditResource, Some(REINDEX)),
+        KeyBinding::new(DELETE, DeleteResource, Some(REINDEX)),
+        KeyBinding::new(REFRESH, ReloadResource, Some(REINDEX)),
+        KeyBinding::new(CANCEL_JOB, CancelJob, Some(REINDEX)),
+        KeyBinding::new(STOP_WAITING, StopWaiting, Some(REINDEX)),
+        KeyBinding::new(SAVE_QUERY, SaveReport, Some(REINDEX)),
+        KeyBinding::new(OPEN_SAVED, PickImportFile, Some(REINDEX)),
+        KeyBinding::new(REMOVE_FILE, RemoveBodyFile, Some(REINDEX)),
         KeyBinding::new(NEW_COLLECTION, NewResource, Some(RESOURCES)),
         KeyBinding::new(EDIT, EditResource, Some(RESOURCES)),
         KeyBinding::new(DELETE, DeleteResource, Some(RESOURCES)),

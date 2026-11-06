@@ -2,6 +2,8 @@
 
 //! Truncate and delete a collection, each behind a type-the-name dialog (spec §7.8).
 
+use std::rc::Rc;
+
 use gpui_kit::{App, Entity, SharedString, Task, Window};
 use rust_i18n::t;
 use tessera_client::{Alias, Client, Error};
@@ -11,6 +13,9 @@ use super::overview::grouped;
 use crate::collections::{CollectionsBackendGlobal, aliases_of};
 use crate::connection::{ConnectionState, error_text, long_error_text};
 use crate::state::AppState;
+
+/// What a caller runs after the delete.
+type After = dyn Fn(&mut App);
 
 /// Which of the two actions.
 #[derive(Clone, Copy, PartialEq)]
@@ -29,12 +34,14 @@ pub fn truncate(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let after: Rc<After> = Rc::new(|_| {});
     prepare(
         Kind::Truncate,
         state,
         connection,
         name,
         documents,
+        after,
         window,
         cx,
     );
@@ -50,15 +57,50 @@ pub fn delete(
     window: &mut Window,
     cx: &mut App,
 ) {
-    prepare(Kind::Delete, state, connection, name, documents, window, cx);
+    let after: Rc<After> = Rc::new(|_| {});
+    prepare(
+        Kind::Delete,
+        state,
+        connection,
+        name,
+        documents,
+        after,
+        window,
+        cx,
+    );
 }
 
+/// [`delete`], then `after` once the collection is gone.
+pub fn delete_then(
+    state: Entity<AppState>,
+    connection: Entity<ConnectionState>,
+    name: String,
+    documents: u64,
+    after: impl Fn(&mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let after: Rc<After> = Rc::new(after);
+    prepare(
+        Kind::Delete,
+        state,
+        connection,
+        name,
+        documents,
+        after,
+        window,
+        cx,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn prepare(
     kind: Kind,
     state: Entity<AppState>,
     connection: Entity<ConnectionState>,
     name: String,
     documents: u64,
+    after: Rc<After>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -72,7 +114,7 @@ fn prepare(
             let Some(client) = client(&connection, cx) else {
                 let detail = t!("status.not_connected").to_string();
                 let lines = lines(kind, &name, documents, Ok(&[]), Some(detail));
-                return open(kind, state, connection, name, lines, window, cx);
+                return open(kind, state, connection, name, lines, after, window, cx);
             };
             let list = cx.global::<CollectionsBackendGlobal>().0.list(client);
             connection.update(cx, |c, _| c.danger_loading = true);
@@ -104,7 +146,7 @@ fn prepare(
                                 lines(kind, &name, documents, aliases, Some(detail))
                             }
                         };
-                        open(kind, state, connection, name, lines, window, cx);
+                        open(kind, state, connection, name, lines, after, window, cx);
                     })
                     .ok();
                 })
@@ -169,12 +211,14 @@ fn client(connection: &Entity<ConnectionState>, cx: &App) -> Option<Client> {
         .map(|c| c.client.clone())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open(
     kind: Kind,
     state: Entity<AppState>,
     connection: Entity<ConnectionState>,
     name: String,
     consequences: Vec<SharedString>,
+    after: Rc<After>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -197,6 +241,7 @@ fn open(
         options,
         move |_, cx| {
             let (state, connection, name) = (state.clone(), connection.clone(), name.clone());
+            let after = after.clone();
             let Some(client) = client(&connection, cx) else {
                 let text = t!("status.not_connected").to_string();
                 return Task::ready(Err(text.into()));
@@ -239,6 +284,7 @@ fn open(
                         let text = t!("danger.delete.favorite_error", name = name, detail = detail);
                         return Err(text.to_string().into());
                     }
+                    cx.update(|cx| after(cx));
                 }
                 Ok(())
             })

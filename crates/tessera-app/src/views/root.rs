@@ -16,8 +16,8 @@ use rust_i18n::t;
 
 use super::connect_dialog::ConnectDialog;
 use super::dock::{
-    CollectionPanel, CollectionsPanel, ConsolePanel, OverviewPanel, ResourcePanel, SearchPanel,
-    SidebarPanel, WelcomePanel,
+    CollectionPanel, CollectionsPanel, ConsolePanel, OverviewPanel, ReindexPanel, ResourcePanel,
+    SearchPanel, SidebarPanel, WelcomePanel,
 };
 use super::jobs::panel::JobsPanel;
 use super::palette::{self, PaletteMode};
@@ -32,7 +32,7 @@ use crate::connection::ConnectionState;
 use crate::jobs::{JobFinished, JobId, JobKind, Jobs, JobsGlobal, RunningChanged};
 use crate::state::{
     AppState, CloseCollection, OpenCollection, OpenCollections, OpenConsole, OpenOverview,
-    OpenResource, OpenSearch, ResourceKind,
+    OpenReindex, OpenResource, OpenSearch, ResourceKind,
 };
 
 /// Width of the left sidebar.
@@ -169,6 +169,13 @@ impl RootView {
             cx.subscribe_in(
                 &state,
                 window,
+                |this, _, event: &OpenReindex, window, cx| {
+                    this.open_tab(event.0, Kind::Reindex(event.1.clone()), window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &state,
+                window,
                 |this, _, event: &CloseCollection, window, cx| {
                     this.close_collection_tab(event.0, &event.1, window, cx);
                 },
@@ -269,6 +276,17 @@ impl RootView {
         let root = Root::read(window, cx).view().clone().downcast::<Self>();
         if let Ok(root) = root {
             root.update(cx, |root, cx| root.show_jobs(window, cx));
+        }
+    }
+
+    /// Shows job `id` in the jobs tab of the window's root view.
+    pub fn reveal_job(id: JobId, window: &mut Window, cx: &mut App) {
+        let root = Root::read(window, cx).view().clone().downcast::<Self>();
+        if let Ok(root) = root {
+            root.update(cx, |root, cx| {
+                root.jobs.update(cx, |jobs, cx| jobs.show_job(id, cx));
+                root.show_jobs(window, cx);
+            });
         }
     }
 
@@ -429,6 +447,11 @@ impl RootView {
                                 cx.new(|cx| ResourcePanel::new(conn, state, kind, window, cx));
                             (PanelId::from(panel.entity_id()), panel_handle(panel))
                         }
+                        Kind::Reindex(alias) => {
+                            let panel =
+                                cx.new(|cx| ReindexPanel::new(conn, state, alias, window, cx));
+                            (PanelId::from(panel.entity_id()), panel_handle(panel))
+                        }
                     };
                     (id, Some(handle))
                 }
@@ -451,6 +474,7 @@ impl RootView {
             Some(ConnectionTab::Search(tab)) => tab.focus_handle(cx).focus(window, cx),
             Some(ConnectionTab::Console(tab)) => tab.focus_handle(cx).focus(window, cx),
             Some(ConnectionTab::Resource(tab)) => tab.focus_handle(cx).focus(window, cx),
+            Some(ConnectionTab::Reindex(tab)) => tab.focus_handle(cx).focus(window, cx),
             _ => {}
         }
     }
@@ -500,6 +524,7 @@ impl RootView {
                     ConnectionTab::Search(panel) => area.remove_panel(panel, window, cx),
                     ConnectionTab::Console(panel) => area.remove_panel(panel, window, cx),
                     ConnectionTab::Resource(panel) => area.remove_panel(panel, window, cx),
+                    ConnectionTab::Reindex(panel) => area.remove_panel(panel, window, cx),
                 }
             }
         });
@@ -550,6 +575,8 @@ enum Kind {
     Search,
     Console,
     Resource(ResourceKind),
+    /// The reindex of the named alias.
+    Reindex(String),
 }
 
 /// A tab of one connection.
@@ -560,6 +587,7 @@ enum ConnectionTab {
     Search(Entity<SearchPanel>),
     Console(Entity<ConsolePanel>),
     Resource(Entity<ResourcePanel>),
+    Reindex(Entity<ReindexPanel>),
 }
 
 impl ConnectionTab {
@@ -571,6 +599,7 @@ impl ConnectionTab {
             Self::Search(_) => Kind::Search,
             Self::Console(_) => Kind::Console,
             Self::Resource(panel) => Kind::Resource(panel.read(cx).kind()),
+            Self::Reindex(panel) => Kind::Reindex(panel.read(cx).alias().to_owned()),
         }
     }
 
@@ -582,6 +611,7 @@ impl ConnectionTab {
             Self::Search(panel) => panel.entity_id(),
             Self::Console(panel) => panel.entity_id(),
             Self::Resource(panel) => panel.entity_id(),
+            Self::Reindex(panel) => panel.entity_id(),
         })
     }
 
@@ -593,6 +623,7 @@ impl ConnectionTab {
             Self::Search(panel) => panel.read(cx).connection().clone(),
             Self::Console(panel) => panel.read(cx).connection().clone(),
             Self::Resource(panel) => panel.read(cx).connection().clone(),
+            Self::Reindex(panel) => panel.read(cx).connection().clone(),
         }
     }
 }
@@ -618,10 +649,13 @@ fn connection_tab(area: &DockArea, id: PanelId) -> Option<ConnectionTab> {
     };
     match view.downcast::<ConsolePanel>() {
         Ok(panel) => Some(ConnectionTab::Console(panel)),
-        Err(view) => view
-            .downcast::<ResourcePanel>()
-            .ok()
-            .map(ConnectionTab::Resource),
+        Err(view) => match view.downcast::<ResourcePanel>() {
+            Ok(panel) => Some(ConnectionTab::Resource(panel)),
+            Err(view) => view
+                .downcast::<ReindexPanel>()
+                .ok()
+                .map(ConnectionTab::Reindex),
+        },
     }
 }
 

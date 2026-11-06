@@ -449,6 +449,12 @@ impl JobsPanel {
             .or(jobs.last())
     }
 
+    /// Shows job `id` and its report.
+    pub fn show_job(&mut self, id: JobId, cx: &mut Context<Self>) {
+        self.picked = Some(id);
+        self.refresh(cx);
+    }
+
     fn pick(&mut self, ix: usize, cx: &mut Context<Self>) {
         let picked = self.jobs.read(cx).jobs().get(ix).map(|job| job.id);
         // The table also reports the selection `refresh` made.

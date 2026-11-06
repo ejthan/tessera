@@ -2,12 +2,13 @@
 
 //! Server connections and how the app reaches the network.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{App, Context, EventEmitter, Global, SharedString, Task, Window};
+use gpui_kit::{App, Context, Entity, EventEmitter, Global, SharedString, Task, Window};
 use rust_i18n::t;
 use secrecy::SecretString;
 use tessera_client::{
@@ -22,6 +23,7 @@ use url::Url;
 use crate::collections::{CollectionsBackendGlobal, CollectionsCache};
 use crate::poller::{CollectionsFetcherGlobal, DEFAULT_INTERVAL, HISTORY_WINDOW, NodeStatus};
 use crate::runtime::AbortOnDrop;
+use crate::views::resources::reindex::ReindexState;
 use crate::views::unlock;
 
 /// What Tessera learned about a server while connecting.
@@ -178,6 +180,8 @@ pub struct ConnectionState {
     pub danger_loading: bool,
     collections_task: Option<Task<()>>,
     cache_task: Option<Task<()>>,
+    /// The running reindexes by alias: closing their tab loses nothing, a disconnect drops them.
+    pub reindex: HashMap<String, Entity<ReindexState>>,
 }
 
 /// The schema of the named collection changed on the server; views showing it reload.
@@ -213,6 +217,7 @@ impl ConnectionState {
             collection_cache: CollectionsCache::default(),
             danger_loading: false,
             cache_task: None,
+            reindex: HashMap::new(),
             profile,
         }
     }

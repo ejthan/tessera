@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use gpui_kit::Global;
 use serde_json::Value;
+use tempfile::TempDir;
 use tessera_client::{Alias, Client, Error, ItemSet, SetKind, StopwordSet};
 use tessera_core::relevance::attachment::{
     NoKnownSets, attached, attachment_patch, with_set, without_set,
@@ -143,6 +144,9 @@ pub trait RelevanceBackend: Send + Sync {
 
     /// Deletes preset `name`.
     fn delete_preset(&self, client: Client, name: String) -> BoxFuture<Result<(), Error>>;
+
+    /// A private temp directory for the copy of a reindex.
+    fn copy_dir(&self) -> BoxFuture<Result<Arc<TempDir>, String>>;
 }
 
 /// The backend the views use.
@@ -298,6 +302,27 @@ impl RelevanceBackend for TokioBackend {
     fn delete_preset(&self, client: Client, name: String) -> BoxFuture<Result<(), Error>> {
         self.run(async move { client.delete_preset(&name).await })
     }
+
+    fn copy_dir(&self) -> BoxFuture<Result<Arc<TempDir>, String>> {
+        self.run(async {
+            let made = tokio::task::spawn_blocking(|| {
+                let mut builder = tempfile::Builder::new();
+                builder.prefix("tessera-reindex-");
+                // A temp directory takes the default mode, and this one holds every document.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    builder.permissions(std::fs::Permissions::from_mode(0o700));
+                }
+                builder.tempdir()
+            });
+            match made.await {
+                Ok(Ok(dir)) => Ok(Arc::new(dir)),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(e) => Err(e.to_string()),
+            }
+        })
+    }
 }
 
 /// The real backend, on the tokio runtime.
@@ -413,6 +438,22 @@ mod tests {
         ));
         let requests = server.received_requests().await.unwrap();
         assert!(requests.iter().all(|r| r.method.as_str() == "GET"));
+    }
+
+    #[tokio::test]
+    async fn copy_dir_is_private_and_goes_with_its_last_handle() {
+        let dir = tokio_backend(Handle::current()).copy_dir().await.unwrap();
+        let path = dir.path().to_path_buf();
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("tessera-reindex-"), "{name}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        drop(dir);
+        assert!(!path.exists());
     }
 
     #[tokio::test]
