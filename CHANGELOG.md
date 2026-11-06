@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- An AI search keeps no response body in the request log, since a provider's error can echo a key, and the test panel still shows the error in full. Esc no longer closes the stemming import form while an import runs, so a failure stays visible. An unreadable chat answer shows both errors. The AI form says that a namespace change leaves the old URL on the server.
 - Ops tab: the Ops row in the sidebar (⌥⌘0 / Ctrl+Alt+0) runs snapshot (⌘1 / Ctrl+1), compact (⌘2 / Ctrl+2), clear cache (⌘3 / Ctrl+3), leader vote (⌘4 / Ctrl+4) and one runtime config key (⌘S / Ctrl+S) on the node picked there, each under its row with the node and the time. Snapshot and vote are typed on prod, a read-only connection unlocks first, a bad path or value says why and sends nothing, and the running schema changes refresh every 2 seconds while the tab shows.
 - Operations in `tessera-core`: the snapshot path check, the closed list of seven runtime config keys with their value check, and the confirmation each operation needs. `POST /config` from the console now asks first, and asks for the typed word on prod, because it reaches `skip-writes`.
 - Server operations in the client: snapshot, leader vote, database compaction, cache clear and runtime config on one chosen node, never failing over. A body that says `success: false` is an error with its text, except on a vote, where it is the answer. Every design assumption about these calls was measured on 30.0 and 30.2.

@@ -114,7 +114,9 @@ impl Client {
                 "the query is too long",
             )));
         };
+        // An error body can echo a provider key, and the log masks by key name only.
         match self
+            .without_response_bodies()
             .call(
                 Some(self.active_node()),
                 Method::GET,

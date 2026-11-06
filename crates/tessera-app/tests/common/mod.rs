@@ -1715,6 +1715,8 @@ pub struct FakeAdmin {
     pub dictionaries: Mutex<Vec<tessera_client::StemmingDictionary>>,
     /// `dictionaries` fails with this status and Typesense message.
     pub fail_dictionaries: Mutex<Option<(u16, String)>>,
+    /// `import_dictionary` waits for this before it answers.
+    pub import_hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// `import_dictionary` fails with this.
     pub fail_import: Mutex<Option<Error>>,
     /// What `read_dictionary_file` answers.
@@ -2028,8 +2030,14 @@ impl AdminBackend for FakeAdminBackend {
             .lock()
             .unwrap()
             .push(format!("import {id} {}", words.len()));
+        let hold = self.0.import_hold.lock().unwrap().take();
         if let Some(e) = self.0.fail_import.lock().unwrap().take() {
-            return Box::pin(async move { Err(e) });
+            return Box::pin(async move {
+                if let Some(hold) = hold {
+                    hold.await.ok();
+                }
+                Err(e)
+            });
         }
         let mut all = self.0.dictionaries.lock().unwrap();
         if !all.iter().any(|d| d.id == id) {
