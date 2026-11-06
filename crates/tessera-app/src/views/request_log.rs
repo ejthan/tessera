@@ -319,9 +319,16 @@ impl RequestLogPanel {
         }
     }
 
-    /// Whether an entry is selected, so Copy as curl has something to copy.
-    pub fn has_selection(&self) -> bool {
-        self.selected.is_some()
+    /// Whether the selected entry can be copied as curl: an import batch cannot, its body is
+    /// not kept.
+    pub fn has_selection(&self, cx: &App) -> bool {
+        self.selected.is_some_and(|id| {
+            let state = self.state.read(cx);
+            state
+                .log()
+                .get(id)
+                .is_some_and(|entry| !request_detail::is_import_batch(&entry.event))
+        })
     }
 
     /// The first cut body of the selected entry whose whole text is still kept.

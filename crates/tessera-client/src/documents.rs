@@ -93,9 +93,10 @@ pub struct ImportLine {
     pub success: bool,
     /// The HTTP-like code of a failure.
     pub code: Option<u16>,
-    /// Why it failed; for an answer line that is no JSON object, that line.
+    /// Why it failed; for an answer line that is no `{success,…}` object, that line.
     pub error: Option<String>,
-    /// The document's id.
+    /// The document's id, when the answer has a string one. Not to be trusted on a line the
+    /// server could not read as JSON: it echoes the id of the document before.
     pub id: Option<String>,
 }
 
@@ -401,7 +402,7 @@ impl Client {
             success: bool,
             code: Option<u16>,
             error: Option<String>,
-            id: Option<String>,
+            id: Option<Value>,
         }
         let path = collection_path(collection, "/documents/import")?;
         let batch_size = params.batch_size.to_string();
@@ -433,7 +434,10 @@ impl Client {
                     success: raw.success,
                     code: raw.code,
                     error: raw.error,
-                    id: raw.id,
+                    id: raw.id.and_then(|id| match id {
+                        Value::String(id) => Some(id),
+                        _ => None,
+                    }),
                 },
                 Err(_) => ImportLine {
                     success: false,

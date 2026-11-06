@@ -21,8 +21,19 @@ pub struct PreviewRow {
     pub text: String,
     /// What the schema says about it. Empty without a schema.
     pub issues: Vec<DocIssue>,
-    /// Why the row cannot be sent as it is: invalid JSON, not UTF-8, too large.
-    pub error: Option<String>,
+    /// Why the row cannot be sent as it is.
+    pub error: Option<PreviewError>,
+}
+
+/// Why a previewed row cannot be sent. The UI words it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewError {
+    /// The row is no JSON; holds serde's message.
+    Json(String),
+    /// The row is not UTF-8.
+    InvalidUtf8,
+    /// The row is longer than a document may be; holds its size in bytes.
+    TooLarge(u64),
 }
 
 /// The start of a source.
@@ -74,7 +85,7 @@ pub fn preview(
                     line: record.line,
                     text: cell_preview(&Value::String(text)).to_string(),
                     issues: Vec::new(),
-                    error: Some(e.to_string()),
+                    error: Some(PreviewError::Json(e.to_string())),
                 },
             },
             Err(rejected) => PreviewRow {
@@ -82,10 +93,8 @@ pub fn preview(
                 text: cell_preview(&Value::String(rejected.raw)).to_string(),
                 issues: Vec::new(),
                 error: Some(match rejected.reason {
-                    RejectReason::InvalidUtf8 => "not valid UTF-8".to_string(),
-                    RejectReason::TooLarge(bytes) => {
-                        format!("{} MiB is more than a document may hold", bytes >> 20)
-                    }
+                    RejectReason::InvalidUtf8 => PreviewError::InvalidUtf8,
+                    RejectReason::TooLarge(bytes) => PreviewError::TooLarge(bytes),
                 }),
             },
         };
@@ -186,7 +195,9 @@ mod tests {
     fn preview_row_with_bad_json_carries_the_message() {
         let p = jsonl("{\"a\":1}\n{\"a\":", None);
         assert_eq!(p.rows[0].error, None);
-        let error = p.rows[1].error.as_deref().unwrap();
+        let Some(PreviewError::Json(error)) = &p.rows[1].error else {
+            panic!("{:?}", p.rows[1].error);
+        };
         assert!(error.contains("EOF"), "{error}");
         assert_eq!(p.rows[1].text, "{\"a\":");
     }
@@ -195,7 +206,7 @@ mod tests {
     fn preview_of_rejected_row_says_why() {
         let source = Source::Bytes(Arc::from(&b"{\"a\":\"\xff\"}\n{\"a\":1}"[..]));
         let p = preview(&source, &ReadOptions::new(Format::Jsonl), None).unwrap();
-        assert_eq!(p.rows[0].error.as_deref(), Some("not valid UTF-8"));
+        assert_eq!(p.rows[0].error, Some(PreviewError::InvalidUtf8));
         assert_eq!(p.rows[1].error, None);
     }
 

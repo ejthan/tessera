@@ -534,7 +534,7 @@ impl Render for RootView {
                 ConnectDialog::open_new(this.state.clone(), None, window, cx);
             }))
             // A hidden log has no visible selection to copy.
-            .when(log_open && self.log.read(cx).has_selection(), |el| {
+            .when(log_open && self.log.read(cx).has_selection(cx), |el| {
                 el.on_action(cx.listener(|this, _: &CopyAsCurl, _, cx| {
                     this.log.update(cx, |log, cx| log.copy_as_curl(cx));
                 }))

@@ -2,11 +2,13 @@
 
 //! Streaming `documents/export`.
 
+use std::future::Future as _;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use tokio_util::io::StreamReader;
 
@@ -94,26 +96,69 @@ impl std::fmt::Debug for ExportStream {
     }
 }
 
+/// Fails a read that makes no progress for `stall`; the clock restarts with every read that
+/// does, so a long line that keeps arriving is never cut.
+struct Stall<R> {
+    inner: R,
+    stall: Duration,
+    sleep: Pin<Box<tokio::time::Sleep>>,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for Stall<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = &mut *self;
+        match Pin::new(&mut this.inner).poll_read(cx, buf) {
+            Poll::Ready(result) => {
+                this.sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + this.stall);
+                Poll::Ready(result)
+            }
+            Poll::Pending => match this.sleep.as_mut().poll(cx) {
+                Poll::Ready(()) => {
+                    Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::TimedOut)))
+                }
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+}
+
 impl ExportStream {
-    fn new(reader: Pin<Box<dyn AsyncRead + Send>>, max_line: usize, log: StreamLog) -> Self {
+    fn new(
+        reader: Pin<Box<dyn AsyncRead + Send>>,
+        max_line: usize,
+        stall: Duration,
+        log: StreamLog,
+    ) -> Self {
+        let reader = Stall {
+            inner: reader,
+            stall,
+            sleep: Box::pin(tokio::time::sleep(stall)),
+        };
         Self {
-            lines: FramedRead::new(reader, LinesCodec::new_with_max_length(max_line)),
+            lines: FramedRead::new(
+                Box::pin(reader) as Pin<Box<dyn AsyncRead + Send>>,
+                LinesCodec::new_with_max_length(max_line),
+            ),
             log,
         }
     }
 
-    /// The next document line, or `None` at the end. A silence of [`STREAM_STALL`] is
-    /// [`Error::Timeout`].
+    /// The next document line, or `None` at the end. A gap of [`STREAM_STALL`] between two
+    /// reads of the answer is [`Error::Timeout`]; how long a line takes does not matter.
     pub async fn next_line(&mut self) -> Result<Option<String>, Error> {
-        let next = tokio::time::timeout(STREAM_STALL, self.lines.next()).await;
-        let result = match next {
-            Err(_) => Err(Error::Timeout),
-            Ok(None) => Ok(None),
-            Ok(Some(Ok(line))) => {
+        let result = match self.lines.next().await {
+            None => Ok(None),
+            Some(Ok(line)) => {
                 self.log.bytes += line.len() as u64 + 1;
                 Ok(Some(line))
             }
-            Ok(Some(Err(e))) => Err(line_error(e, self.lines.decoder().max_length())),
+            Some(Err(e)) => Err(line_error(e, self.lines.decoder().max_length())),
         };
         match &result {
             Ok(None) => self.log.end(None),
@@ -127,6 +172,7 @@ impl ExportStream {
 fn line_error(e: LinesCodecError, limit: usize) -> Error {
     match e {
         LinesCodecError::MaxLineLengthExceeded => Error::LineTooLong { limit },
+        LinesCodecError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut => Error::Timeout,
         LinesCodecError::Io(e) => Error::Stream(e.to_string()),
     }
 }
@@ -155,7 +201,10 @@ impl Client {
             .await?;
         let status = response.status().as_u16();
         if !response.status().is_success() {
-            let text = response.text().await.map_err(Error::from_reqwest);
+            let text = match tokio::time::timeout(STREAM_STALL, response.text()).await {
+                Ok(text) => text.map_err(Error::from_reqwest),
+                Err(_) => Err(Error::Timeout),
+            };
             return match text {
                 Ok(text) => {
                     log.bytes = text.len() as u64;
@@ -176,6 +225,7 @@ impl Client {
         Ok(ExportStream::new(
             Box::pin(StreamReader::new(bytes)),
             MAX_LINE,
+            STREAM_STALL,
             log,
         ))
     }
@@ -207,8 +257,39 @@ mod tests {
         ExportStream::new(
             Box::pin(std::io::Cursor::new(data)),
             max,
+            STREAM_STALL,
             StreamLog::new(None, event),
         )
+    }
+
+    #[tokio::test]
+    async fn a_silent_reader_times_out_and_a_slow_one_does_not() {
+        let event = stream(b"", 1).log.event.clone();
+        // Nothing ever arrives.
+        let (silent, _keep) = tokio::io::duplex(8);
+        let mut s = ExportStream::new(
+            Box::pin(silent),
+            1024,
+            Duration::from_millis(50),
+            StreamLog::new(None, event.clone()),
+        );
+        assert!(matches!(s.next_line().await, Err(Error::Timeout)));
+        // A line in pieces, each within the stall time, longer than it altogether.
+        let (reader, mut writer) = tokio::io::duplex(8);
+        let mut s = ExportStream::new(
+            Box::pin(reader),
+            1024,
+            Duration::from_millis(150),
+            StreamLog::new(None, event),
+        );
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            for piece in ["ab", "cd", "ef", "gh\n"] {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                writer.write_all(piece.as_bytes()).await.unwrap();
+            }
+        });
+        assert_eq!(s.next_line().await.unwrap().as_deref(), Some("abcdefgh"));
     }
 
     #[tokio::test]

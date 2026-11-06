@@ -85,7 +85,7 @@ pub fn convert(cell: &str, ty: Option<&str>) -> Option<Value> {
             "false" => Value::Bool(false),
             _ => text(),
         },
-        Some(ty) if ty.ends_with("[]") || matches!(ty, "object" | "geopoint") => {
+        Some(ty) if ty.ends_with("[]") || matches!(ty, "object" | "geopoint" | "geopolygon") => {
             serde_json::from_str(cell).unwrap_or_else(|_| text())
         }
         Some(_) => guess(cell),
@@ -156,6 +156,11 @@ mod tests {
             (r#"{"a":1}"#, Some("object"), Some(json!({"a": 1}))),
             ("[48.1,11.5]", Some("geopoint"), Some(json!([48.1, 11.5]))),
             ("[[1,2]]", Some("geopoint[]"), Some(json!([[1, 2]]))),
+            (
+                "[[1,2],[3,4]]",
+                Some("geopolygon"),
+                Some(json!([[1, 2], [3, 4]])),
+            ),
             ("12", Some("auto"), Some(json!(12))),
             ("12", None, Some(json!(12))),
         ];

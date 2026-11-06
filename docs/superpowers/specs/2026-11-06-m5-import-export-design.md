@@ -193,7 +193,8 @@ pub fn infer_schema(source: &Source, options: &ReadOptions) -> Result<InferredSc
 pub fn collection_name_from(path: &Path) -> String;
 impl InferredSchema { pub fn to_draft(&self, name: &str) -> SchemaDraft; }
 
-pub struct PreviewRow { pub line: u64, pub text: String, pub issues: Vec<DocIssue>, pub error: Option<String> }
+pub struct PreviewRow { pub line: u64, pub text: String, pub issues: Vec<DocIssue>, pub error: Option<PreviewError> }
+pub enum PreviewError { Json(String), InvalidUtf8, TooLarge(u64) } // core words nothing: the app translates, rule 7
 pub struct Preview { pub rows: Vec<PreviewRow>, pub complete: bool, pub estimated_docs: u64, pub total_bytes: Option<u64> }
 pub fn preview(source: &Source, options: &ReadOptions, schema: Option<&Collection>) -> Result<Preview, ReadError>;
 ```

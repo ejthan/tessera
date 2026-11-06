@@ -5,7 +5,7 @@
 //! Blocking: callers run [`read_documents`] in `spawn_blocking`. A document is never parsed
 //! for JSONL, so the server sees the line as it was written.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Cursor, Read};
 use std::ops::ControlFlow;
@@ -86,8 +86,7 @@ pub struct Record {
     /// 1-based line for JSONL and CSV (where the record starts), element number for a JSON
     /// array. Blank JSONL lines count.
     pub line: u64,
-    /// Bytes read up to the end of this record. Exact for JSONL and CSV, within the size of
-    /// a buffer for a JSON array.
+    /// Bytes of the source up to the end of this record (of the element, for a JSON array).
     pub offset: u64,
     /// The document as one line of JSON text, or why it cannot be sent.
     pub doc: Result<String, Rejected>,
@@ -135,12 +134,18 @@ pub enum ReadError {
         /// What is wrong.
         message: String,
     },
-    /// A record is longer than `MAX_DOC_BYTES`, in a format that cannot skip it, such as a
-    /// CSV with an unclosed quote.
+    /// A CSV record is longer than `MAX_DOC_BYTES`, which a CSV cannot skip: an unclosed
+    /// quote makes the rest of the file one record.
     #[error("the record at line {line} is larger than {} MiB", MAX_DOC_BYTES >> 20)]
     RecordTooLarge {
         /// Where the record starts.
         line: u64,
+    },
+    /// An element of a JSON array is longer than `MAX_DOC_BYTES`.
+    #[error("element {element} is larger than {} MiB", MAX_DOC_BYTES >> 20)]
+    ElementTooLarge {
+        /// 1-based element number.
+        element: u64,
     },
 }
 
@@ -171,6 +176,52 @@ pub fn sniff(path: Option<&Path>, head: &[u8]) -> (Format, CsvOptions) {
 
 const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
+/// The bytes the CSV reader has been given and not yet finished with, to number lines:
+/// `csv` reports the line before it skips blank lines, and half a CRLF behind.
+#[derive(Default)]
+struct LineTail {
+    bytes: Vec<u8>,
+    /// Index in `bytes` of the first byte not yet accounted for.
+    head: usize,
+    /// Source offset of `bytes[head]`.
+    offset: u64,
+    /// Line (1-based) of `bytes[head]`.
+    line: u64,
+}
+
+impl LineTail {
+    fn new() -> Self {
+        Self {
+            line: 1,
+            ..Self::default()
+        }
+    }
+
+    /// The line of the first byte after the line breaks at the head: where the next record
+    /// starts.
+    fn start_line(&self) -> u64 {
+        let breaks = self.bytes[self.head..]
+            .iter()
+            .take_while(|b| matches!(**b, b'\r' | b'\n'))
+            .filter(|b| **b == b'\n')
+            .count();
+        self.line + breaks as u64
+    }
+
+    /// Accounts for the bytes up to source offset `end`.
+    fn advance_to(&mut self, end: u64) {
+        let n = (end.saturating_sub(self.offset) as usize).min(self.bytes.len() - self.head);
+        let passed = &self.bytes[self.head..self.head + n];
+        self.line += passed.iter().filter(|b| **b == b'\n').count() as u64;
+        self.head += n;
+        self.offset += n as u64;
+        if self.head > 64 * 1024 && self.head * 2 > self.bytes.len() {
+            self.bytes.drain(..self.head);
+            self.head = 0;
+        }
+    }
+}
+
 /// Counts the bytes that pass, and refuses to go on once a record is longer than
 /// `MAX_DOC_BYTES`: an unclosed CSV quote would otherwise swallow the whole file.
 struct RecordLimit<R> {
@@ -178,6 +229,7 @@ struct RecordLimit<R> {
     since_reset: Rc<Cell<u64>>,
     total: Rc<Cell<u64>>,
     tripped: Rc<Cell<bool>>,
+    tail: Option<Rc<RefCell<LineTail>>>,
 }
 
 /// The handles on a [`RecordLimit`] that the reader keeps.
@@ -186,20 +238,24 @@ struct Counters {
     since_reset: Rc<Cell<u64>>,
     total: Rc<Cell<u64>>,
     tripped: Rc<Cell<bool>>,
+    /// Only kept for CSV.
+    tail: Option<Rc<RefCell<LineTail>>>,
 }
 
 impl Counters {
-    fn wrap<R>(inner: R) -> (RecordLimit<R>, Self) {
+    fn wrap<R>(inner: R, number_lines: bool) -> (RecordLimit<R>, Self) {
         let counters = Self {
             since_reset: Rc::default(),
             total: Rc::default(),
             tripped: Rc::default(),
+            tail: number_lines.then(|| Rc::new(RefCell::new(LineTail::new()))),
         };
         let limit = RecordLimit {
             inner,
             since_reset: counters.since_reset.clone(),
             total: counters.total.clone(),
             tripped: counters.tripped.clone(),
+            tail: counters.tail.clone(),
         };
         (limit, counters)
     }
@@ -213,6 +269,9 @@ impl Counters {
 impl<R: Read> Read for RecordLimit<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
+        if let Some(tail) = &self.tail {
+            tail.borrow_mut().bytes.extend_from_slice(&buf[..n]);
+        }
         self.total.set(self.total.get() + n as u64);
         let size = self.since_reset.get() + n as u64;
         self.since_reset.set(size);
@@ -252,7 +311,7 @@ fn read_from(
         Format::Jsonl => read_jsonl(BufReader::with_capacity(64 * 1024, reader), sink),
         Format::JsonArray => read_json_array(BufReader::with_capacity(64 * 1024, reader), sink),
         Format::Csv => {
-            let (limited, counters) = Counters::wrap(reader);
+            let (limited, counters) = Counters::wrap(reader, true);
             read_csv(limited, &counters, options, sink)
         }
     }
@@ -377,7 +436,7 @@ fn read_json_array(
         reader.consume(BOM.len());
     }
     // Above the buffer, so `total` is what serde has consumed, not what was read ahead.
-    let (reader, counters) = Counters::wrap(reader);
+    let (reader, counters) = Counters::wrap(reader, false);
     let counters = &counters;
     counters.total.set(if bom { BOM.len() as u64 } else { 0 });
     let (stopped, delivered) = (Cell::new(false), Cell::new(0));
@@ -392,8 +451,8 @@ fn read_json_array(
     match result {
         Ok(()) => Ok(()),
         Err(_) if stopped.get() => Ok(()),
-        Err(_) if counters.tripped.get() => Err(ReadError::RecordTooLarge {
-            line: delivered.get() + 1,
+        Err(_) if counters.tripped.get() => Err(ReadError::ElementTooLarge {
+            element: delivered.get() + 1,
         }),
         Err(e) if e.is_io() => Err(ReadError::Io(e.to_string())),
         Err(e) => Err(ReadError::Json {
@@ -415,8 +474,9 @@ fn read_csv(
         .has_headers(options.csv.header)
         .flexible(true)
         .from_reader(reader);
-    let csv_err = |e: csv::Error, counters: &Counters, start: u64| {
-        let line = e.position().map_or(start, csv::Position::line);
+    let tail = counters.tail.clone().expect("CSV numbers its lines");
+    let csv_err = |e: csv::Error, counters: &Counters| {
+        let line = tail.borrow().start_line();
         match e.kind() {
             _ if counters.tripped.get() => ReadError::RecordTooLarge { line },
             csv::ErrorKind::Io(io) => ReadError::Io(io.to_string()),
@@ -428,7 +488,7 @@ fn read_csv(
     };
     let mut names: Vec<String> = Vec::new();
     if options.csv.header {
-        let header = csv.byte_headers().map_err(|e| csv_err(e, counters, 1))?;
+        let header = csv.byte_headers().map_err(|e| csv_err(e, counters))?;
         for cell in header.iter() {
             let name = std::str::from_utf8(cell).map_err(|_| ReadError::Csv {
                 line: 1,
@@ -449,6 +509,7 @@ fn read_csv(
             .map(|(name, _)| name.clone())
             .collect();
     }
+    tail.borrow_mut().advance_to(csv.position().byte());
     counters.reset();
     let type_of = |name: &str| {
         options
@@ -459,15 +520,15 @@ fn read_csv(
     };
     let mut row = csv::ByteRecord::new();
     loop {
-        let start = csv.position().line();
         match csv.read_byte_record(&mut row) {
             Ok(true) => {}
             Ok(false) => return Ok(()),
-            Err(e) => return Err(csv_err(e, counters, start)),
+            Err(e) => return Err(csv_err(e, counters)),
         }
         counters.reset();
-        let line = row.position().map_or(0, csv::Position::line);
         let offset = csv.position().byte();
+        let line = tail.borrow().start_line();
+        tail.borrow_mut().advance_to(offset);
         let mut doc = Map::new();
         let mut invalid = false;
         for (i, cell) in row.iter().enumerate() {
@@ -722,7 +783,7 @@ mod tests {
         data.extend_from_slice(b"\"]");
         let (records, result) = array(&data);
         assert_eq!(records.len(), 1);
-        assert_eq!(result, Err(ReadError::RecordTooLarge { line: 2 }));
+        assert_eq!(result, Err(ReadError::ElementTooLarge { element: 2 }));
     }
 
     #[test]
@@ -742,6 +803,28 @@ mod tests {
         let (records, _) = run(b"a,b\n1,2\n\"x\ny\",3\n", &ReadOptions::new(Format::Csv));
         let at: Vec<(u64, u64)> = records.iter().map(|r| (r.line, r.offset)).collect();
         assert_eq!(at, [(2, 8), (3, 16)]);
+        // CRLF: the line is where the record starts, whatever the terminator.
+        let (records, _) = run(
+            b"a,b\r\n1,2\r\n3,4\r\n5,6\r\n",
+            &ReadOptions::new(Format::Csv),
+        );
+        let lines: Vec<u64> = records.iter().map(|r| r.line).collect();
+        assert_eq!(lines, [2, 3, 4]);
+        // Blank lines count and do not shift the records after them.
+        let (records, _) = run(b"a,b\n1,2\n\n\n3,4\n", &ReadOptions::new(Format::Csv));
+        let lines: Vec<u64> = records.iter().map(|r| r.line).collect();
+        assert_eq!(lines, [2, 5]);
+        let (records, _) = run(
+            b"a,b\r\n\r\n\"x\r\ny\",1\r\n\r\n5,6",
+            &ReadOptions::new(Format::Csv),
+        );
+        let lines: Vec<u64> = records.iter().map(|r| r.line).collect();
+        assert_eq!(lines, [3, 6]);
+        let mut options = ReadOptions::new(Format::Csv);
+        options.csv.header = false;
+        let (records, _) = run(b"\n1,2\n3,4", &options);
+        let lines: Vec<u64> = records.iter().map(|r| r.line).collect();
+        assert_eq!(lines, [2, 3]);
     }
 
     #[test]

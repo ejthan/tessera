@@ -544,6 +544,23 @@ async fn import_decodes_lines_in_order() {
 }
 
 #[tokio::test]
+async fn import_line_with_a_non_string_id_still_decodes() {
+    let lines = import_answer(
+        "{\"code\":400,\"error\":\"Document's `id` field should be a string.\",\"id\":5,\"success\":false}\n{\"success\":false,\"code\":400,\"error\":\"x\",\"id\":{\"a\":1}}\n{\"success\":true,\"id\":\"7\"}\n",
+    )
+    .await;
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0].code, Some(400));
+    assert_eq!(
+        lines[0].error.as_deref(),
+        Some("Document's `id` field should be a string.")
+    );
+    assert_eq!(lines[0].id, None);
+    assert_eq!((lines[1].code, lines[1].id.clone()), (Some(400), None));
+    assert_eq!(lines[2].id.as_deref(), Some("7"));
+}
+
+#[tokio::test]
 async fn import_keeps_an_undecodable_line() {
     let lines = import_answer("{\"success\":true}\nnot json\n").await;
     assert_eq!(lines.len(), 2);

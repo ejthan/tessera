@@ -77,12 +77,13 @@ impl Detail {
             }
         }
         if is_import_batch(e) {
-            sections.push((
+            for heading in [
                 t!("log.detail.request_body"),
-                t!("log.detail.import_body_not_kept").to_string(),
-            ));
-        }
-        if e.response_body.is_none() && e.size.is_some() {
+                t!("log.detail.response_body"),
+            ] {
+                sections.push((heading, t!("log.detail.import_body_not_kept").to_string()));
+            }
+        } else if e.response_body.is_none() && e.size.is_some() {
             sections.push((
                 t!("log.detail.response_body"),
                 t!("log.detail.body_not_kept").to_string(),
