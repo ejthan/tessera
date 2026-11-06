@@ -32,7 +32,8 @@ pub fn to_jsonl(docs: &[Value]) -> String {
         .join("\n")
 }
 
-fn field(out: &mut String, text: &str) {
+/// Appends `text` as one RFC 4180 cell.
+pub(crate) fn csv_field(out: &mut String, text: &str) {
     if text.contains([',', '"', '\n', '\r']) {
         out.push('"');
         out.push_str(&text.replace('"', "\"\""));
@@ -51,7 +52,7 @@ pub fn to_csv(columns: &[String], docs: &[Map<String, Value>]) -> String {
             if i > 0 {
                 out.push(',');
             }
-            field(&mut out, &cell);
+            csv_field(&mut out, &cell);
         }
         out.push('\n');
     };

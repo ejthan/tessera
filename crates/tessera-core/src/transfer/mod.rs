@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Import and export of documents: readers for JSONL, JSON arrays and CSV, schema inference
-//! and preview, the import pipeline and its report. No UI; the readers are blocking and run
+//! and preview, the import and export pipelines and the report. No UI; the readers are blocking and run
 //! off the async workers.
 
 pub mod csv_cells;
+pub mod export;
 pub mod import;
 pub mod infer;
 pub mod preview;
