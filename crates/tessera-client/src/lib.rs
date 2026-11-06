@@ -11,6 +11,7 @@ mod models;
 mod raw;
 mod search;
 mod send;
+mod stopwords;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -34,7 +35,8 @@ pub use search::{
     search_route,
 };
 use secrecy::SecretString;
-use serde_json::Value;
+use serde_json::{Value, json};
+pub use stopwords::StopwordSet;
 use url::Url;
 
 /// The only methods a read-only client sends. Every other one, including PUT (an upsert in
@@ -116,6 +118,12 @@ impl fmt::Debug for Client {
 }
 
 /// Parses an `http` or `https` URL (optional path prefix) and makes it end in `/`.
+/// `{root}/{name}` with `name` encoded as one path segment.
+fn resource_path(root: &str, name: &str) -> Result<String, Error> {
+    collections::addressable(name)?;
+    Ok(format!("{root}/{}", documents::segment(name)))
+}
+
 fn parse_node(input: &str) -> Result<Url, Error> {
     let invalid = || Error::InvalidUrl(input.to_string());
     let mut url = Url::parse(input.trim()).map_err(|_| invalid())?;
@@ -304,6 +312,33 @@ impl Client {
     /// `GET /aliases`.
     pub async fn aliases(&self) -> Result<Vec<Alias>, Error> {
         self.aliases_on(None).await
+    }
+
+    /// `GET /aliases/{name}`.
+    pub async fn alias(&self, name: &str) -> Result<Alias, Error> {
+        let body = self
+            .get_ok(None, &resource_path("aliases", name)?, None)
+            .await?;
+        serde_json::from_str(&body).map_err(Error::Decode)
+    }
+
+    /// `PUT /aliases/{name}`. Creates or silently repoints, and takes any target: the caller
+    /// compares the answer.
+    pub async fn upsert_alias(&self, name: &str, collection: &str) -> Result<Alias, Error> {
+        let path = resource_path("aliases", name)?;
+        let body = json!({ "collection_name": collection });
+        let text = self
+            .write(None, Method::PUT, &path, None, Some(&body), None)
+            .await?;
+        serde_json::from_str(&text).map_err(Error::Decode)
+    }
+
+    /// `DELETE /aliases/{name}`.
+    pub async fn delete_alias(&self, name: &str) -> Result<(), Error> {
+        let path = resource_path("aliases", name)?;
+        self.write(None, Method::DELETE, &path, None, None, None)
+            .await
+            .map(drop)
     }
 
     /// `POST /collections` with `schema` as the body, sent as is.
