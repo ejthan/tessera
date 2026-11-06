@@ -10,6 +10,8 @@ mod common;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
 use tessera_app::connection::{CollectionChanged, ConnectionState};
 use tessera_app::jobs::{JobId, JobStatus, Jobs, JobsGlobal, Live, RunningChanged};
@@ -19,7 +21,8 @@ use tessera_client::{DirtyValues, Error, ImportAction, ImportParams};
 use tessera_core::profile::Profile;
 use tessera_core::transfer::JobEnd;
 use tessera_core::transfer::TransferError;
-use tessera_core::transfer::import::{ImportJob, ImportProgress};
+use tessera_core::transfer::import::{CountCheck, ImportJob, ImportProgress};
+use tessera_core::transfer::report::ReportRow;
 use tessera_core::transfer::source::{Format, ReadOptions, Source};
 
 use common::*;
@@ -285,4 +288,401 @@ async fn quit_stops_running_jobs(cx: &mut TestAppContext) {
     let tokens = cx.read(|cx| f.jobs.read(cx).jobs()[0].control.clone());
     cx.quit();
     assert!(tokens.stop.is_cancelled());
+}
+
+const TOGGLE_JOBS: &str = key("cmd-shift-j", "ctrl-shift-j");
+const TOGGLE_LOG: &str = key("cmd-j", "ctrl-j");
+const CANCEL_JOB: &str = key("cmd-.", "ctrl-.");
+
+impl Fixture {
+    fn press(&self, cx: &mut TestAppContext, keys: &str) {
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.press(keys, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    fn click(&self, cx: &mut TestAppContext, id: &str) {
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(id.to_string(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    fn text(&self, cx: &mut TestAppContext, id: &str) -> Option<String> {
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .try_find(id.to_string())
+                .and_then(|e| e.label().map(str::to_string))
+        })
+        .unwrap()
+    }
+
+    fn has(&self, cx: &mut TestAppContext, id: &str) -> bool {
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find(id.to_string()).is_some()
+        })
+        .unwrap()
+    }
+
+    fn panel_focus(&self, cx: &mut TestAppContext) {
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("jobs.row.0".to_string(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    fn toasts(&self, cx: &mut TestAppContext) -> usize {
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            window.notifications(cx).len()
+        })
+        .unwrap()
+    }
+
+    fn root(&self, cx: &mut TestAppContext) -> Entity<RootView> {
+        self.handle
+            .update(cx, |root, _, _| {
+                root.view().clone().downcast::<RootView>().unwrap()
+            })
+            .unwrap()
+    }
+}
+
+/// [`connected`] with the jobs tab open and one running import.
+async fn running(cx: &mut TestAppContext) -> (Fixture, JobId) {
+    let f = connected(cx).await;
+    let id = f.start(cx);
+    f.press(cx, TOGGLE_JOBS);
+    (f, id)
+}
+
+fn failed_row(line: u64) -> ReportRow {
+    ReportRow {
+        line,
+        code: Some(400),
+        error: format!("Field n of line {line} must be an int32."),
+        id: None,
+        raw: format!("{{\"n\":\"{line}\"}}"),
+        lossy: false,
+    }
+}
+
+#[gpui_kit::test]
+async fn running_import_shows_bar_rate_eta_and_errors(cx: &mut TestAppContext) {
+    let (f, id) = running(cx).await;
+    f.fake.progress(
+        id,
+        ImportProgress {
+            bytes_done: 500,
+            total_bytes: Some(1000),
+            imported: 1200,
+            failed: 3,
+            elapsed: Duration::from_secs(10),
+            ..Default::default()
+        },
+    );
+    cx.executor().advance_clock(Duration::from_millis(40));
+    cx.run_until_parked();
+    assert_eq!(f.text(cx, "jobs.progress.0").as_deref(), Some("50%"));
+    let text = f.text(cx, "jobs.text.0").unwrap();
+    assert!(text.contains("1,203"), "{text}");
+    assert!(text.contains("120/s"), "{text}");
+    assert!(text.contains("ETA 0:10"), "{text}");
+    assert!(text.contains("3 errors"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn unknown_total_shows_no_bar(cx: &mut TestAppContext) {
+    let (f, id) = running(cx).await;
+    f.fake.progress(id, update(5));
+    cx.executor().advance_clock(Duration::from_millis(40));
+    cx.run_until_parked();
+    assert!(f.has(cx, "jobs.text.0"));
+    assert!(!f.has(cx, "jobs.progress.0"));
+}
+
+#[gpui_kit::test]
+async fn row_shows_connection_and_environment(cx: &mut TestAppContext) {
+    let (f, _) = running(cx).await;
+    let row = f.text(cx, "jobs.row.0").unwrap();
+    assert!(row.contains("staging-eu"), "{row}");
+    assert!(row.contains("STAGING"), "{row}");
+    assert!(row.contains("books.jsonl"), "{row}");
+}
+
+#[gpui_kit::test]
+async fn first_error_shows_in_full(cx: &mut TestAppContext) {
+    let (f, id) = running(cx).await;
+    let long = "e".repeat(900);
+    f.fake.progress(
+        id,
+        ImportProgress {
+            first_error: Some(long.clone().into()),
+            ..Default::default()
+        },
+    );
+    cx.executor().advance_clock(Duration::from_millis(40));
+    cx.run_until_parked();
+    assert_eq!(f.text(cx, "jobs.error.0"), Some(long));
+}
+
+#[gpui_kit::test]
+async fn cancel_button_and_shortcut_stop_the_job(cx: &mut TestAppContext) {
+    let (f, id) = running(cx).await;
+    f.click(cx, "jobs.cancel");
+    assert_eq!(f.status(cx, id), JobStatus::Stopping);
+
+    let second = f.start(cx);
+    f.panel_focus(cx);
+    f.click(cx, "jobs.row.1");
+    assert!(f.has(cx, "jobs.cancel"));
+    f.press(cx, CANCEL_JOB);
+    assert_eq!(f.status(cx, second), JobStatus::Stopping);
+}
+
+#[gpui_kit::test]
+async fn stopping_offers_stop_waiting(cx: &mut TestAppContext) {
+    let (f, id) = running(cx).await;
+    f.click(cx, "jobs.cancel");
+    assert!(!f.has(cx, "jobs.cancel"));
+    let tokens = cx.read(|cx| f.jobs.read(cx).jobs()[0].control.clone());
+    assert!(!tokens.abort.is_cancelled());
+    f.click(cx, "jobs.stop_waiting");
+    assert!(tokens.abort.is_cancelled());
+    assert_eq!(f.status(cx, id), JobStatus::Stopping);
+}
+
+#[gpui_kit::test]
+async fn finished_shows_the_counts_and_the_note(cx: &mut TestAppContext) {
+    let (f, id) = running(cx).await;
+    let progress = ImportProgress {
+        imported: 411_997,
+        failed: 3,
+        ..Default::default()
+    };
+    f.fake
+        .finish(id, import_outcome(JobEnd::Finished, progress));
+    cx.run_until_parked();
+    let text = f.text(cx, "jobs.text.0").unwrap();
+    assert!(text.contains("Imported 411,997"), "{text}");
+    assert!(text.contains("Failed 3"), "{text}");
+    assert!(f.has(cx, "jobs.stay_note"));
+    assert!(f.has(cx, "jobs.count_unchecked"));
+}
+
+#[gpui_kit::test]
+async fn count_warning_shows(cx: &mut TestAppContext) {
+    let (f, id) = running(cx).await;
+    let mut outcome = import_outcome(JobEnd::Finished, update(5));
+    outcome.count = Some(CountCheck {
+        before: 10,
+        after: 19,
+        ok: false,
+    });
+    f.fake.finish(id, outcome);
+    cx.run_until_parked();
+    let text = f.text(cx, "jobs.count_warning").unwrap();
+    assert!(text.contains("grew by 9"), "{text}");
+    assert!(text.contains("reported 5"), "{text}");
+    assert!(!f.has(cx, "jobs.count_unchecked"));
+}
+
+#[gpui_kit::test]
+async fn report_table_shows_rows_and_the_more_note(cx: &mut TestAppContext) {
+    let (f, id) = running(cx).await;
+    let rows = (1..=1005).map(failed_row).collect();
+    let mut outcome = import_outcome(JobEnd::Finished, update(0));
+    outcome.report = report_with(rows);
+    f.fake.finish(id, outcome);
+    cx.run_until_parked();
+    let row = f.text(cx, "jobs.report.row.0").unwrap();
+    assert!(row.contains("Field n of line 1 must"), "{row}");
+    let more = f.text(cx, "jobs.report_more").unwrap();
+    assert!(more.contains("1,000 of 1,005"), "{more}");
+}
+
+#[gpui_kit::test]
+async fn failed_job_shows_error_inline(cx: &mut TestAppContext) {
+    let (f, id) = running(cx).await;
+    let err = TransferError::Io("disk full".into());
+    let mut outcome = import_outcome(JobEnd::Failed(err), update(0));
+    outcome.stopped_at_line = Some(42);
+    f.fake.finish(id, outcome);
+    cx.run_until_parked();
+    let text = f.text(cx, "jobs.error.0").unwrap();
+    assert!(text.contains("disk full"), "{text}");
+    let line = f.text(cx, "jobs.stopped_at").unwrap();
+    assert!(line.contains("42"), "{line}");
+}
+
+async fn finished_with_a_report(cx: &mut TestAppContext) -> (Fixture, JobId) {
+    let (f, id) = running(cx).await;
+    let mut outcome = import_outcome(JobEnd::Finished, update(0));
+    outcome.report = report_with(vec![failed_row(1)]);
+    f.fake.finish(id, outcome);
+    cx.run_until_parked();
+    (f, id)
+}
+
+#[gpui_kit::test]
+async fn dismiss_of_unsaved_report_asks_with_focus_on_cancel(cx: &mut TestAppContext) {
+    let (f, _) = finished_with_a_report(cx).await;
+    f.click(cx, "jobs.dismiss");
+    let focused = cx
+        .update_window(f.handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.find("confirm.cancel").focused()
+        })
+        .unwrap();
+    assert_eq!(focused, Some(true));
+    assert_eq!(cx.read(|cx| f.jobs.read(cx).jobs().len()), 1);
+    f.click(cx, "confirm.cancel");
+    assert_eq!(cx.read(|cx| f.jobs.read(cx).jobs().len()), 1);
+    f.click(cx, "jobs.dismiss");
+    f.click(cx, "confirm.ok");
+    assert_eq!(cx.read(|cx| f.jobs.read(cx).jobs().len()), 0);
+    assert!(f.has(cx, "jobs.empty"));
+}
+
+#[gpui_kit::test]
+async fn dismiss_of_saved_job_does_not_ask(cx: &mut TestAppContext) {
+    let (f, _) = finished_with_a_report(cx).await;
+    *f.fake.saved_lines.lock().unwrap() = 1;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("r.jsonl");
+    f.click(cx, "jobs.save_report");
+    cx.simulate_new_path_selection(|_| Some(path.clone()));
+    cx.run_until_parked();
+    f.click(cx, "jobs.dismiss");
+    assert!(!f.has(cx, "confirm.cancel"));
+    assert_eq!(cx.read(|cx| f.jobs.read(cx).jobs().len()), 0);
+}
+
+#[gpui_kit::test]
+async fn no_toast_while_the_tab_is_visible(cx: &mut TestAppContext) {
+    let (f, id) = running(cx).await;
+    f.fake.finish(id, finished());
+    cx.run_until_parked();
+    assert_eq!(f.toasts(cx), 0);
+}
+
+#[gpui_kit::test]
+async fn toast_when_it_is_hidden(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let id = f.start(cx);
+    f.fake.finish(id, finished());
+    cx.run_until_parked();
+    assert_eq!(f.toasts(cx), 1);
+}
+
+#[gpui_kit::test]
+async fn save_report_uses_the_picked_path(cx: &mut TestAppContext) {
+    let (f, _) = finished_with_a_report(cx).await;
+    *f.fake.saved_lines.lock().unwrap() = 1;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("r.jsonl");
+    f.click(cx, "jobs.save_report");
+    cx.simulate_new_path_selection(|_| Some(path.clone()));
+    cx.run_until_parked();
+    assert_eq!(*f.fake.saves.lock().unwrap(), [(path.clone(), false)]);
+    let text = f.text(cx, "jobs.saved").unwrap();
+    assert!(text.contains("Saved 1 lines"), "{text}");
+    assert!(text.contains("r.jsonl"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn save_failure_shows_inline(cx: &mut TestAppContext) {
+    let (f, _) = finished_with_a_report(cx).await;
+    *f.fake.save_error.lock().unwrap() = Some("no room left".into());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("r.jsonl");
+    f.click(cx, "jobs.save_failed");
+    cx.simulate_new_path_selection(|_| Some(path.clone()));
+    cx.run_until_parked();
+    assert_eq!(*f.fake.saves.lock().unwrap(), [(path, true)]);
+    let text = f.text(cx, "jobs.saved").unwrap();
+    assert!(text.contains("no room left"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn command_j_still_toggles_the_log(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.press(cx, TOGGLE_LOG);
+    assert!(f.has(cx, "dock.bottom"));
+    assert!(!f.has(cx, "jobs.panel"));
+    f.press(cx, TOGGLE_LOG);
+    assert!(!f.has(cx, "dock.bottom"));
+}
+
+#[gpui_kit::test]
+async fn shift_command_j_opens_jobs(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.press(cx, TOGGLE_JOBS);
+    assert!(f.has(cx, "jobs.panel"));
+    assert!(f.has(cx, "jobs.empty"));
+    assert!(!f.has(cx, "dock.bottom"));
+}
+
+#[gpui_kit::test]
+async fn shift_command_j_closes_jobs(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.press(cx, TOGGLE_JOBS);
+    f.press(cx, TOGGLE_JOBS);
+    assert!(!f.has(cx, "jobs.panel"));
+}
+
+#[gpui_kit::test]
+async fn command_j_on_jobs_tab_selects_the_log(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.press(cx, TOGGLE_JOBS);
+    f.press(cx, TOGGLE_LOG);
+    assert!(!f.has(cx, "jobs.panel"));
+    assert!(f.has(cx, "dock.bottom"));
+}
+
+#[gpui_kit::test]
+async fn start_opens_jobs_without_moving_focus(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.start(cx);
+    let root = f.root(cx);
+    let (before, after) = cx
+        .update_window(f.handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let before = window.focused(cx);
+            root.update(cx, |root, cx| root.show_jobs(window, cx));
+            window.render_frame(cx);
+            (before, window.focused(cx))
+        })
+        .unwrap();
+    assert_eq!(before, after);
+    assert!(f.has(cx, "jobs.panel"));
+}
+
+#[gpui_kit::test]
+async fn no_entry_without_jobs(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    assert!(!f.has(cx, "status.jobs"));
+}
+
+#[gpui_kit::test]
+async fn count_shows_with_the_shortcut(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let id = f.start(cx);
+    assert!(f.has(cx, "status.jobs"));
+    let text = f.text(cx, "status.jobs").unwrap();
+    assert!(text.contains("1 jobs"), "{text}");
+    f.click(cx, "status.jobs");
+    assert!(f.has(cx, "jobs.panel"));
+    f.fake.finish(id, finished());
+    cx.run_until_parked();
+    f.click(cx, "jobs.dismiss");
+    assert!(!f.has(cx, "status.jobs"));
 }

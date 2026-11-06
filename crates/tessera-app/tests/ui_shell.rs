@@ -475,13 +475,13 @@ async fn a_tab_moved_into_a_dock_stays_tracked(cx: &mut TestAppContext) {
     .unwrap();
     wait_for_label(cx, handle, "status.text".into(), "staging-eu").await;
     cx.update_window(handle.into(), |_, window, cx| {
-        assert!(!prod_frame(window, cx), "dock closed");
-        window.press(TOGGLE_LOG, cx);
+        assert!(!prod_frame(window, cx), "the log took the dock");
     })
     .unwrap();
+    click_overview(cx, handle, &prod).await;
     wait_for_label(cx, handle, "status.text".into(), "prod-ch").await;
     cx.update_window(handle.into(), |_, window, cx| {
-        assert!(prod_frame(window, cx), "dock open again");
+        assert!(prod_frame(window, cx), "prod tab selected again");
     })
     .unwrap();
 }

@@ -19,14 +19,17 @@ use super::dock::{
     CollectionPanel, CollectionsPanel, ConsolePanel, OverviewPanel, SearchPanel, SidebarPanel,
     WelcomePanel,
 };
+use super::jobs::panel::JobsPanel;
+use super::overview::grouped;
 use super::palette::{self, PaletteMode};
 use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
 use crate::actions::{
-    CopyAsCurl, NewConnection, OpenConsoleTab, OpenPalette, OpenSearchTab, QuickSwitch,
+    CopyAsCurl, NewConnection, OpenConsoleTab, OpenPalette, OpenSearchTab, QuickSwitch, ToggleJobs,
     ToggleRequestLog,
 };
 use crate::connection::ConnectionState;
+use crate::jobs::{JobFinished, JobId, JobStatus, Jobs, JobsGlobal, Live, RunningChanged};
 use crate::state::{
     AppState, CloseCollection, OpenCollection, OpenCollections, OpenConsole, OpenOverview,
     OpenSearch,
@@ -46,6 +49,7 @@ pub struct RootView {
     dock: Entity<DockArea>,
     welcome: Entity<WelcomePanel>,
     log: Entity<RequestLogPanel>,
+    jobs: Entity<JobsPanel>,
     /// The connection tab selected last, in the center or an open dock. Band, frame, title bar
     /// and status bar follow it.
     active: Option<PanelId>,
@@ -64,12 +68,15 @@ impl RootView {
         skin.set_close_button_visible(true, cx);
         let sidebar = cx.new(|cx| SidebarPanel::new(state.clone(), cx));
         let log = cx.new(|cx| RequestLogPanel::new(state.clone(), window, cx));
+        let jobs = cx.new(|cx| JobsPanel::new(window, cx));
         let welcome = cx.new(|cx| WelcomePanel::new(state.clone(), cx));
         dock.update(cx, |area, cx| {
             let tabs = |panel| DockLayout::tabs().panel_view(panel, cx);
             let (left, bottom, center) = (
                 tabs(panel_handle(sidebar)),
-                tabs(panel_handle(log.clone())),
+                tabs(panel_handle(log.clone()))
+                    .panel_view(panel_handle(jobs.clone()), cx)
+                    .active_index(0),
                 tabs(panel_handle(welcome.clone())),
             );
             area.set_dock(DockPlacement::Left, left, window, cx);
@@ -81,7 +88,14 @@ impl RootView {
             area.toggle_dock(DockPlacement::Bottom, window, cx);
             area.set_center(center, window, cx);
         });
+        let job_list = cx.global::<JobsGlobal>().0.clone();
         let subscriptions = vec![
+            cx.subscribe(&job_list, |_, _, _: &RunningChanged, cx| cx.notify()),
+            cx.subscribe_in(
+                &job_list,
+                window,
+                |this, _, event: &JobFinished, window, cx| this.job_finished(event.0, window, cx),
+            ),
             cx.observe_window_appearance(window, |_, window, cx| {
                 Theme::sync_system_appearance(Some(window), cx);
             }),
@@ -151,6 +165,7 @@ impl RootView {
             dock,
             welcome,
             log,
+            jobs,
             active: None,
             displayed: Vec::new(),
             keymap_errors: Vec::new(),
@@ -166,6 +181,89 @@ impl RootView {
     /// The request log panel.
     pub fn log_panel(&self) -> &Entity<RequestLogPanel> {
         &self.log
+    }
+
+    /// Whether the dock is open with `panel` as its displayed tab.
+    fn bottom_shows(&self, panel: PanelId, cx: &App) -> bool {
+        let area = self.dock.read(cx);
+        let mut shown = false;
+        if let Some(tree) = area
+            .layout(DockPlacement::Bottom)
+            .filter(|_| area.is_dock_open(DockPlacement::Bottom))
+        {
+            tree.root().walk(&mut |node| {
+                if let PaneRef::Tabs { panels, active_ix } = node.kind() {
+                    shown |= panels.get(active_ix) == Some(&panel);
+                }
+            });
+        }
+        shown
+    }
+
+    fn log_id(&self) -> PanelId {
+        PanelId::from(self.log.entity_id())
+    }
+
+    fn jobs_id(&self) -> PanelId {
+        PanelId::from(self.jobs.entity_id())
+    }
+
+    /// Opens the dock on `panel` or selects it there; closes the dock if it shows `panel`.
+    fn toggle_bottom(&mut self, panel: PanelId, window: &mut Window, cx: &mut Context<Self>) {
+        // Focus inside a panel that goes away would leave no element to receive the chord again.
+        let had_focus = self.log.focus_handle(cx).contains_focused(window, cx)
+            || self.jobs.focus_handle(cx).contains_focused(window, cx);
+        if self.bottom_shows(panel, cx) {
+            self.dock.update(cx, |area, cx| {
+                area.toggle_dock(DockPlacement::Bottom, window, cx);
+            });
+        } else {
+            self.reveal(panel, window, cx);
+        }
+        if had_focus {
+            self.focus_handle.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn reveal(&mut self, panel: PanelId, window: &mut Window, cx: &mut Context<Self>) {
+        self.dock.update(cx, |area, cx| {
+            if !area.is_dock_open(DockPlacement::Bottom) {
+                area.toggle_dock(DockPlacement::Bottom, window, cx);
+            }
+            area.select_panel(panel, window, cx);
+        });
+    }
+
+    /// Shows the jobs tab. Focus stays where it is.
+    pub fn show_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reveal(self.jobs_id(), window, cx);
+        cx.notify();
+    }
+
+    /// A job ending is a background event, so it is the one toast, unless its tab is on screen.
+    fn job_finished(&mut self, id: JobId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bottom_shows(self.jobs_id(), cx) {
+            return;
+        }
+        let jobs: &Jobs = cx.global::<JobsGlobal>().0.read(cx);
+        let Some(job) = jobs.jobs().iter().find(|job| job.id == id) else {
+            return;
+        };
+        let name = job.label.clone();
+        let text = match (&job.status, &job.live) {
+            (JobStatus::Failed(_), _) => t!("jobs.toast_failed", name = name),
+            (_, Live::Import(p)) => t!(
+                "jobs.toast_import",
+                name = name,
+                imported = grouped(p.imported),
+                failed = grouped(p.failed)
+            ),
+            (_, Live::Export(p)) => {
+                t!("jobs.toast_export", name = name, docs = grouped(p.docs))
+            }
+        };
+        window.push_notification(text.to_string(), cx);
     }
 
     fn open_palette(&self, mode: PaletteMode, window: &mut Window, cx: &mut Context<Self>) {
@@ -484,7 +582,12 @@ impl Render for RootView {
         let profile = active.map(|c| &c.profile);
         let unlocked = active.is_some_and(|c| c.writes_unlocked);
         let prod = profile.is_some_and(|p| p.environment.is_prod());
-        let log_open = self.dock.read(cx).is_dock_open(DockPlacement::Bottom);
+        let log_open = self.bottom_shows(self.log_id(), cx);
+        let job_list: &Jobs = cx.global::<JobsGlobal>().0.read(cx);
+        let jobs = (!job_list.jobs().is_empty()).then(|| status_bar::JobsEntry {
+            running: job_list.running(),
+            open: self.bottom_shows(self.jobs_id(), cx),
+        });
         let title = SharedString::from(
             profile
                 .map(|p| p.name.clone())
@@ -546,14 +649,10 @@ impl Render for RootView {
                 this.open_palette(PaletteMode::Collections, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleRequestLog, window, cx| {
-                // Focus inside the hidden log would leave no element to receive ⌘J again.
-                let had_focus = this.log.focus_handle(cx).contains_focused(window, cx);
-                this.dock.update(cx, |area, cx| {
-                    area.toggle_dock(DockPlacement::Bottom, window, cx);
-                });
-                if had_focus {
-                    this.focus_handle.focus(window, cx);
-                }
+                this.toggle_bottom(this.log_id(), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleJobs, window, cx| {
+                this.toggle_bottom(this.jobs_id(), window, cx);
             }))
             .when_some(can_search, |el, id| {
                 el.on_action(cx.listener(move |this, _: &OpenSearchTab, _, cx| {
@@ -585,7 +684,7 @@ impl Render for RootView {
                 )
             })
             .child(div().flex_1().min_h_0().child(self.dock.clone()))
-            .child(status_bar::render(active, log_open, window, cx))
+            .child(status_bar::render(active, log_open, jobs, window, cx))
             // Last, so they draw over the content without moving it; they have no listeners,
             // so clicks pass through.
             .when(prod, |el| {

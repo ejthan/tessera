@@ -15,7 +15,7 @@ use rust_i18n::t;
 
 use super::env_badge::PROD_RED;
 use super::overview::role_text;
-use crate::actions::ToggleRequestLog;
+use crate::actions::{ToggleJobs, ToggleRequestLog};
 use crate::connection::{ConnectionState, host_label};
 
 /// What the status bar says about a connected connection (spec §7.3).
@@ -71,10 +71,20 @@ pub fn summary(conn: &ConnectionState) -> Option<Summary> {
     })
 }
 
-/// Renders the status bar for the active connection, with the request log toggle.
+/// What the status bar's entry for the jobs shows.
+pub struct JobsEntry {
+    /// How many run.
+    pub running: usize,
+    /// The jobs tab is on screen.
+    pub open: bool,
+}
+
+/// Renders the status bar for the active connection, with the request log toggle and, while
+/// a job exists, the jobs toggle.
 pub fn render(
     selected: Option<&ConnectionState>,
     log_open: bool,
+    jobs: Option<JobsEntry>,
     window: &Window,
     cx: &App,
 ) -> impl IntoElement {
@@ -128,6 +138,20 @@ pub fn render(
                 .gap_2()
                 .items_center()
                 .children(prod_read_only)
+                .children(jobs.map(|jobs| {
+                    let text = if jobs.running > 0 {
+                        t!("status.jobs", count = jobs.running).to_string()
+                    } else {
+                        t!("status.jobs_idle").to_string()
+                    };
+                    Button::new("status.jobs")
+                        .ghost()
+                        .xsmall()
+                        .selected(jobs.open)
+                        .label(text)
+                        .children(Kbd::global_binding_for_action(&ToggleJobs, window))
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleJobs), cx))
+                }))
                 .child(
                     Button::new("status.toggle_log")
                         .ghost()

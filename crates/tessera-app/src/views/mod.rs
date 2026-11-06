@@ -10,6 +10,7 @@ pub mod dock;
 pub mod documents;
 pub mod env_badge;
 pub mod import_dialog;
+pub mod jobs;
 pub mod metric_chart;
 pub mod node_card;
 pub mod overview;

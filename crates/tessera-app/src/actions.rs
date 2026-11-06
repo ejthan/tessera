@@ -108,7 +108,12 @@ gpui_kit::actions!(
         DeleteSavedQuery,
         OpenExport,
         OpenPalette,
-        QuickSwitch
+        QuickSwitch,
+        ToggleJobs,
+        CancelJob,
+        DismissJob,
+        SaveReport,
+        SaveFailedLines
     ]
 );
 
@@ -162,6 +167,8 @@ pub const CONDITION_ROW: &str = "ConditionRow";
 const CONDITION_INPUT: &str = "ConditionRow > Input";
 /// Key context of the request log panel.
 pub const REQUEST_LOG: &str = "RequestLog";
+/// Key context of the jobs panel.
+pub const JOBS: &str = "Jobs";
 /// Key context of the raw console.
 pub const CONSOLE: &str = "Console";
 /// Key context of an input in the console, where ⌘↩ / Ctrl+↩ still sends.
@@ -425,6 +432,14 @@ const OPEN_PALETTE: &str = "ctrl-k";
 const QUICK_SWITCH: &str = "cmd-p";
 #[cfg(not(target_os = "macos"))]
 const QUICK_SWITCH: &str = "ctrl-p";
+#[cfg(target_os = "macos")]
+const TOGGLE_JOBS: &str = "cmd-shift-j";
+#[cfg(not(target_os = "macos"))]
+const TOGGLE_JOBS: &str = "ctrl-shift-j";
+#[cfg(target_os = "macos")]
+const CANCEL_JOB: &str = "cmd-.";
+#[cfg(not(target_os = "macos"))]
+const CANCEL_JOB: &str = "ctrl-.";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -517,6 +532,11 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     OpenPresets,
     OpenExport,
     QuickSwitch,
+    ToggleJobs,
+    CancelJob,
+    DismissJob,
+    SaveReport,
+    SaveFailedLines,
 ];
 
 /// Actions the palette never lists: steps that mean nothing outside their control, and
@@ -630,6 +650,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_PALETTE, OpenPalette, None),
         KeyBinding::new(QUICK_SWITCH, QuickSwitch, None),
         KeyBinding::new(TOGGLE_LOG, ToggleRequestLog, None),
+        KeyBinding::new(TOGGLE_JOBS, ToggleJobs, None),
         // Global, so the selected log entry can be copied wherever focus is.
         KeyBinding::new(COPY_CURL, CopyAsCurl, None),
         // The dock's own actions, handled by the tab group that holds focus.
@@ -772,6 +793,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-right", MoveChipRight, Some(CHIP)),
         KeyBinding::new("delete", RemoveChip, Some(CHIP)),
         KeyBinding::new("backspace", RemoveChip, Some(CHIP)),
+        KeyBinding::new(CANCEL_JOB, CancelJob, Some(JOBS)),
+        KeyBinding::new(STOP_WAITING, StopWaiting, Some(JOBS)),
+        KeyBinding::new(DELETE, DismissJob, Some(JOBS)),
+        KeyBinding::new(SAVE_QUERY, SaveReport, Some(JOBS)),
+        KeyBinding::new(SORT, SaveFailedLines, Some(JOBS)),
     ]);
     #[cfg(feature = "frame-overlay")]
     cx.bind_keys([KeyBinding::new(
