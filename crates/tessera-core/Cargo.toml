@@ -27,6 +27,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true

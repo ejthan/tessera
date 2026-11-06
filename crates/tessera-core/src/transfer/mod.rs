@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Import and export of documents: readers for JSONL, JSON arrays and CSV, schema inference
-//! and preview. No UI; the readers are blocking and run off the async workers.
+//! and preview, the import pipeline and its report. No UI; the readers are blocking and run
+//! off the async workers.
 
 pub mod csv_cells;
+pub mod import;
 pub mod infer;
 pub mod preview;
+pub mod report;
 pub mod source;
+
+pub use import::{JobControl, JobEnd, Phase, TransferError};
 
 /// Documents per import batch unless the user says otherwise.
 pub const DEFAULT_BATCH: u32 = 1000;
