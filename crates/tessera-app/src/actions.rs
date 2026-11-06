@@ -940,6 +940,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(DELETE, DeleteSetItem, Some(SET_ITEMS)),
         KeyBinding::new(SHOW_FORM, ShowItems, Some(RESOURCES)),
         KeyBinding::new(SHOW_JSON, ShowSetJson, Some(RESOURCES)),
+        KeyBinding::new(SHOW_FORM, ShowDocuments, Some(RESOURCES)),
+        KeyBinding::new(SHOW_JSON, ShowSchema, Some(RESOURCES)),
         KeyBinding::new(SHOW_HITS, ShowAttachment, Some(RESOURCES)),
         KeyBinding::new(SHOW_RAW, ShowTest, Some(RESOURCES)),
         KeyBinding::new(SAVE, RunTest, Some(TEST_PANEL)),

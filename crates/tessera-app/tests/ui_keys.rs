@@ -449,3 +449,12 @@ async fn read_only_save_asks_to_unlock(cx: &mut TestAppContext) {
     assert!(f.has(cx, "danger.input"));
     assert!(sent(&f).is_empty());
 }
+
+#[gpui_kit::test]
+async fn save_to_a_profile_keeps_the_reveal_open(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    create(&f, cx);
+    f.click(cx, "keys.reveal_profile");
+    assert!(f.has(cx, "connect.key"));
+    assert!(f.has(cx, "keys.reveal_copy"));
+}

@@ -12,6 +12,7 @@ pub mod keys;
 pub mod name_dialog;
 pub mod presets;
 pub mod reindex;
+pub mod scoped_keys;
 pub mod set_file;
 pub mod sets;
 pub mod stopwords;

@@ -2,6 +2,7 @@
 
 //! The API keys of a connection: a list and what the selected key may do.
 
+use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex};
 use gpui_kit::{
     Action, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
@@ -16,13 +17,16 @@ use tessera_core::keys::{Expiry, expiry};
 use tessera_core::redact;
 use tessera_widgets::json_editor::JsonEditor;
 
+use super::super::dock::view_tab;
 use super::key_dialog::{KeyDialog, RevealDialog};
+use super::scoped_keys::ScopedKeysView;
 use super::{
     Danger, ErrorSlot, ListRow, ResourceColumn, ResourceList, client_of, confirm_write,
     empty_state, list_error_text, notice, report_to, row_button, toolbar,
 };
 use crate::actions::{
-    DeleteResource, FocusResourceFilter, NewResource, NextControl, PreviousControl, ReloadResource,
+    DeleteResource, FocusResourceFilter, NewResource, NextControl, PreviousControl, RESOURCES,
+    ReloadResource, ShowDocuments, ShowSchema,
 };
 use crate::admin::AdminBackendGlobal;
 use crate::connection::{ConnectionState, error_text};
@@ -88,6 +92,9 @@ pub struct KeysView {
     /// The key the detail shows.
     followed: Option<u64>,
     detail: Entity<JsonEditor>,
+    /// The scoped key panel stays on the right instead of the detail.
+    on_scoped: bool,
+    scoped: Entity<ScopedKeysView>,
     /// Why the last write failed.
     error: Option<SharedString>,
     /// The form opened last.
@@ -107,6 +114,7 @@ impl KeysView {
         cx: &mut Context<Self>,
     ) -> Self {
         let list = cx.new(|cx| ResourceList::new("keys", COLUMNS, window, cx));
+        let scoped_connection = connection.clone();
         let subscription = cx.observe_in(&list, window, |this, _, window, cx| {
             this.follow_selection(window, cx);
         });
@@ -120,6 +128,8 @@ impl KeysView {
             load_task: None,
             followed: None,
             detail: cx.new(|cx| JsonEditor::new("", true, window, cx)),
+            on_scoped: false,
+            scoped: cx.new(|cx| ScopedKeysView::new(scoped_connection, window, cx)),
             error: None,
             dialog: None,
             reveal: None,
@@ -128,6 +138,11 @@ impl KeysView {
         };
         this.reload(cx);
         this
+    }
+
+    /// The scoped key panel.
+    pub fn scoped(&self) -> &Entity<ScopedKeysView> {
+        &self.scoped
     }
 
     /// The form opened last.
@@ -186,6 +201,7 @@ impl KeysView {
         keys.sort_by_key(|k| k.id);
         let now = Timestamp::now();
         let rows: Vec<ListRow> = keys.iter().map(|k| row(k, now)).collect();
+        self.scoped.update(cx, |s, cx| s.set_keys(keys.clone(), cx));
         self.keys = keys;
         self.list.update(cx, |l, cx| l.set_rows(rows, cx));
     }
@@ -243,6 +259,46 @@ impl KeysView {
     /// Actions with no target now, for [`gated`](crate::actions::gated).
     pub fn gates(&self, cx: &App) -> Vec<(bool, &'static dyn Action)> {
         vec![(self.selected(cx).is_none(), &DeleteResource)]
+    }
+
+    /// Keeps focus here: the view that had it goes, and the chords with it.
+    fn show(&mut self, scoped: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_scoped = scoped;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn right_pane(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let pane = if self.on_scoped {
+            self.scoped.clone().into_any_element()
+        } else {
+            self.detail_pane(cx).into_any_element()
+        };
+        v_flex()
+            .size_full()
+            .child(
+                TabBar::new("keys.views")
+                    .underline()
+                    .selected_index(usize::from(self.on_scoped))
+                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                        this.show(*ix == 1, window, cx);
+                    }))
+                    .child(view_tab(
+                        "keys.view.keys",
+                        t!("keys.view.keys").to_string().into(),
+                        &ShowDocuments,
+                        RESOURCES,
+                        window,
+                    ))
+                    .child(view_tab(
+                        "keys.view.scoped",
+                        t!("keys.view.scoped").to_string().into(),
+                        &ShowSchema,
+                        RESOURCES,
+                        window,
+                    )),
+            )
+            .child(div().flex_1().min_h_0().child(pane))
     }
 
     fn detail_pane(&self, cx: &App) -> impl IntoElement + use<> {
@@ -306,6 +362,7 @@ impl Render for KeysView {
         let locked = self.connection.read(cx).writes_locked();
         let empty = self.loaded && self.list_error.is_none() && self.list.read(cx).is_empty(cx);
         let none = self.selected(cx).is_none();
+        let right = self.right_pane(window, cx);
         let left = v_flex()
             .size_full()
             .child(toolbar(
@@ -348,6 +405,12 @@ impl Render for KeysView {
                 this.ask_delete(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ReloadResource, _, cx| this.reload(cx)))
+            .on_action(cx.listener(|this, _: &ShowDocuments, window, cx| {
+                this.show(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowSchema, window, cx| {
+                this.show(true, window, cx);
+            }))
             .on_action(|_: &NextControl, window, cx| window.focus_next(cx))
             .on_action(|_: &PreviousControl, window, cx| window.focus_prev(cx))
             .on_action(cx.listener(|this, _: &FocusResourceFilter, window, cx| {
@@ -362,7 +425,7 @@ impl Render for KeysView {
                             .border_color(border)
                             .child(left),
                     )
-                    .child(resizable_panel().child(self.detail_pane(cx))),
+                    .child(resizable_panel().child(right)),
             )
     }
 }
