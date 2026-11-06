@@ -142,7 +142,9 @@ gpui_kit::actions!(
         ImportResource,
         ExportResource,
         DetachMissing,
-        CreateMissingSet
+        CreateMissingSet,
+        ShowTest,
+        RunTest
     ]
 );
 
@@ -228,6 +230,10 @@ const SET_ITEM_INPUT: &str = "SetItemDialog > Input";
 pub const SET_IMPORT_DIALOG: &str = "SetImportDialog";
 /// An input in that dialog, which has its own ⌘↩.
 const SET_IMPORT_INPUT: &str = "SetImportDialog > Input";
+/// Key context of the test panel of a set.
+pub const TEST_PANEL: &str = "TestPanel";
+/// An input in that panel, which has its own ⌘↩.
+const TEST_PANEL_INPUT: &str = "TestPanel > Input";
 /// Key context of a list in a toolbar.
 pub const QUERY_LIST: &str = "QueryList";
 /// The filter of that list, which keeps the focus while the arrows move the selection.
@@ -612,6 +618,8 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     ExportResource,
     DetachMissing,
     CreateMissingSet,
+    ShowTest,
+    RunTest,
     StopWaiting,
     RemoveBodyFile,
     ShowResponseBody,
@@ -874,6 +882,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SHOW_FORM, ShowItems, Some(RESOURCES)),
         KeyBinding::new(SHOW_JSON, ShowSetJson, Some(RESOURCES)),
         KeyBinding::new(SHOW_HITS, ShowAttachment, Some(RESOURCES)),
+        KeyBinding::new(SHOW_RAW, ShowTest, Some(RESOURCES)),
+        KeyBinding::new(SAVE, RunTest, Some(TEST_PANEL)),
+        KeyBinding::new(SAVE, RunTest, Some(TEST_PANEL_INPUT)),
+        KeyBinding::new(FIND, FocusQuery, Some(TEST_PANEL)),
         KeyBinding::new(IMPORT_DOCUMENTS, ImportResource, Some(RESOURCES)),
         KeyBinding::new(EXPORT_DOCUMENTS, ExportResource, Some(RESOURCES)),
         KeyBinding::new(DELETE_QUERY, DetachMissing, Some(RESOURCES)),

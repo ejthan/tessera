@@ -33,6 +33,7 @@ use super::super::dock::view_tab;
 use super::super::env_badge;
 use super::name_dialog::NameDialog;
 use super::synonyms::{ITEM_COLUMNS, SynonymItemDialog, item_row};
+use super::test_panel::TestPanel;
 use super::{
     Danger, ErrorSlot, ListRow, ResourceColumn, ResourceList, client_of, confirm_write,
     empty_state, list_error_text, notice, report_to, row_button, toolbar,
@@ -40,7 +41,7 @@ use super::{
 use crate::actions::{
     CreateMissingSet, DeleteResource, DeleteSetItem, DetachMissing, EditResource, ExportResource,
     FocusResourceFilter, ImportResource, NewResource, NewSetItem, RESOURCES, ReloadResource,
-    SET_ITEMS, SaveResource, ShowAttachment, ShowItems, ShowSetJson,
+    RunTest, SET_ITEMS, SaveResource, ShowAttachment, ShowItems, ShowSetJson, ShowTest,
 };
 use crate::connection::{ConnectionState, error_text};
 use crate::relevance::RelevanceBackendGlobal;
@@ -62,6 +63,7 @@ enum SetTab {
     Items,
     Json,
     Collections,
+    Test,
 }
 
 /// What `issue` means, in words.
@@ -144,6 +146,7 @@ pub struct SetsView {
     pub(super) error: Option<SharedString>,
     pub(super) note: Option<SharedString>,
     dialog: Option<Entity<SynonymItemDialog>>,
+    test: Entity<TestPanel>,
     items_focus: FocusHandle,
     focus_handle: FocusHandle,
     _subscriptions: [Subscription; 3],
@@ -162,6 +165,10 @@ impl SetsView {
         let attach_filter = cx.new(|cx| {
             InputState::new(window, cx).placeholder(t!("sets.attach.filter").to_string())
         });
+        let test = {
+            let connection = connection.clone();
+            cx.new(|cx| TestPanel::new(kind, connection, window, cx))
+        };
         let subscriptions = [
             cx.subscribe(&attach_filter, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.observe_in(&list, window, |this, _, window, cx| {
@@ -194,6 +201,7 @@ impl SetsView {
             error: None,
             note: None,
             dialog: None,
+            test,
             items_focus: cx.focus_handle(),
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -205,6 +213,11 @@ impl SetsView {
     /// The JSON tab's editor.
     pub fn json(&self) -> &Entity<JsonEditor> {
         &self.json
+    }
+
+    /// The Test tab's panel.
+    pub fn test_panel(&self) -> &Entity<TestPanel> {
+        &self.test
     }
 
     /// The item dialog opened last.
@@ -286,6 +299,8 @@ impl SetsView {
         let rows: Vec<ListRow> = items.iter().map(item_row).collect();
         let text = synonyms_to_json(items);
         self.items.update(cx, |l, cx| l.set_rows(rows, cx));
+        let set = self.current().map(|s| s.name.clone());
+        self.test.update(cx, |t, cx| t.follow(set, window, cx));
         if !self.json_dirty(cx) {
             self.json_loaded.clone_from(&text);
             self.json.update(cx, |e, cx| e.set_text(&text, window, cx));
@@ -341,6 +356,7 @@ impl SetsView {
             SetTab::Items => self.items_focus.focus(window, cx),
             SetTab::Json => self.json.update(cx, |e, cx| e.focus(window, cx)),
             SetTab::Collections => {}
+            SetTab::Test => self.test.update(cx, |t, cx| t.shown(window, cx)),
         }
         cx.notify();
     }
@@ -595,6 +611,7 @@ impl SetsView {
             (no_item, &EditResource),
             (no_item, &DeleteSetItem),
             (no_set || self.tab != SetTab::Json, &SaveResource),
+            (self.test.read(cx).run_blocked(), &RunTest),
         ]
     }
 
@@ -690,7 +707,8 @@ impl SetsView {
                 let tab = match ix {
                     0 => SetTab::Items,
                     1 => SetTab::Json,
-                    _ => SetTab::Collections,
+                    2 => SetTab::Collections,
+                    _ => SetTab::Test,
                 };
                 this.show_tab(tab, window, cx);
             }))
@@ -714,11 +732,19 @@ impl SetsView {
                 &ShowAttachment,
                 RESOURCES,
                 window,
+            ))
+            .child(view_tab(
+                "sets.tab.test",
+                t!("sets.tab.test").to_string().into(),
+                &ShowTest,
+                RESOURCES,
+                window,
             ));
         let content = match self.tab {
             SetTab::Items => self.items_tab(window, cx).into_any_element(),
             SetTab::Json => self.json_tab(window, cx).into_any_element(),
             SetTab::Collections => self.attachment_tab(&name, cx).into_any_element(),
+            SetTab::Test => self.test.clone().into_any_element(),
         };
         v_flex()
             .size_full()
@@ -840,6 +866,9 @@ impl Render for SetsView {
             }))
             .on_action(cx.listener(|this, _: &ShowAttachment, window, cx| {
                 this.show_tab(SetTab::Collections, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowTest, window, cx| {
+                this.show_tab(SetTab::Test, window, cx);
             }))
             .when(synonyms, |el| {
                 el.on_action(cx.listener(|this, _: &ImportResource, window, cx| {

@@ -10,6 +10,7 @@ pub mod set_file;
 pub mod sets;
 pub mod stopwords;
 pub mod synonyms;
+pub mod test_panel;
 
 use std::rc::Rc;
 
@@ -49,8 +50,6 @@ pub enum ResourceView {
     Presets(Entity<PresetsView>),
     /// See [`SetsView`].
     Sets(Entity<SetsView>),
-    /// A kind whose view has not arrived: no sidebar row, shortcut or palette entry reaches it.
-    Pending(Entity<PendingView>),
 }
 
 impl ResourceView {
@@ -75,10 +74,9 @@ impl ResourceView {
             ResourceKind::Synonyms => {
                 Self::Sets(cx.new(|cx| SetsView::new(SetKind::Synonym, connection, window, cx)))
             }
-            ResourceKind::Curations => Self::Pending(cx.new(|cx| PendingView {
-                kind,
-                focus_handle: cx.focus_handle(),
-            })),
+            ResourceKind::Curations => {
+                Self::Sets(cx.new(|cx| SetsView::new(SetKind::Curation, connection, window, cx)))
+            }
         }
     }
 
@@ -89,7 +87,6 @@ impl ResourceView {
             Self::Stopwords(view) => view.clone().into(),
             Self::Presets(view) => view.clone().into(),
             Self::Sets(view) => view.clone().into(),
-            Self::Pending(view) => view.clone().into(),
         }
     }
 
@@ -100,7 +97,6 @@ impl ResourceView {
             Self::Stopwords(view) => view.focus_handle(cx),
             Self::Presets(view) => view.focus_handle(cx),
             Self::Sets(view) => view.focus_handle(cx),
-            Self::Pending(view) => view.read(cx).focus_handle.clone(),
         }
     }
 
@@ -111,24 +107,7 @@ impl ResourceView {
             Self::Stopwords(view) => view.read(cx).gates(cx),
             Self::Presets(view) => view.read(cx).gates(cx),
             Self::Sets(view) => view.read(cx).gates(cx),
-            Self::Pending(_) => Vec::new(),
         }
-    }
-}
-
-/// See [`ResourceView::Pending`].
-pub struct PendingView {
-    kind: ResourceKind,
-    focus_handle: FocusHandle,
-}
-
-impl Render for PendingView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .track_focus(&self.focus_handle)
-            .size_full()
-            .p_4()
-            .child(t!(self.kind.title_key()).to_string())
     }
 }
 

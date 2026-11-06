@@ -1072,6 +1072,8 @@ pub struct FakeSearch {
     pub calls: Mutex<Vec<SearchCall>>,
     /// Answers fail with this status and Typesense message.
     pub fail: Mutex<Option<(u16, String)>>,
+    /// Searches that carry this parameter fail with this status and message.
+    pub fail_with_param: Mutex<Option<(String, (u16, String))>>,
     /// When set, the next answer waits until the sender fires or is dropped.
     pub hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// Every multi-search, in order.
@@ -1128,12 +1130,16 @@ impl SearchBackend for FakeSearchBackend {
         tags: (String, String),
     ) -> tessera_app::collections::BoxFuture<Result<SearchAnswer, Error>> {
         let fake = &self.0;
+        let by_param = fake.fail_with_param.lock().unwrap().clone();
+        let by_param = by_param.filter(|(key, _)| params.iter().any(|(k, _)| k == key));
         fake.calls
             .lock()
             .unwrap()
             .push(SearchCall { collection, params });
         let body = fake.body.lock().unwrap().clone();
-        let fail = fake.fail.lock().unwrap().clone();
+        let fail = by_param
+            .map(|(_, e)| e)
+            .or_else(|| fake.fail.lock().unwrap().clone());
         let hold = fake.hold.lock().unwrap().take();
         Box::pin(async move {
             if let Some(hold) = hold {
@@ -1253,6 +1259,7 @@ pub fn install_search_fake(cx: &mut TestAppContext) -> Arc<FakeSearch> {
         body: Mutex::new(search_body(12)),
         calls: Mutex::default(),
         fail: Mutex::default(),
+        fail_with_param: Mutex::default(),
         hold: Mutex::default(),
         multi_calls: Mutex::default(),
         multi_body: Mutex::default(),
