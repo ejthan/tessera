@@ -13,6 +13,7 @@ pub mod keys;
 pub mod log;
 pub mod metrics;
 pub mod openapi;
+pub mod operations;
 pub mod profile;
 pub mod raw;
 pub mod redact;

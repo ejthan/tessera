@@ -152,6 +152,8 @@ pub fn raw_danger(method: &Method, path: &str, prod: bool) -> RawDanger {
         match segments[..] {
             ["multi_search"] => return RawDanger::None,
             ["operations", _, ..] => return by_env(RawDanger::Medium, high(last)),
+            // Reaches `skip-writes`, which no form offers (D86).
+            ["config"] => return by_env(RawDanger::Medium, high("config")),
             _ => {}
         }
     }
@@ -326,6 +328,9 @@ mod tests {
                 Medium,
                 high("snapshot"),
             ),
+            (Method::POST, "config", Medium, high("config")),
+            (Method::POST, "%63onfig", Medium, high("config")),
+            (Method::GET, "config", None, None),
             (Method::POST, "operations", None, Medium),
             (Method::POST, "collections", None, Medium),
             (Method::PUT, "presets/a", None, Medium),
