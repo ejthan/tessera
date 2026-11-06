@@ -731,6 +731,22 @@ impl JobsPanel {
                 _ => {}
             }
         }
+        if let Some(JobOutcome::Export(outcome)) = &job.outcome {
+            if outcome.unlisted_values > 0 {
+                let count = grouped(outcome.unlisted_values);
+                let text = t!("jobs.export_unlisted", count = count).to_string();
+                notes.push(note("jobs.export_unlisted".into(), text, false));
+            }
+            let progress = &outcome.progress;
+            // A stopped or failed export is short on purpose.
+            if let Some(expected) = progress.expected.filter(|e| *e != progress.docs)
+                && job.status == JobStatus::Finished
+            {
+                let (docs, expected) = (grouped(progress.docs), grouped(expected));
+                let text = t!("jobs.export_mismatch", docs = docs, expected = expected);
+                notes.push(note("jobs.export_mismatch".into(), text.to_string(), false));
+            }
+        }
         if job.kind == JobKind::Import {
             let text = t!("jobs.stay_note").to_string();
             notes.push(note("jobs.stay_note".into(), text, false));

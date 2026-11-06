@@ -21,6 +21,7 @@ use tessera_client::{DirtyValues, Error, ImportAction, ImportParams};
 use tessera_core::profile::Profile;
 use tessera_core::transfer::JobEnd;
 use tessera_core::transfer::TransferError;
+use tessera_core::transfer::export::{ExportFormat, ExportJob, ExportScope, FieldPick};
 use tessera_core::transfer::import::{CountCheck, ImportJob, ImportProgress};
 use tessera_core::transfer::report::ReportRow;
 use tessera_core::transfer::source::{Format, ReadOptions, Source};
@@ -710,4 +711,59 @@ async fn saved_failed_lines_offer_import(cx: &mut TestAppContext) {
         source.is_some_and(|e| e.label().is_some_and(|l| l.contains("books.failed")))
     })
     .await;
+}
+
+async fn export_running(cx: &mut TestAppContext) -> (Fixture, JobId) {
+    let f = connected(cx).await;
+    let job = ExportJob {
+        collection: "books".into(),
+        scope: ExportScope::All,
+        fields: FieldPick::All,
+        format: ExportFormat::Csv,
+        target: "books.csv".into(),
+        expected: Some(10),
+    };
+    let conn = f.conn.clone();
+    let id = cx.update(|cx| {
+        f.jobs.update(cx, |jobs, cx| {
+            jobs.start_export(&conn, job, "books.csv".into(), cx)
+        })
+    });
+    cx.run_until_parked();
+    f.press(cx, TOGGLE_JOBS);
+    (f, id)
+}
+
+#[gpui_kit::test]
+async fn finished_export_shows_unlisted_and_mismatch_warnings(cx: &mut TestAppContext) {
+    let (f, id) = export_running(cx).await;
+    f.fake
+        .finish_export(id, export_outcome(JobEnd::Finished, 9, Some(10), 4));
+    cx.run_until_parked();
+    let unlisted = f.text(cx, "jobs.export_unlisted").unwrap();
+    assert!(unlisted.starts_with("4 values were left out"), "{unlisted}");
+    let mismatch = f.text(cx, "jobs.export_mismatch").unwrap();
+    assert_eq!(
+        mismatch,
+        "Exported 9 of 10. Others may have written at the same time."
+    );
+}
+
+#[gpui_kit::test]
+async fn matching_export_shows_no_warning(cx: &mut TestAppContext) {
+    let (f, id) = export_running(cx).await;
+    f.fake
+        .finish_export(id, export_outcome(JobEnd::Finished, 10, Some(10), 0));
+    cx.run_until_parked();
+    assert!(!f.has(cx, "jobs.export_unlisted"));
+    assert!(!f.has(cx, "jobs.export_mismatch"));
+}
+
+#[gpui_kit::test]
+async fn stopped_export_is_not_a_mismatch(cx: &mut TestAppContext) {
+    let (f, id) = export_running(cx).await;
+    f.fake
+        .finish_export(id, export_outcome(JobEnd::Stopped, 3, Some(10), 0));
+    cx.run_until_parked();
+    assert!(!f.has(cx, "jobs.export_mismatch"));
 }

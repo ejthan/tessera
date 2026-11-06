@@ -117,7 +117,8 @@ gpui_kit::actions!(
         ImportDocuments,
         PickImportFile,
         PasteImport,
-        StartTransfer
+        StartTransfer,
+        ExportDocuments
     ]
 );
 
@@ -177,6 +178,10 @@ pub const JOBS: &str = "Jobs";
 pub const IMPORT_DIALOG: &str = "DocumentImport";
 /// An input in that dialog, which has its own ⌘↩.
 const IMPORT_INPUT: &str = "DocumentImport > Input";
+/// Key context of the export dialog.
+pub const EXPORT_DIALOG: &str = "DocumentExport";
+/// An input in that dialog, which has its own ⌘↩.
+const EXPORT_INPUT: &str = "DocumentExport > Input";
 /// Key context of the raw console.
 pub const CONSOLE: &str = "Console";
 /// Key context of an input in the console, where ⌘↩ / Ctrl+↩ still sends.
@@ -445,6 +450,10 @@ const IMPORT_DOCUMENTS: &str = "cmd-shift-i";
 #[cfg(not(target_os = "macos"))]
 const IMPORT_DOCUMENTS: &str = "ctrl-shift-i";
 #[cfg(target_os = "macos")]
+const EXPORT_DOCUMENTS: &str = "cmd-shift-x";
+#[cfg(not(target_os = "macos"))]
+const EXPORT_DOCUMENTS: &str = "ctrl-shift-x";
+#[cfg(target_os = "macos")]
 const PASTE_IMPORT: &str = "cmd-shift-v";
 #[cfg(not(target_os = "macos"))]
 const PASTE_IMPORT: &str = "ctrl-shift-v";
@@ -554,6 +563,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     SaveReport,
     SaveFailedLines,
     ImportDocuments,
+    ExportDocuments,
 ];
 
 /// Actions the palette never lists: steps that mean nothing outside their control, and
@@ -819,6 +829,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(PASTE_IMPORT, PasteImport, Some(IMPORT_DIALOG)),
         KeyBinding::new(SAVE, StartTransfer, Some(IMPORT_DIALOG)),
         KeyBinding::new(SAVE, StartTransfer, Some(IMPORT_INPUT)),
+        KeyBinding::new(EXPORT_DOCUMENTS, ExportDocuments, Some(COLLECTION)),
+        KeyBinding::new(SAVE, StartTransfer, Some(EXPORT_DIALOG)),
+        KeyBinding::new(SAVE, StartTransfer, Some(EXPORT_INPUT)),
         KeyBinding::new(CANCEL_JOB, CancelJob, Some(JOBS)),
         KeyBinding::new(STOP_WAITING, StopWaiting, Some(JOBS)),
         KeyBinding::new(DELETE, DismissJob, Some(JOBS)),

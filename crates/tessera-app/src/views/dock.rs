@@ -28,9 +28,10 @@ use super::search::SearchWorkbench;
 use super::sidebar::Sidebar;
 use super::{env_badge, unlock, welcome};
 use crate::actions::{
-    COLLECTION, COLLECTIONS, CONSOLE, CloneCollection, DeleteCollection, EditSchema, FocusSearch,
-    ImportDocuments, LockAgain, NewCollection, OVERVIEW, OpenCollectionRow, Refresh, ShowDocuments,
-    ShowSchema, ToggleFavorite, TogglePolling, TruncateCollection, WORKBENCH, gated,
+    COLLECTION, COLLECTIONS, CONSOLE, CloneCollection, DeleteCollection, EditSchema,
+    ExportDocuments, FocusSearch, ImportDocuments, LockAgain, NewCollection, OVERVIEW,
+    OpenCollectionRow, Refresh, ShowDocuments, ShowSchema, ToggleFavorite, TogglePolling,
+    TruncateCollection, WORKBENCH, gated,
 };
 use crate::connection::ConnectionState;
 use crate::poller::Poller;
@@ -480,6 +481,9 @@ impl Render for CollectionPanel {
             .on_action(cx.listener(|this, _: &ImportDocuments, window, cx| {
                 this.documents
                     .update(cx, |d, cx| d.import(None, window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &ExportDocuments, window, cx| {
+                this.documents.update(cx, |d, cx| d.export(window, cx));
             }))
             .on_action(cx.listener(|this, _: &ShowDocuments, window, cx| {
                 this.show(CollectionView::Documents, window, cx);

@@ -987,6 +987,24 @@ pub fn import_outcome(
     }
 }
 
+/// The outcome of an export that ended with `end`, having written `docs` of `expected`.
+pub fn export_outcome(
+    end: JobEnd<tessera_core::transfer::TransferError>,
+    docs: u64,
+    expected: Option<u64>,
+    unlisted_values: u64,
+) -> ExportOutcome {
+    ExportOutcome {
+        end,
+        progress: ExportProgress {
+            docs,
+            expected,
+            ..Default::default()
+        },
+        unlisted_values,
+    }
+}
+
 /// One search the fake was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchCall {
