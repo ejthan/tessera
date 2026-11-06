@@ -432,7 +432,7 @@ async fn reveal_works_from_the_keyboard(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![]).await;
     create(&f, cx);
     cx.update_window(f.handle.into(), |_, window, cx| {
-        window.press(key("cmd-shift-c", "ctrl-shift-c"), cx);
+        window.press(COPY_ROW, cx);
     })
     .unwrap();
     f.settle(cx);

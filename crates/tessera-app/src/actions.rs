@@ -485,6 +485,10 @@ const OPEN_RESOURCES: [&str; 9] = [
     "ctrl-alt-9",
 ];
 #[cfg(target_os = "macos")]
+const OPEN_TOP: &str = "cmd-alt-g";
+#[cfg(not(target_os = "macos"))]
+const OPEN_TOP: &str = "ctrl-alt-g";
+#[cfg(target_os = "macos")]
 const ADD_QUERY_ROW: &str = "cmd-shift-a";
 #[cfg(not(target_os = "macos"))]
 const ADD_QUERY_ROW: &str = "ctrl-shift-a";
@@ -938,7 +942,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_SAVED, PickImportFile, Some(STEMMING_DIALOG)),
         KeyBinding::new(UPDATE_QUERY, FlushAnalytics, Some(ANALYTICS)),
         KeyBinding::new(TEST, SendTestEvent, Some(ANALYTICS)),
-        KeyBinding::new(OPEN_SEARCH, OpenTopInSearch, Some(ANALYTICS)),
+        KeyBinding::new(OPEN_TOP, OpenTopInSearch, Some(ANALYTICS)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(RESOURCES)),
         KeyBinding::new(REVERT, ReindexAlias, Some(RESOURCES)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(REINDEX)),
@@ -977,8 +981,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(DELETE, DeleteSetItem, Some(SET_ITEMS)),
         KeyBinding::new(SHOW_FORM, ShowItems, Some(RESOURCES)),
         KeyBinding::new(SHOW_JSON, ShowSetJson, Some(RESOURCES)),
-        KeyBinding::new(COPY_CURL, CopyKey, Some(SCOPED_KEYS)),
-        KeyBinding::new(COPY_CURL, CopyKey, Some(KEY_REVEAL)),
+        // Not COPY_CURL, which stays Copy as curl here.
+        KeyBinding::new(COPY_ROW, CopyKey, Some(SCOPED_KEYS)),
+        KeyBinding::new(COPY_ROW, CopyKey, Some(KEY_REVEAL)),
         KeyBinding::new(SAVE, FinishReveal, Some(KEY_REVEAL)),
         KeyBinding::new(SHOW_FORM, ShowDocuments, Some(RESOURCES)),
         KeyBinding::new(SHOW_JSON, ShowSchema, Some(RESOURCES)),

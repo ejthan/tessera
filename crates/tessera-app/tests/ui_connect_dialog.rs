@@ -410,15 +410,37 @@ async fn a_limited_key_is_explained_and_can_be_saved(cx: &mut TestAppContext) {
             message: "Forbidden".into(),
         })
     });
-    let handle = open(cx);
+    let secrets = Arc::new(MemoryStore::default());
+    let (handle, state, _rt) = open_app(cx, Vec::new(), secrets.clone());
     open_dialog(cx, handle).await;
     cx.update_window(handle.into(), |_, window, cx| {
-        fill(window, "connect.key", "k", cx);
+        fill(window, "connect.name", "limited", cx);
+        fill(window, "connect.key", "k-limited", cx);
         window.press(TEST, cx);
     })
     .unwrap();
     let result = "connect.result".to_string();
     wait_for_label(cx, handle, result, "search-only key").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        let warning = label(window, "connect.result");
+        assert!(
+            warning.contains("A wrong key gets the same answer."),
+            "{warning}"
+        );
+        assert_eq!(window.find("connect.save").label(), Some("Save anyway"));
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    wait_for_close(cx, handle).await;
+    cx.run_until_parked();
+    let id = state.read_with(cx, |s, _| {
+        assert_eq!(s.profiles.len(), 1);
+        s.profiles[0].id
+    });
+    assert_eq!(
+        secrets.get(id).unwrap().unwrap().expose_secret(),
+        "k-limited"
+    );
 }
 
 #[gpui_kit::test]

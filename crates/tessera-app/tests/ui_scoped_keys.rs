@@ -197,8 +197,15 @@ async fn the_chord_of_copy_copies(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![]).await;
     f.fill(cx, "scoped.parent", PARENT);
     f.set_params(cx, FILTER);
+    // ⇧⌘C stays Copy as curl.
     cx.update_window(f.handle.into(), |_, window, cx| {
-        window.press(key("cmd-shift-c", "ctrl-shift-c"), cx);
+        window.press(COPY_CURL, cx);
+    })
+    .unwrap();
+    f.settle(cx);
+    assert!(cx.update(|cx| cx.read_from_clipboard()).is_none());
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        window.press(COPY_ROW, cx);
     })
     .unwrap();
     f.settle(cx);

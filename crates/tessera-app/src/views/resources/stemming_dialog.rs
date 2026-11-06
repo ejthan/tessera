@@ -22,10 +22,10 @@ use tessera_core::relevance::name_ok;
 use tessera_core::stemming::{BadLine, LineProblem};
 
 use super::stemming::StemmingView;
-use super::{Danger, client_of, confirm_write, dialog_title, notice, report_to};
+use super::{Danger, ErrorSlot, client_of, confirm_write, dialog_title, notice, report_to};
 use crate::actions::{PickImportFile, STEMMING_DIALOG, SaveResource};
 use crate::admin::{AdminBackendGlobal, DictionaryFileError};
-use crate::connection::{ConnectionState, error_text};
+use crate::connection::{ConnectionState, error_text, long_error_text};
 
 /// Width of the dialog.
 const WIDTH: f32 = 480.;
@@ -59,8 +59,6 @@ pub struct StemmingDialog {
     id: Entity<InputState>,
     /// The dictionary selected when it opened.
     selected: Option<String>,
-    /// The dictionaries there are.
-    ids: Vec<String>,
     /// The file parsed clean.
     words: Option<Vec<StemmingWord>>,
     bad: Vec<BadLine>,
@@ -68,6 +66,8 @@ pub struct StemmingDialog {
     file_error: Option<SharedString>,
     error: Option<SharedString>,
     busy: bool,
+    /// Asking whether the id exists. Closing now would not stop the import that follows.
+    checking: bool,
     read_task: Option<Task<()>>,
     cancel_focus: FocusHandle,
     _subscription: Subscription,
@@ -79,7 +79,6 @@ impl StemmingDialog {
         view: WeakEntity<StemmingView>,
         connection: Entity<ConnectionState>,
         selected: Option<String>,
-        ids: Vec<String>,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
@@ -105,12 +104,12 @@ impl StemmingDialog {
                 connection,
                 id,
                 selected,
-                ids,
                 words: None,
                 bad: Vec::new(),
                 file_error: None,
                 error: None,
                 busy: false,
+                checking: false,
                 read_task: None,
                 cancel_focus: cx.focus_handle(),
                 _subscription: subscription,
@@ -123,13 +122,14 @@ impl StemmingDialog {
                 let id = dialog.read(cx).id.clone();
                 id.read(cx).focus_handle(cx).focus(window, cx);
             }
-            let enter = dialog.clone();
+            let (enter, cancel) = (dialog.clone(), dialog.clone());
             d.title(dialog_title(
                 t!("stemming.import_title").to_string(),
                 &shown,
                 cx,
             ))
             .w(px(WIDTH))
+            .on_cancel(move |_, _, cx| !cancel.read(cx).checking)
             // The dialog's Enter binding wins over the focused button's own key handling.
             .on_ok(move |_, window, cx| {
                 enter.update(cx, |this, cx| {
@@ -207,45 +207,108 @@ impl StemmingDialog {
             return;
         };
         let id = self.id_value(cx);
-        let exists = self.ids.contains(&id);
         self.error = None;
+        // Here, not in the deferred write, so a second Enter finds it set. A locked connection
+        // asks first, and cancelling that leaves the form usable.
+        self.busy = !self.connection.read(cx).writes_locked();
+        cx.notify();
         let dialog = cx.entity();
-        let connection = self.connection.clone();
-        let view = self.view.clone();
         self.connection.update(cx, |c, cx| {
             c.ensure_writable(window, cx, move |window, cx| {
-                if !exists {
-                    return send_from_dialog(&dialog, id.clone(), words.clone(), window, cx);
-                }
-                window.close_dialog(cx);
-                let prod = connection.read(cx).profile.environment.is_prod();
-                let danger = Danger {
-                    title: t!("stemming.merge_title", name = id).to_string(),
-                    lines: vec![t!("stemming.merge").to_string()],
-                    expected: id.clone(),
-                    action: t!("stemming.import").to_string(),
-                    typed: prod,
-                };
-                let (target, conn, sent, name) =
-                    (view.clone(), connection.clone(), words.clone(), id.clone());
-                let run = move |_: &mut Window, cx: &mut App| {
-                    send_import(target.clone(), conn.clone(), name.clone(), sent.clone(), cx)
-                };
-                let report = report_to(view.clone());
-                confirm_write(danger, &connection, run, report, window, cx);
+                check_id(&dialog, id, words, window, cx);
             });
         });
     }
 }
 
-/// A new id goes out from the open form, which shows a failure and closes when it worked.
-fn send_from_dialog(
+impl ErrorSlot for StemmingDialog {
+    fn error_slot(&mut self) -> &mut Option<SharedString> {
+        &mut self.error
+    }
+}
+
+/// Asks the server whether `id` exists: what the form opened with can be old, and a merge cannot
+/// be undone. Nothing goes out when the answer does not arrive.
+fn check_id(
     dialog: &Entity<StemmingDialog>,
     id: String,
     words: Vec<StemmingWord>,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let connection = dialog.read(cx).connection.clone();
+    let report = report_to(dialog.downgrade());
+    let Some(client) = client_of(&connection, cx) else {
+        dialog.update(cx, |d, _| d.busy = false);
+        return report(t!("status.not_connected").to_string().into(), cx);
+    };
+    let read = cx.global::<AdminBackendGlobal>().0.dictionaries(client);
+    dialog.update(cx, |d, cx| {
+        (d.busy, d.checking) = (true, true);
+        cx.notify();
+    });
+    let dialog = dialog.clone();
+    window
+        .spawn(cx, async move |cx| {
+            let ids = read.await;
+            cx.update(|window, cx| {
+                dialog.update(cx, |d, cx| {
+                    (d.busy, d.checking) = (false, false);
+                    cx.notify();
+                });
+                match ids {
+                    Ok(ids) if ids.contains(&id) => ask_merge(dialog, id, words, window, cx),
+                    Ok(_) => {
+                        let send = send_from_dialog(&dialog, id, words, window, cx);
+                        cx.spawn(async move |cx| {
+                            if let Err(text) = send.await {
+                                cx.update(|cx| report(text, cx));
+                            }
+                        })
+                        .detach();
+                    }
+                    Err(e) => {
+                        let text = error_text(&e, &connection.read(cx).profile);
+                        report(text.into(), cx);
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+}
+
+/// Confirms over the form, which stays with its file when the user cancels.
+fn ask_merge(
+    dialog: Entity<StemmingDialog>,
+    id: String,
+    words: Vec<StemmingWord>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let connection = dialog.read(cx).connection.clone();
+    let danger = Danger {
+        title: t!("stemming.merge_title", name = id).to_string(),
+        lines: vec![t!("stemming.merge").to_string()],
+        expected: id.clone(),
+        action: t!("stemming.import").to_string(),
+        typed: connection.read(cx).profile.environment.is_prod(),
+    };
+    let report = report_to(dialog.downgrade());
+    let run = move |window: &mut Window, cx: &mut App| {
+        send_from_dialog(&dialog, id.clone(), words.clone(), window, cx)
+    };
+    confirm_write(danger, &connection, run, report, window, cx);
+}
+
+/// Imports from the open form. When it worked the form goes, with a confirmation over it.
+fn send_from_dialog(
+    dialog: &Entity<StemmingDialog>,
+    id: String,
+    words: Vec<StemmingWord>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Task<Result<(), SharedString>> {
     let (view, connection) = {
         let d = dialog.read(cx);
         (d.view.clone(), d.connection.clone())
@@ -256,23 +319,21 @@ fn send_from_dialog(
         cx.notify();
     });
     let form = dialog.downgrade();
-    window
-        .spawn(cx, async move |cx| {
-            let sent = send.await;
-            cx.update(|window, cx| {
-                form.update(cx, |d, cx| {
-                    d.busy = false;
-                    match sent {
-                        Ok(()) => window.close_dialog(cx),
-                        Err(text) => d.error = Some(text),
-                    }
-                    cx.notify();
-                })
-                .ok();
+    window.spawn(cx, async move |cx| {
+        let sent = send.await;
+        cx.update(|window, cx| {
+            form.update(cx, |d, cx| {
+                d.busy = false;
+                cx.notify();
             })
             .ok();
+            if sent.is_ok() {
+                window.close_all_dialogs(cx);
+            }
         })
-        .detach();
+        .ok();
+        sent
+    })
 }
 
 /// Imports and reports on the tab. Runs on through a closed tab.
@@ -294,7 +355,7 @@ fn send_import(
     cx.spawn(async move |cx| {
         let check = import
             .await
-            .map_err(|e| SharedString::from(error_text(&e, &profile)))?;
+            .map_err(|e| SharedString::from(long_error_text(&e, &profile)))?;
         view.update(cx, |view, cx| view.imported(id, &check, cx))
             .ok();
         Ok(())
@@ -368,6 +429,7 @@ impl Render for StemmingDialog {
                             .label(t!("common.cancel").to_string())
                             .children(Kbd::binding_for_action(&Cancel, Some("Dialog"), window))
                             .track_focus(&self.cancel_focus)
+                            .disabled(self.checking)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(

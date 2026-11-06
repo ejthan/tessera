@@ -7,7 +7,7 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui_kit::component::dock::DockPlacement;
@@ -243,6 +243,101 @@ async fn new_posts_and_selects(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn a_second_save_keeps_the_first_edit(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![popular()]).await;
+    f.click(cx, "analytics.row.popular");
+    f.fill(cx, "analytics.form.tag", "edited");
+    f.click(cx, "analytics.save");
+    f.click(cx, "analytics.save");
+    let saved = f.admin.saved.lock().unwrap().clone();
+    assert_eq!(saved.len(), 2);
+    assert_eq!(saved[1].1["rule_tag"], "edited");
+}
+
+#[gpui_kit::test]
+async fn an_untouched_form_asks_nothing(cx: &mut TestAppContext) {
+    let mut meta = popular();
+    meta["name"] = json!("meta");
+    meta["params"]["meta_fields"] = json!(["a", "b"]);
+    meta["params"]["capture_search_requests"] = json!(true);
+    let f = Fixture::new(cx, vec![popular(), counter(), meta]).await;
+    for row in ["popular", "clicks", "meta", "popular"] {
+        f.click(cx, &format!("analytics.row.{row}"));
+        assert!(!f.has(cx, "confirm.ok"), "{row}");
+    }
+    f.click(cx, "analytics.new");
+    assert!(!f.has(cx, "confirm.ok"));
+    f.click(cx, "analytics.row.popular");
+    assert!(!f.has(cx, "confirm.ok"));
+}
+
+#[gpui_kit::test]
+async fn another_row_asks_before_it_replaces_the_form(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![popular(), counter()]).await;
+    f.click(cx, "analytics.row.popular");
+    f.fill(cx, "analytics.form.tag", "unsaved");
+    f.click(cx, "analytics.row.clicks");
+    f.click(cx, "confirm.cancel");
+    assert!(!f.has(cx, "analytics.form.counter_field"));
+    f.click(cx, "analytics.save");
+    let saved = f.admin.saved.lock().unwrap().clone();
+    assert_eq!(saved[0].0.as_deref(), Some("popular"));
+    assert_eq!(saved[0].1["rule_tag"], "unsaved");
+
+    f.fill(cx, "analytics.form.tag", "again");
+    f.click(cx, "analytics.row.clicks");
+    f.click(cx, "confirm.ok");
+    assert!(f.has(cx, "analytics.form.counter_field"));
+}
+
+#[gpui_kit::test]
+async fn new_asks_before_it_replaces_the_form(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![popular()]).await;
+    f.new_rule(cx, "fresh");
+    f.click(cx, "analytics.new");
+    f.click(cx, "confirm.cancel");
+    f.click(cx, "analytics.row.popular");
+    f.click(cx, "confirm.cancel");
+    f.click(cx, "analytics.save");
+    let saved = f.admin.saved.lock().unwrap().clone();
+    assert_eq!(saved[0].0, None);
+    assert_eq!(saved[0].1["name"], "fresh");
+
+    f.click(cx, "analytics.row.popular");
+    f.fill(cx, "analytics.form.tag", "unsaved");
+    f.click(cx, "analytics.new");
+    f.click(cx, "confirm.ok");
+    assert!(!f.has(cx, "analytics.test.send"));
+}
+
+#[gpui_kit::test]
+async fn a_filter_hiding_the_row_keeps_the_form(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![popular()]).await;
+    f.click(cx, "analytics.row.popular");
+    f.fill(cx, "analytics.form.tag", "kept");
+    f.fill(cx, "analytics.filter", "nothing like it");
+    assert!(!f.has(cx, "analytics.row.popular"));
+    assert!(f.has(cx, "analytics.form.tag"));
+    f.fill(cx, "analytics.filter", "");
+    f.click(cx, "analytics.save");
+    assert_eq!(f.admin.saved.lock().unwrap()[0].1["rule_tag"], "kept");
+}
+
+#[gpui_kit::test]
+async fn a_slow_save_leaves_a_user_who_moved_on_alone(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![popular(), counter()]).await;
+    f.click(cx, "analytics.row.popular");
+    f.fill(cx, "analytics.form.tag", "slow");
+    let (done, hold) = tokio::sync::oneshot::channel();
+    *f.admin.save_hold.lock().unwrap() = Some(hold);
+    f.click(cx, "analytics.save");
+    f.click(cx, "analytics.row.clicks");
+    f.click(cx, "confirm.ok");
+    done.send(()).unwrap();
+    assert!(f.has(cx, "analytics.form.counter_field"));
+}
+
+#[gpui_kit::test]
 async fn bad_name_sends_nothing(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![]).await;
     f.new_rule(cx, "a b");
@@ -334,6 +429,70 @@ async fn open_in_search_opens_the_tab(cx: &mut TestAppContext) {
     let draft = events[0].as_ref().unwrap();
     assert_eq!(draft.collection, "products");
     assert_eq!(draft.params["q"], "shoes");
+}
+
+/// Rule `popular` with one destination row, and what opens a search from now on.
+fn top_row(
+    f: &Fixture,
+    cx: &mut TestAppContext,
+) -> (Arc<Mutex<Vec<bool>>>, gpui_kit::Subscription) {
+    *f.admin.top.lock().unwrap() = json!({
+        "found": 1, "out_of": 1, "page": 1, "search_time_ms": 0,
+        "hits": [{"document": {"id": "1", "q": "shoes", "count": 7}}]
+    })
+    .to_string();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = events.clone();
+    let state = f.state.clone();
+    let sub = cx.update(|cx| {
+        cx.subscribe(&state, move |_, e: &tessera_app::state::OpenSearch, _| {
+            seen.lock().unwrap().push(e.1.is_some());
+        })
+    });
+    f.click(cx, "analytics.row.popular");
+    (events, sub)
+}
+
+fn press(f: &Fixture, cx: &mut TestAppContext, chord: &'static str) {
+    cx.update_window(f.handle.into(), |_, window, cx| window.press(chord, cx))
+        .unwrap();
+    f.settle(cx);
+}
+
+fn open_is_gated(f: &Fixture, cx: &mut TestAppContext) -> bool {
+    let view = f.view(cx);
+    cx.update(|cx| {
+        let gates = view.read(cx).gates(cx);
+        let open = gates
+            .iter()
+            .find(|(_, a)| a.name() == "tessera::OpenTopInSearch");
+        open.unwrap().0
+    })
+}
+
+#[gpui_kit::test]
+async fn open_in_search_has_its_own_chord(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![popular()]).await;
+    let (events, _sub) = top_row(&f, cx);
+    assert!(open_is_gated(&f, cx));
+    f.click(cx, "analytics.top.row.shoes");
+    assert!(!open_is_gated(&f, cx));
+    press(&f, cx, OPEN_TOP);
+    assert_eq!(*events.lock().unwrap(), [true]);
+}
+
+#[gpui_kit::test]
+async fn the_form_of_a_new_rule_opens_no_stale_row(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![popular()]).await;
+    let (events, _sub) = top_row(&f, cx);
+    f.click(cx, "analytics.top.row.shoes");
+    f.click(cx, "analytics.new");
+    assert!(open_is_gated(&f, cx));
+    press(&f, cx, OPEN_TOP);
+    assert!(events.lock().unwrap().is_empty());
+    // The chord of the Search tab works here too.
+    press(&f, cx, OPEN_SEARCH);
+    assert_eq!(*events.lock().unwrap(), [false]);
 }
 
 #[gpui_kit::test]

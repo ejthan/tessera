@@ -1705,8 +1705,14 @@ pub struct FakeAdmin {
     pub events: Mutex<Vec<Value>>,
     /// What `top_documents` answers.
     pub top: Mutex<String>,
+    /// `save_rule` waits for this before it answers.
+    pub save_hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// The dictionaries on the server.
     pub dictionaries: Mutex<Vec<tessera_client::StemmingDictionary>>,
+    /// `dictionaries` fails with this status and Typesense message.
+    pub fail_dictionaries: Mutex<Option<(u16, String)>>,
+    /// `import_dictionary` fails with this.
+    pub fail_import: Mutex<Option<Error>>,
     /// What `read_dictionary_file` answers.
     pub file: Mutex<Option<Result<Vec<tessera_client::StemmingWord>, DictionaryFileError>>>,
     /// What `import_dictionary` answers, instead of nothing wrong.
@@ -1841,7 +1847,13 @@ impl AdminBackend for FakeAdminBackend {
                 None => Err(http_error((404, "Rule not found".into()))),
             },
         };
-        Box::pin(async move { answer })
+        let hold = self.0.save_hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
     }
 
     fn delete_rule(
@@ -1901,7 +1913,8 @@ impl AdminBackend for FakeAdminBackend {
     ) -> tessera_app::collections::BoxFuture<Result<Vec<String>, Error>> {
         let all = self.0.dictionaries.lock().unwrap();
         let ids = all.iter().map(|d| d.id.clone()).collect();
-        Box::pin(async move { Ok(ids) })
+        let fail = self.0.fail_dictionaries.lock().unwrap().clone();
+        Box::pin(async move { fail.map_or(Ok(ids), |e| Err(http_error(e))) })
     }
 
     fn dictionary(
@@ -1938,6 +1951,9 @@ impl AdminBackend for FakeAdminBackend {
             .lock()
             .unwrap()
             .push(format!("import {id} {}", words.len()));
+        if let Some(e) = self.0.fail_import.lock().unwrap().take() {
+            return Box::pin(async move { Err(e) });
+        }
         let mut all = self.0.dictionaries.lock().unwrap();
         if !all.iter().any(|d| d.id == id) {
             all.push(tessera_client::StemmingDictionary {
@@ -2193,6 +2209,7 @@ pub const NEW_DOCUMENT: &str = key("cmd-shift-n", "ctrl-shift-n");
 pub const SAVE_MODE: &str = key("cmd-shift-m", "ctrl-shift-m");
 pub const REVERT: &str = key("cmd-shift-r", "ctrl-shift-r");
 pub const OPEN_SEARCH: &str = key("cmd-shift-e", "ctrl-shift-e");
+pub const OPEN_TOP: &str = key("cmd-alt-g", "ctrl-alt-g");
 pub const OPEN_HISTORY: &str = key("cmd-shift-h", "ctrl-shift-h");
 pub const OPEN_SAVED: &str = key("cmd-o", "ctrl-o");
 pub const SAVE_QUERY: &str = key("cmd-s", "ctrl-s");

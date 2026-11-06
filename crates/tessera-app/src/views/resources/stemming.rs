@@ -58,7 +58,6 @@ pub struct StemmingView {
     words: Entity<ResourceList>,
     /// The first answer arrived.
     loaded: bool,
-    ids: Vec<String>,
     list_error: Option<SharedString>,
     load_task: Option<Task<()>>,
     /// The dictionary the words belong to.
@@ -89,7 +88,6 @@ impl StemmingView {
             list,
             words: cx.new(|cx| ResourceList::new("stemming.words", WORD_COLUMNS, window, cx)),
             loaded: false,
-            ids: Vec::new(),
             list_error: None,
             load_task: None,
             followed: None,
@@ -132,7 +130,6 @@ impl StemmingView {
                             warning: None,
                         });
                         let rows = rows.collect();
-                        this.ids = ids;
                         this.list.update(cx, |l, cx| l.set_rows(rows, cx));
                     }
                     Err(e) => {
@@ -202,12 +199,10 @@ impl StemmingView {
     }
 
     fn ask_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (selected, ids) = (self.selected(cx), self.ids.clone());
+        let selected = self.selected(cx);
         let connection = self.connection.clone();
         let this = cx.entity().downgrade();
-        self.dialog = Some(StemmingDialog::open(
-            this, connection, selected, ids, window, cx,
-        ));
+        self.dialog = Some(StemmingDialog::open(this, connection, selected, window, cx));
     }
 
     fn ask_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {

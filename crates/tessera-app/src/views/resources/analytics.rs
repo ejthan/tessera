@@ -27,6 +27,7 @@ use tessera_core::analytics::{
 use tessera_core::relevance::param_safe;
 use tessera_core::search::params::SearchDraft;
 use tessera_core::search::results::parse_result;
+use tessera_widgets::confirm;
 use tessera_widgets::json_editor::JsonEditor;
 
 use super::stopwords::words_of;
@@ -361,11 +362,49 @@ impl AnalyticsView {
         self.rules.iter().find(|r| text_of(r, "name") == name)
     }
 
+    /// Whether the form differs from what it showed last.
+    fn dirty(&self, cx: &App) -> bool {
+        matches!(self.pane, Pane::New | Pane::Edit(_)) && self.form(cx) != self.draft
+    }
+
+    /// Runs `then`, after a Discard confirmation while the form holds unsaved input.
+    fn discarding(
+        &mut self,
+        then: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.dirty(cx) {
+            return then(self, window, cx);
+        }
+        let view = cx.entity().downgrade();
+        confirm::open(
+            t!("analytics.discard.title").to_string(),
+            t!("analytics.discard.body").to_string(),
+            t!("analytics.discard.confirm").to_string(),
+            move |window, cx| {
+                view.update(cx, |this, cx| then(this, window, cx)).ok();
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Whether the form edits a rule the server still has.
+    fn edits_a_known_rule(&self) -> bool {
+        let Pane::Edit(name) = &self.pane else {
+            return false;
+        };
+        self.rules.iter().any(|r| text_of(r, "name") == name)
+    }
+
     /// A newly selected row replaces the form.
     fn follow_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.notify();
         let Some(rule) = self.selected_rule(cx).cloned() else {
-            if self.pane != Pane::New {
+            // A filter hid the row: the input stays until the row is back.
+            let keep = self.pane == Pane::New || (self.edits_a_known_rule() && self.dirty(cx));
+            if !keep {
                 self.pane = Pane::Empty;
                 self.followed = None;
             }
@@ -375,20 +414,39 @@ impl AnalyticsView {
         if self.followed.as_ref() == Some(&name) {
             return;
         }
-        self.followed = Some(name.clone());
+        if self.dirty(cx) {
+            // Until Discard, the row stays the one in the form: Delete acts on the row.
+            let shown = self.followed.clone();
+            self.list.update(cx, |l, cx| l.select(shown, cx));
+        }
+        let follow = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            this.followed = Some(name.clone());
+            this.list
+                .update(cx, |l, cx| l.select(Some(name.clone()), cx));
+            this.show_rule(&rule, window, cx);
+        };
+        self.discarding(follow, window, cx);
+    }
+
+    fn show_rule(
+        &mut self,
+        rule: &Map<String, Value>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.error = None;
         self.problems.clear();
         self.test_note = None;
         self.flush_note = None;
-        match RuleDraft::from_rule(&rule) {
+        match RuleDraft::from_rule(rule) {
             Some(draft) => {
-                self.pane = Pane::Edit(name);
+                self.pane = Pane::Edit(text_of(rule, "name").to_string());
                 self.show(draft, window, cx);
                 self.load_top(cx);
             }
             None => {
                 self.pane = Pane::Unknown;
-                let text = serde_json::to_string_pretty(&rule).unwrap_or_default();
+                let text = serde_json::to_string_pretty(rule).unwrap_or_default();
                 self.json.update(cx, |j, cx| j.set_text(&text, window, cx));
             }
         }
@@ -462,6 +520,10 @@ impl AnalyticsView {
     }
 
     fn ask_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.discarding(Self::start_new, window, cx);
+    }
+
+    fn start_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pane = Pane::New;
         self.followed = None;
         self.error = None;
@@ -531,7 +593,7 @@ impl AnalyticsView {
         let view = cx.entity();
         self.connection.update(cx, |c, cx| {
             c.ensure_writable(window, cx, move |_, cx| {
-                send_save(&view, editing.clone(), draft.name.clone(), body.clone(), cx);
+                send_save(&view, editing, draft, body, cx);
             });
         });
     }
@@ -565,6 +627,8 @@ impl AnalyticsView {
 
     /// Reads the destination of the rule in the form.
     fn load_top(&mut self, cx: &mut Context<Self>) {
+        // A slower answer about the rule shown before must not land here.
+        self.top_task = None;
         self.top.update(cx, |l, cx| l.set_rows(Vec::new(), cx));
         self.top_error = None;
         let draft = self.draft.clone();
@@ -598,14 +662,18 @@ impl AnalyticsView {
         }));
     }
 
-    fn open_in_search(&mut self, cx: &mut Context<Self>) {
-        if !matches!(
+    /// The destination row "Open in search" acts on.
+    fn top_query(&self, cx: &App) -> Option<String> {
+        let query_rule = matches!(
             self.draft.rule_type,
             RuleType::PopularQueries | RuleType::NohitsQueries
-        ) {
-            return;
-        }
-        let Some(q) = self.top.read(cx).selected(cx) else {
+        );
+        let shown = query_rule && matches!(self.pane, Pane::Edit(_));
+        shown.then(|| self.top.read(cx).selected(cx)).flatten()
+    }
+
+    fn open_in_search(&mut self, cx: &mut Context<Self>) {
+        let Some(q) = self.top_query(cx) else {
             return;
         };
         let mut draft = SearchDraft::new(&self.draft.collection);
@@ -668,7 +736,10 @@ impl AnalyticsView {
 
     /// Actions with no target now, for [`gated`](crate::actions::gated).
     pub fn gates(&self, cx: &App) -> Vec<(bool, &'static dyn Action)> {
-        vec![(self.selected_rule(cx).is_none(), &DeleteResource)]
+        vec![
+            (self.selected_rule(cx).is_none(), &DeleteResource),
+            (self.top_query(cx).is_none(), &OpenTopInSearch),
+        ]
     }
 
     fn analytics_button(
@@ -865,7 +936,7 @@ impl AnalyticsView {
         let (danger, muted) = (theme.danger, theme.muted_foreground);
         let locked = self.connection.read(cx).writes_locked();
         let query_rule = self.draft.rule_type != RuleType::Counter;
-        let picked = self.top.read(cx).selected(cx).is_some();
+        let picked = self.top_query(cx).is_some();
         let title = t!(
             "analytics.top_title",
             destination = self.draft.destination,
@@ -1112,7 +1183,7 @@ impl ErrorSlot for AnalyticsView {
 fn send_save(
     view: &Entity<AnalyticsView>,
     editing: Option<String>,
-    name: String,
+    sent: RuleDraft,
     body: Value,
     cx: &mut App,
 ) {
@@ -1142,10 +1213,15 @@ fn send_save(
             match saved {
                 Ok(_) => {
                     v.error = None;
-                    v.pane = Pane::Empty;
-                    // The form reads again what the server holds now.
-                    v.followed = None;
-                    v.list.update(cx, |l, cx| l.select(Some(name), cx));
+                    let shown = v.pane == Pane::New || v.pane == Pane::Edit(sent.name.clone());
+                    // Otherwise the user moved on while this ran, and keeps what they have.
+                    if shown && v.form(cx) == sent {
+                        v.pane = Pane::Empty;
+                        // The form reads again what the server holds now, not the row it had.
+                        v.followed = None;
+                        v.rules.retain(|r| text_of(r, "name") != sent.name);
+                        v.list.update(cx, |l, cx| l.select(Some(sent.name), cx));
+                    }
                     v.reload(cx);
                 }
                 Err(e) => v.error = Some(error_text(&e, &profile).into()),
@@ -1216,6 +1292,10 @@ fn send_event(
 fn send_flush(view: &Entity<AnalyticsView>, cx: &mut App) {
     let connection = view.read(cx).connection.clone();
     let Some(client) = client_of(&connection, cx) else {
+        view.update(cx, |v, cx| {
+            v.error = Some(t!("status.not_connected").to_string().into());
+            cx.notify();
+        });
         return;
     };
     let profile = connection.read(cx).profile.clone();
