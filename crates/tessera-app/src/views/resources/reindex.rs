@@ -834,7 +834,7 @@ impl ReindexState {
         cx.notify();
     }
 
-    /// Reads both sides and shows the compare.
+    /// Reads both sides and shows the compare. After the switch only the counts change.
     pub fn compare(&mut self, cx: &mut Context<Self>) {
         if self.imported.is_none() {
             return;
@@ -856,7 +856,11 @@ impl ReindexState {
                     Ok(fresh) => {
                         this.old_count = fresh.source;
                         this.stopped = None;
-                        this.step = Step::Compare(this.compared(&fresh));
+                        let compared = this.compared(&fresh);
+                        this.step = match this.step {
+                            Step::Switched(_) => Step::Switched(compared),
+                            _ => Step::Compare(compared),
+                        };
                     }
                     Err(e) => this.compare_failed(this.profile_text(&e, cx), cx),
                 }
