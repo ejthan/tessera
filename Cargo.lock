@@ -9530,8 +9530,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "reqwest",
+ "secrecy",
  "serde_json",
+ "tempfile",
+ "tessera-client",
+ "tessera-core",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

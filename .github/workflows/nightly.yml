@@ -10,6 +10,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Packages GPUI needs on Ubuntu 24.04, as in ci.yml.
+  LINUX_DEPS: >-
+    gcc g++ clang libfontconfig-dev libwayland-dev libwebkit2gtk-4.1-dev
+    libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev
+    vulkan-validationlayers libvulkan1
 
 jobs:
   cluster:
@@ -33,3 +38,36 @@ jobs:
       - run: cargo test -p tessera-client --test cluster --locked -- --ignored --test-threads=1
       - if: always()
         run: docker compose -f dev/docker-compose.yml --profile cluster down -v
+
+  nf3:
+    runs-on: ubuntu-24.04
+    services:
+      typesense:
+        image: typesense/typesense:30.2
+        # Service containers cannot take arguments, so pass them as env.
+        env:
+          TYPESENSE_DATA_DIR: /tmp
+          TYPESENSE_API_KEY: xyz
+          TYPESENSE_ENABLE_CORS: "false"
+        ports:
+          - 8108:8108
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: |
+          # shellcheck disable=SC2086 # the package list is meant to split into words
+          sudo apt-get update && sudo apt-get install -y $LINUX_DEPS xvfb mesa-vulkan-drivers
+      - uses: Swatinem/rust-cache@v2.9.3
+      - name: Wait for health
+        run: |
+          for _ in $(seq 60); do
+            curl -sf "http://localhost:8108/health" >/dev/null && exit 0
+            sleep 1
+          done
+          echo "Typesense did not become healthy" >&2
+          exit 1
+      - run: cargo build --release --locked -p tessera-app
+      # Port 8108 is this job's own container.
+      - name: Measure NF3
+        run: |
+          kb=$(TESSERA_SMOKE=1 xvfb-run -a /usr/bin/time -f %M target/release/tessera 2>&1 >/dev/null | tail -1)
+          cargo run --release --locked -p xtask -- nf3 --url http://localhost:8108 --app-baseline-mb $((kb / 1024))
