@@ -862,3 +862,7 @@ jobs.export_unlisted: "%{count} values were left out: their keys came after the 
 jobs.export_mismatch: "Exported %{docs} of %{expected}. Others may have written at the same time."
 documents.export: "Export"
 palette.action.ExportDocuments: "Export documents"
+schema.infer: "Infer from file"
+schema.infer_replace_title: "Replace the fields?"
+schema.infer_replace_body: "This replaces the fields of this draft."
+schema.infer_replace_action: "Replace"

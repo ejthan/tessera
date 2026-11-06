@@ -11,7 +11,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
 use serde_json::{Value, json};
 use tessera_app::connection::ConnectionState;
@@ -19,7 +19,9 @@ use tessera_app::state::{AppState, OpenCollection};
 use tessera_app::views::schema_dialog::SchemaDialog;
 use tessera_client::{Collection, Field, SchemaChange};
 use tessera_core::profile::Profile;
-use tessera_core::schema::SchemaDraft;
+use tessera_core::schema::{FieldDraft, FieldType, SchemaDraft};
+use tessera_core::transfer::infer::{InferNote, InferredSchema};
+use tessera_core::transfer::source::ReadError;
 use uuid::Uuid;
 
 use common::*;
@@ -37,6 +39,7 @@ struct Fixture {
     conn: Entity<ConnectionState>,
     profile: Profile,
     backend: Arc<FakeData>,
+    fake: Arc<FakeTransfer>,
     opened: Arc<Mutex<Vec<(Uuid, String)>>>,
     _rt: tokio::runtime::Runtime,
 }
@@ -46,6 +49,7 @@ impl Fixture {
     async fn new(cx: &mut TestAppContext, read_only: bool) -> Self {
         fake_connector(cx, |p| Ok(server_for(p)));
         let backend = fake_backend(cx, Some((vec![books()], Vec::new())));
+        let fake = fake_transfer(cx);
         let (staging, prod, secrets) = two_profiles();
         let profile = if read_only { prod } else { staging };
         let (handle, state, rt) = open_app(cx, vec![profile.clone()], secrets);
@@ -70,6 +74,7 @@ impl Fixture {
             conn,
             profile,
             backend,
+            fake,
             opened,
             _rt: rt,
         }
@@ -1043,4 +1048,186 @@ async fn escape_in_review_goes_back(cx: &mut TestAppContext) {
     f.act(cx, |window, cx| window.press("escape", cx));
     wait_for_element(cx, f.handle, "schema.submit".into(), false).await;
     assert!(f.updates().is_empty());
+}
+
+/// A proposal with a field that may be a `geopoint`.
+fn inferred() -> InferredSchema {
+    InferredSchema {
+        fields: vec![
+            FieldDraft::new("title", FieldType::String),
+            FieldDraft::new("place", FieldType::FloatArray),
+        ],
+        nested: false,
+        notes: vec![
+            InferNote::MaybeGeopoint("place".into()),
+            InferNote::MixedTypes("title".into()),
+        ],
+        sampled: 42,
+    }
+}
+
+impl Fixture {
+    fn has(&self, cx: &mut TestAppContext, id: &'static str) -> bool {
+        self.query(cx, |w| w.try_find(id).is_some())
+    }
+
+    /// Clicks Infer from file and answers the picker with `path`, or cancels it.
+    async fn infer_from(&self, cx: &mut TestAppContext, path: Option<std::path::PathBuf>) {
+        self.act(cx, |window, cx| window.click("schema.infer", cx));
+        let picked = path.is_some();
+        cx.simulate_path_prompt_response(move |_| path.map(|p| vec![p]));
+        cx.run_until_parked();
+        if picked {
+            // The head of the file is read on tokio's blocking pool.
+            let fake = self.fake.clone();
+            cx.wait_for(
+                self.handle.into(),
+                Duration::from_millis(5000),
+                move |_, _| !fake.infers.lock().unwrap().is_empty(),
+            )
+            .await;
+        }
+        self.settle(cx);
+    }
+
+    fn file(&self) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.jsonl");
+        std::fs::write(&path, b"{}\n").unwrap();
+        (dir, path)
+    }
+
+    fn field_names(&self, cx: &mut TestAppContext, dialog: &Entity<SchemaDialog>) -> Vec<String> {
+        let json = self.json(cx, dialog);
+        let fields = json["fields"].as_array().unwrap();
+        fields
+            .iter()
+            .map(|f| f["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+}
+
+#[gpui_kit::test]
+async fn infer_button_shows_in_create_and_clone_not_in_edit(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    f.create(cx);
+    assert!(f.has(cx, "schema.infer"));
+    f.act(cx, |window, cx| window.press("escape", cx));
+    f.clone_of(cx, books());
+    assert!(f.has(cx, "schema.infer"));
+    f.act(cx, |window, cx| window.press("escape", cx));
+    f.edit_of(cx, books(), vec![books()]);
+    assert!(!f.has(cx, "schema.infer"));
+}
+
+#[gpui_kit::test]
+async fn infer_fills_the_form_and_the_json_tab(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    *f.fake.infer.lock().unwrap() = Some(Ok(inferred()));
+    let dialog = f.create(cx);
+    let (_dir, path) = f.file();
+    f.infer_from(cx, Some(path.clone())).await;
+    assert_eq!(f.field_names(cx, &dialog), ["title", "place"]);
+    assert_eq!(f.json(cx, &dialog)["fields"][1]["type"], "float[]");
+    // The form follows too.
+    f.query(cx, |w| {
+        assert_eq!(w.find("schema.field.0.name").value(), Some("title"));
+        assert_eq!(w.find("schema.field.1.name").value(), Some("place"));
+    });
+    let infers = f.fake.infers.lock().unwrap();
+    assert_eq!(
+        infers[0].0,
+        tessera_core::transfer::source::Source::File(path)
+    );
+}
+
+#[gpui_kit::test]
+async fn name_is_kept(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    *f.fake.infer.lock().unwrap() = Some(Ok(inferred()));
+    let dialog = f.create(cx);
+    f.act(cx, |window, cx| window.input("novels", cx));
+    let (_dir, path) = f.file();
+    f.infer_from(cx, Some(path)).await;
+    assert_eq!(f.json(cx, &dialog)["name"], "novels");
+    assert_eq!(f.field_names(cx, &dialog), ["title", "place"]);
+}
+
+#[gpui_kit::test]
+async fn nonempty_draft_asks_before_replacing_with_focus_on_cancel(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    *f.fake.infer.lock().unwrap() = Some(Ok(inferred()));
+    let dialog = f.clone_of(cx, books());
+    let (_dir, path) = f.file();
+    f.infer_from(cx, Some(path)).await;
+    assert_eq!(
+        f.field_names(cx, &dialog),
+        ["title", "embedding"],
+        "not yet"
+    );
+    assert_eq!(
+        f.label_of(cx, "confirm.body"),
+        "This replaces the fields of this draft."
+    );
+    let focused = f.query(cx, |w| w.find("confirm.cancel").focused());
+    assert_eq!(focused, Some(true));
+    f.act(cx, |window, cx| window.click("confirm.ok", cx));
+    assert_eq!(f.field_names(cx, &dialog), ["title", "place"]);
+    assert_eq!(f.json(cx, &dialog)["name"], "books_copy");
+}
+
+#[gpui_kit::test]
+async fn declining_keeps_the_draft(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    *f.fake.infer.lock().unwrap() = Some(Ok(inferred()));
+    let dialog = f.clone_of(cx, books());
+    let (_dir, path) = f.file();
+    f.infer_from(cx, Some(path)).await;
+    f.act(cx, |window, cx| window.click("confirm.cancel", cx));
+    assert_eq!(f.field_names(cx, &dialog), ["title", "embedding"]);
+    assert!(
+        !f.has(cx, "transfer.infer.note.0"),
+        "no notes of a draft not taken"
+    );
+}
+
+#[gpui_kit::test]
+async fn read_error_is_inline(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    *f.fake.infer.lock().unwrap() = Some(Err(ReadError::Io("disk gone".into())));
+    let dialog = f.create(cx);
+    let (_dir, path) = f.file();
+    f.infer_from(cx, Some(path)).await;
+    let text = f.label_of(cx, "schema.infer_error");
+    assert!(text.contains("disk gone"), "{text}");
+    assert_eq!(f.field_names(cx, &dialog), [""], "the draft is as it was");
+}
+
+#[gpui_kit::test]
+async fn notes_show_and_use_geopoint_changes_the_type(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    *f.fake.infer.lock().unwrap() = Some(Ok(inferred()));
+    let dialog = f.create(cx);
+    let (_dir, path) = f.file();
+    f.infer_from(cx, Some(path)).await;
+    assert!(f.label_of(cx, "transfer.infer.note.0").contains("place"));
+    assert!(f.label_of(cx, "transfer.infer.note.1").contains("title"));
+    f.act(cx, |window, cx| {
+        window.click("transfer.infer.use_geopoint.place", cx);
+    });
+    assert_eq!(f.json(cx, &dialog)["fields"][1]["type"], "geopoint");
+    assert!(!f.has(cx, "transfer.infer.use_geopoint.place"));
+    assert!(f.has(cx, "transfer.infer.note.0"), "the other note stays");
+    assert!(f.label_of(cx, "transfer.infer.note.0").contains("title"));
+}
+
+#[gpui_kit::test]
+async fn cancelled_picker_changes_nothing(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = f.create(cx);
+    let before = f.json(cx, &dialog);
+    f.infer_from(cx, None).await;
+    assert_eq!(f.json(cx, &dialog), before);
+    assert!(f.fake.infers.lock().unwrap().is_empty());
+    assert!(!f.has(cx, "schema.infer_error"));
 }

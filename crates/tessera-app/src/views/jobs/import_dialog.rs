@@ -43,6 +43,7 @@ use super::super::overview::grouped;
 use super::super::request_detail::size;
 use super::super::root::RootView;
 use super::super::schema_dialog::SchemaDialog;
+use super::{infer_notes, note, note_owned};
 use crate::actions::{IMPORT_DIALOG, PasteImport, PickImportFile, StartTransfer};
 use crate::collections::CollectionsBackendGlobal;
 use crate::connection::{ConnectionState, long_error_text};
@@ -120,21 +121,6 @@ struct NewTarget {
     task: Option<Task<()>>,
 }
 
-/// The sentence for a note of the inference.
-fn note_text(note: &InferNote) -> String {
-    match note {
-        InferNote::MaybeGeopoint(field) => {
-            t!("transfer.infer.note.maybe_geopoint", field = field)
-        }
-        InferNote::MixedTypes(field) => t!("transfer.infer.note.mixed", field = field),
-        InferNote::EmptyArray(field) => t!("transfer.infer.note.empty_array", field = field),
-        InferNote::OnlyNull(field) => t!("transfer.infer.note.only_null", field = field),
-        InferNote::SkippedName(field) => t!("transfer.infer.note.skipped", field = field),
-        InferNote::NonStringId => t!("transfer.infer.note.non_string_id"),
-    }
-    .to_string()
-}
-
 /// What will be read.
 #[derive(Clone)]
 struct Loaded {
@@ -146,13 +132,13 @@ struct Loaded {
 }
 
 /// Why a path cannot be a source.
-enum Inspect {
+pub(crate) enum Inspect {
     NotAFile,
     Io(String),
 }
 
 /// The size and first bytes of `path`.
-fn inspect(path: &Path) -> Result<(u64, Vec<u8>), Inspect> {
+pub(crate) fn inspect(path: &Path) -> Result<(u64, Vec<u8>), Inspect> {
     let meta = std::fs::metadata(path).map_err(|e| Inspect::Io(e.to_string()))?;
     if !meta.is_file() {
         return Err(Inspect::NotAFile);
@@ -1114,32 +1100,10 @@ impl DocumentImportDialog {
                 .child(note("transfer.infer.fields", fields, muted))
                 .child(note("transfer.infer.sampled", sampled, muted));
         }
-        for (n, item) in new.notes.iter().enumerate() {
-            let id = format!("transfer.infer.note.{n}");
-            let row = h_flex().gap_2().items_center().child(note_owned(
-                id,
-                note_text(item),
-                cx.theme().warning,
-            ));
-            let row = match item {
-                InferNote::MaybeGeopoint(field) => {
-                    let field = field.clone();
-                    row.child(
-                        Button::new(SharedString::from(format!(
-                            "transfer.infer.use_geopoint.{field}"
-                        )))
-                        .ghost()
-                        .xsmall()
-                        .label(t!("transfer.infer.use_geopoint").to_string())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.use_geopoint(&field, cx);
-                        })),
-                    )
-                }
-                _ => row,
-            };
-            lines = lines.child(row);
-        }
+        let notes = infer_notes(&new.notes, cx, |this, field, _, cx| {
+            this.use_geopoint(field, cx);
+        });
+        lines = lines.children(notes);
         let errors = self.draft_errors();
         if !errors.is_empty() {
             lines = lines.child(note(
@@ -1248,21 +1212,6 @@ fn field_label(key: &'static str) -> impl IntoElement {
         .w(px(90.))
         .text_sm()
         .child(t!(key).to_string())
-}
-
-fn note(id: &'static str, text: String, color: gpui_kit::Hsla) -> impl IntoElement {
-    note_owned(id.to_string(), text, color)
-}
-
-fn note_owned(id: String, text: String, color: gpui_kit::Hsla) -> impl IntoElement {
-    let text = SharedString::from(text);
-    div()
-        .id(SharedString::from(id))
-        .test_support()
-        .aria_label(text.clone())
-        .text_xs()
-        .text_color(color)
-        .child(text)
 }
 
 impl Render for DocumentImportDialog {

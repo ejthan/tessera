@@ -862,3 +862,7 @@ jobs.export_unlisted: "%{count} Werte fehlen: Ihre Schlüssel kamen nach der Kop
 jobs.export_mismatch: "%{docs} von %{expected} exportiert. Andere haben womöglich gleichzeitig geschrieben."
 documents.export: "Exportieren"
 palette.action.ExportDocuments: "Dokumente exportieren"
+schema.infer: "Aus Datei ableiten"
+schema.infer_replace_title: "Felder ersetzen?"
+schema.infer_replace_body: "Das ersetzt die Felder dieses Entwurfs."
+schema.infer_replace_action: "Ersetzen"

@@ -118,7 +118,8 @@ gpui_kit::actions!(
         PickImportFile,
         PasteImport,
         StartTransfer,
-        ExportDocuments
+        ExportDocuments,
+        InferFromFile
     ]
 );
 
@@ -593,6 +594,7 @@ pub const PALETTE_HIDDEN: &[&str] = &[
     "tessera::PickImportFile",
     "tessera::PasteImport",
     "tessera::StartTransfer",
+    "tessera::InferFromFile",
 ];
 
 /// The locale key of the label of action `name`, when the palette lists it.
@@ -830,6 +832,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SAVE, StartTransfer, Some(IMPORT_DIALOG)),
         KeyBinding::new(SAVE, StartTransfer, Some(IMPORT_INPUT)),
         KeyBinding::new(EXPORT_DOCUMENTS, ExportDocuments, Some(COLLECTION)),
+        KeyBinding::new(OPEN_SAVED, InferFromFile, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SAVE, StartTransfer, Some(EXPORT_DIALOG)),
         KeyBinding::new(SAVE, StartTransfer, Some(EXPORT_INPUT)),
         KeyBinding::new(CANCEL_JOB, CancelJob, Some(JOBS)),
