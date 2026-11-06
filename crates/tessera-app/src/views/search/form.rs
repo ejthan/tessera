@@ -383,6 +383,10 @@ impl SearchForm {
             self.chips.remove(index);
             self.sync_picker(window, cx);
             self.write_chips(cx);
+            match self.chips.len().checked_sub(1) {
+                Some(last) => self.focus_chip(index.min(last), window, cx),
+                None => self.chip_picker.update(cx, |p, cx| p.focus(window, cx)),
+            }
         }
     }
 

@@ -12,6 +12,8 @@ use serde_json::{Map, Value};
 /// Joins the highlighted elements of an array field.
 const ARRAY_JOIN: &str = " · ";
 
+/// Most bytes of a line of a hit.
+pub const LINE_MAX: usize = 512;
 /// Lines a hit without highlights shows instead.
 const FALLBACK_LINES: usize = 3;
 
@@ -197,13 +199,28 @@ pub fn marks(snippet: &str, tags: (&str, &str)) -> (String, Vec<Range<usize>>) {
     (text, ranges)
 }
 
-fn line(field: &str, snippet: &str, tags: (&str, &str)) -> HitLine {
-    let (text, marks) = marks(snippet, tags);
+/// A line of `text`, cut at [`LINE_MAX`] on a character boundary with its marks clipped: a
+/// field can be any length, and the UI thread shapes each visible line in full.
+fn capped(field: &str, mut text: String, mut marks: Vec<Range<usize>>) -> HitLine {
+    if text.len() > LINE_MAX {
+        let cut = text.floor_char_boundary(LINE_MAX);
+        text.truncate(cut);
+        text.push('…');
+        marks.retain(|m| m.start < cut);
+        for mark in &mut marks {
+            mark.end = mark.end.min(cut);
+        }
+    }
     HitLine {
         field: field.to_string(),
         text,
         marks,
     }
+}
+
+fn line(field: &str, snippet: &str, tags: (&str, &str)) -> HitLine {
+    let (text, marks) = marks(snippet, tags);
+    capped(field, text, marks)
 }
 
 /// Walks `highlight`: `{"snippet"}` is a line, a list is an array field whose matched
@@ -258,10 +275,9 @@ fn hit(raw: RawHit, tags: (&str, &str)) -> Hit {
             .iter()
             .filter_map(|(k, v)| Some((k, v.as_str()?)))
             .take(FALLBACK_LINES)
-            .map(|(field, text)| HitLine {
-                field: field.clone(),
-                text: text.to_string(),
-                marks: Vec::new(),
+            .map(|(field, text)| {
+                let text = &text[..text.floor_char_boundary(LINE_MAX + 1)];
+                capped(field, text.to_string(), Vec::new())
             })
             .collect();
     }

@@ -83,6 +83,7 @@ impl HitsView {
         self.detail = None;
         self.match_info = None;
         self.detail_task = None;
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
     }
 

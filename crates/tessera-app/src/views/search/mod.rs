@@ -6,6 +6,7 @@ pub mod form;
 pub mod hits;
 mod results;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
@@ -36,6 +37,7 @@ use tessera_widgets::{BodyView, JsonEditor, JsonEditorEvent};
 use self::form::{FormEvent, SearchForm};
 use self::hits::HitsView;
 use super::dock::view_tab;
+use super::env_badge;
 use crate::actions::{
     FocusQuery, NextResultPage, PreviousResultPage, RunSearch, ShowForm, ShowHits, ShowJson,
     ShowRawResult, ToggleInstant, WORKBENCH,
@@ -110,7 +112,8 @@ pub struct SearchWorkbench {
     view: ResultView,
     form: Entity<SearchForm>,
     json: Entity<JsonEditor>,
-    /// Why the JSON text is not used; the map stays and Run is disabled.
+    /// Why the JSON text is not used; the map stays, Run is disabled and the text is kept in
+    /// the editor, in either mode, until it parses.
     json_error: Option<SharedString>,
     collection: Entity<SelectState<Vec<String>>>,
     /// The collection list this view took last.
@@ -118,6 +121,8 @@ pub struct SearchWorkbench {
     schema: Option<Collection>,
     hits: Entity<HitsView>,
     raw: Entity<BodyView>,
+    /// The last response, until the Raw tab shows it.
+    raw_pending: Option<Arc<str>>,
     result: Option<SearchResult>,
     error: Option<SharedString>,
     running: bool,
@@ -173,6 +178,7 @@ impl SearchWorkbench {
                     |this, _, event: &SelectEvent<Vec<String>>, window, cx| {
                         if let SelectEvent::Confirm(Some(name)) = event {
                             this.drafts[this.active].collection = name.clone();
+                            this.drop_page(window, cx);
                             this.sync_schema(window, cx);
                             this.changed(window, cx);
                         }
@@ -194,6 +200,7 @@ impl SearchWorkbench {
             schema: None,
             hits,
             raw,
+            raw_pending: None,
             result: None,
             error: None,
             running: false,
@@ -223,6 +230,11 @@ impl SearchWorkbench {
         self.active = 0;
         self.union = union;
         self.instant_task = None;
+        // Its answer would show under drafts that did not ask for it.
+        self.run_task = None;
+        self.generation += 1;
+        self.running = false;
+        self.json_error = None;
         self.sync_collection(window, cx);
         self.sync_schema(window, cx);
         self.sync_editors(window, cx);
@@ -321,6 +333,8 @@ impl SearchWorkbench {
         let params = self.draft().params.clone();
         match self.mode {
             Mode::Form => self.form.update(cx, |f, cx| f.load(&params, window, cx)),
+            // The user's text outranks the map until it parses.
+            Mode::Json if self.json_error.is_some() => {}
             Mode::Json => self
                 .json
                 .update(cx, |j, cx| j.set_text(&params_text(&params), window, cx)),
@@ -348,7 +362,18 @@ impl SearchWorkbench {
     ) {
         if self.draft().params.get(key) != value.as_ref() {
             self.put_param(key, value);
+            if key != "page" {
+                self.drop_page(window, cx);
+            }
             self.changed(window, cx);
+        }
+    }
+
+    /// Back to the first page: a page says nothing about another query's result.
+    fn drop_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.draft().params.contains_key("page") {
+            self.put_param("page", None);
+            self.sync_editors(window, cx);
         }
     }
 
@@ -391,11 +416,22 @@ impl SearchWorkbench {
         side_effects(&self.draft().params, self.schema.as_ref())
     }
 
-    /// Instant search would call a model or store something.
+    /// The schema is unknown, so `query_by` may name a field that embeds remotely.
+    fn schema_unknown(&self) -> bool {
+        self.schema.is_none() && self.draft().params.contains_key("query_by")
+    }
+
+    /// Instant search would, or might, call a model or store something.
     fn instant_paused(&self) -> bool {
-        self.side_effects()
-            .iter()
-            .any(|e| *e != SideEffect::Analytics)
+        self.schema_unknown()
+            || self
+                .side_effects()
+                .iter()
+                .any(|e| *e != SideEffect::Analytics)
+    }
+
+    fn instant_allowed(&self) -> bool {
+        self.instant && !self.run_blocked() && !self.instant_paused()
     }
 
     /// There is nothing to send: no collection, or JSON that does not parse.
@@ -408,15 +444,20 @@ impl SearchWorkbench {
     fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.instant_task = None;
         cx.notify();
-        if !self.instant || self.run_blocked() || self.instant_paused() {
+        if !self.instant_allowed() {
             return;
         }
         self.instant_task = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(INSTANT_DEBOUNCE_MS))
                 .await;
-            this.update_in(cx, |this, window, cx| this.run(window, cx))
-                .ok();
+            // The schema may have arrived during the wait.
+            this.update_in(cx, |this, window, cx| {
+                if this.instant_allowed() {
+                    this.run(window, cx);
+                }
+            })
+            .ok();
         }));
     }
 
@@ -484,8 +525,8 @@ impl SearchWorkbench {
                 self.hits
                     .update(cx, |h, cx| h.set_result(&answer.result, cx));
                 self.result = Some(answer.result);
-                self.raw
-                    .update(cx, |r, cx| r.set_body(answer.text, window, cx));
+                self.raw_pending = Some(answer.text);
+                self.fill_raw(window, cx);
             }
             Err(error) => {
                 let profile = &self.connection.read(cx).profile;
@@ -495,12 +536,27 @@ impl SearchWorkbench {
         cx.notify();
     }
 
+    /// Hands the last response to the Raw tab, once it shows: an editor per answer would be
+    /// heavy at instant rate.
+    fn fill_raw(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view == ResultView::Raw
+            && let Some(text) = self.raw_pending.take()
+        {
+            self.raw.update(cx, |r, cx| r.set_body(text, window, cx));
+        }
+    }
+
+    fn show_view(&mut self, view: ResultView, window: &mut Window, cx: &mut Context<Self>) {
+        self.view = view;
+        self.fill_raw(window, cx);
+        cx.notify();
+    }
+
     fn show(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode == mode {
             return;
         }
         self.mode = mode;
-        self.json_error = None;
         // Focus left in the editor going away would leave no key context behind.
         self.focus_handle.focus(window, cx);
         self.sync_editors(window, cx);
@@ -513,6 +569,8 @@ impl SearchWorkbench {
     }
 
     fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let needs_unlock = self.side_effects().contains(&SideEffect::Conversation)
+            && self.connection.read(cx).writes_locked();
         h_flex()
             .flex_none()
             .gap_3()
@@ -533,6 +591,7 @@ impl SearchWorkbench {
                     .small()
                     .label(t!("search.run").to_string())
                     .children(Kbd::binding_for_action(&RunSearch, Some(WORKBENCH), window))
+                    .children(needs_unlock.then(|| env_badge::lock("search.run", false, cx)))
                     .disabled(self.run_blocked())
                     .on_click(cx.listener(|this, _, window, cx| this.run(window, cx))),
             )
@@ -561,7 +620,9 @@ impl SearchWorkbench {
         if !self.instant {
             return None;
         }
-        let (id, key) = if self.instant_paused() {
+        let (id, key) = if self.schema_unknown() {
+            ("search.instant.paused", "search.instant_paused_schema")
+        } else if self.instant_paused() {
             ("search.instant.paused", "search.instant_paused")
         } else if self.side_effects().contains(&SideEffect::Analytics) {
             ("search.instant.analytics", "search.instant_analytics")
@@ -613,10 +674,11 @@ impl SearchWorkbench {
     }
 
     fn draft_pane(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let json_error = self
-            .json_error
-            .clone()
-            .filter(|_| self.json.read(cx).error().is_none());
+        let json_error = self.json_error.clone().and_then(|error| match self.mode {
+            // The form hides the editor, whose error line says the rest.
+            Mode::Form => Some(t!("search.json_pending").to_string().into()),
+            Mode::Json => self.json.read(cx).error().is_none().then_some(error),
+        });
         let danger = cx.theme().danger;
         let on_json = self.mode == Mode::Json;
         v_flex()
@@ -698,13 +760,13 @@ impl SearchWorkbench {
                 TabBar::new("search.views")
                     .underline()
                     .selected_index(usize::from(on_raw))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.view = if *ix == 0 {
+                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                        let view = if *ix == 0 {
                             ResultView::Hits
                         } else {
                             ResultView::Raw
                         };
-                        cx.notify();
+                        this.show_view(view, window, cx);
                     }))
                     .child(view_tab(
                         "search.view.hits",
@@ -767,13 +829,11 @@ impl Render for SearchWorkbench {
             .on_action(
                 cx.listener(|this, _: &ShowJson, window, cx| this.show(Mode::Json, window, cx)),
             )
-            .on_action(cx.listener(|this, _: &ShowHits, _, cx| {
-                this.view = ResultView::Hits;
-                cx.notify();
+            .on_action(cx.listener(|this, _: &ShowHits, window, cx| {
+                this.show_view(ResultView::Hits, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ShowRawResult, _, cx| {
-                this.view = ResultView::Raw;
-                cx.notify();
+            .on_action(cx.listener(|this, _: &ShowRawResult, window, cx| {
+                this.show_view(ResultView::Raw, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleInstant, _, cx| this.toggle_instant(cx)))
             .on_action(cx.listener(|this, _: &FocusQuery, window, cx| this.focus_query(window, cx)))

@@ -22,6 +22,7 @@ use tessera_client::Collection;
 use tessera_core::profile::{Environment, Profile};
 use tessera_core::search::params::SearchDraft;
 use tessera_core::search::results::SearchResult;
+use tessera_widgets::Shown;
 
 use common::*;
 
@@ -38,6 +39,7 @@ struct Fixture {
     handle: WindowHandle<Root>,
     state: Entity<AppState>,
     search: Arc<FakeSearch>,
+    backend: Arc<FakeData>,
     id: uuid::Uuid,
     _rt: tokio::runtime::Runtime,
 }
@@ -57,7 +59,7 @@ impl Fixture {
     }
 
     async fn connected(cx: &mut TestAppContext, profile: Profile) -> Self {
-        fake_backend(cx, Some((vec![books()], vec![])));
+        let backend = fake_backend(cx, Some((vec![books()], vec![])));
         fake_documents(cx);
         let search = install_search_fake(cx);
         let id = profile.id;
@@ -76,6 +78,7 @@ impl Fixture {
             handle,
             state,
             search,
+            backend,
             id,
             _rt: rt,
         }
@@ -483,6 +486,7 @@ async fn conversation_pauses_instant_and_needs_unlock(cx: &mut TestAppContext) {
     f.wait(cx, 300);
     assert!(f.search.calls().is_empty());
     assert!(f.has(cx, "search.instant.paused"));
+    assert!(f.has(cx, "search.run.readonly"), "Run shows the lock");
 
     f.run(cx);
     assert!(f.has(cx, "danger.input"), "the unlock dialog asks first");
@@ -494,6 +498,7 @@ async fn a_read_only_profile_may_run_a_plain_search(cx: &mut TestAppContext) {
     let mut profile = Profile::new("locked", vec![node()]);
     profile.read_only = true;
     let f = Fixture::with(cx, profile).await;
+    assert!(!f.has(cx, "search.run.readonly"));
     f.run(cx);
     assert_eq!(f.search.calls().len(), 1);
 }
@@ -856,4 +861,153 @@ async fn no_hits_says_what_was_searched(cx: &mut TestAppContext) {
     let text = f.text_of(cx, "search.no_hits");
     assert!(text.contains("No documents match"), "{text}");
     assert!(text.contains("zzz"), "{text}");
+}
+
+/// Opens a draft of `collection` with `query_by` set.
+fn open_query_by(f: &Fixture, cx: &mut TestAppContext, collection: &str, field: &str) {
+    let mut draft = SearchDraft::new(collection);
+    draft.params.insert("query_by".into(), field.into());
+    let id = f.id;
+    cx.update(|cx| {
+        f.state
+            .update(cx, |s, cx| s.open_search(id, Some(draft), cx))
+    });
+    f.settle(cx);
+}
+
+#[gpui_kit::test]
+async fn instant_waits_while_the_schema_is_unknown(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    open_query_by(&f, cx, "not_listed", "embedding");
+    f.fill(cx, "search.param.q", "dune");
+    f.wait(cx, 300);
+    assert!(f.search.calls().is_empty());
+    assert!(f.text_of(cx, "search.instant.paused").contains("schema"));
+    f.run(cx);
+    assert_eq!(f.search.calls().len(), 1, "Run still runs");
+}
+
+#[gpui_kit::test]
+async fn the_timer_rechecks_what_arrived_during_the_wait(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    open_query_by(&f, cx, "books", "title");
+    f.fill(cx, "search.param.q", "dune");
+    let embedded: Collection = serde_json::from_value(json!({"name": "books", "fields": [
+        {"name": "title", "type": "float[]", "num_dim": 3,
+         "embed": {"from": ["x"], "model_config": {"model_name": "openai/m"}}},
+    ]}))
+    .unwrap();
+    *f.backend.data.lock().unwrap() = Some((vec![embedded], vec![]));
+    let conn = cx
+        .update(|cx| f.state.read(cx).connection(f.id, cx))
+        .unwrap();
+    cx.update(|cx| conn.update(cx, |c, cx| c.invalidate_collections(cx)));
+    f.settle(cx);
+    f.wait(cx, 300);
+    assert!(f.search.calls().is_empty());
+}
+
+#[gpui_kit::test]
+async fn bad_json_outlives_a_trip_through_the_form(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.press(cx, SHOW_JSON);
+    f.set_json(cx, "{ typed");
+    f.press(cx, SHOW_FORM);
+    assert!(f.disabled(cx, "search.run"), "Run stays blocked");
+    assert!(f.has(cx, "search.json.error"));
+    f.press(cx, SHOW_JSON);
+    assert_eq!(f.json_text(cx), "{ typed");
+    assert!(f.disabled(cx, "search.run"));
+
+    f.set_json(cx, r#"{"q": "ok"}"#);
+    assert!(!f.disabled(cx, "search.run"));
+    assert_eq!(f.params(cx)["q"], "ok");
+}
+
+#[gpui_kit::test]
+async fn bad_json_disables_facets_and_paging(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.run_with(cx, results_body());
+    f.click(cx, "search.page.next");
+    f.press(cx, SHOW_JSON);
+    f.set_json(cx, "{ typed");
+    assert!(f.disabled(cx, "search.page.next"));
+    assert!(f.disabled(cx, "search.page.previous"));
+    assert!(f.disabled(cx, "search.facet.genre.crime"));
+}
+
+#[gpui_kit::test]
+async fn an_edit_of_another_key_goes_back_to_the_first_page(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.fill(cx, "search.param.page", "5");
+    assert_eq!(f.params(cx)["page"], 5);
+    f.fill(cx, "search.param.q", "narrow");
+    assert!(!f.params(cx).contains_key("page"));
+    let workbench = f.workbench(cx);
+    let page = cx.update(|cx| workbench.read(cx).form().read(cx).input_text("page", cx));
+    assert_eq!(page, "");
+}
+
+#[gpui_kit::test]
+async fn a_page_past_the_end_is_not_a_miss_and_previous_recovers(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.press(cx, SHOW_JSON);
+    f.set_json(cx, r#"{"q": "*", "page": 5}"#);
+    f.press(cx, SHOW_FORM);
+    f.run_with(cx, search_body(3));
+    assert!(!f.has(cx, "search.no_hits"));
+    assert!(f.text_of(cx, "search.past_end").contains('3'));
+    assert!(!f.disabled(cx, "search.page.previous"));
+    f.click(cx, "search.page.previous");
+    assert_eq!(f.params(cx)["page"], 1);
+}
+
+#[gpui_kit::test]
+async fn raw_is_filled_only_when_it_shows(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.run(cx);
+    let workbench = f.workbench(cx);
+    let raw = cx.update(|cx| workbench.read(cx).raw().clone());
+    assert_eq!(cx.update(|cx| raw.read(cx).shown()), Shown::Empty);
+    f.press(cx, SHOW_RAW);
+    assert_eq!(cx.update(|cx| raw.read(cx).shown()), Shown::Highlighted);
+    *f.search.body.lock().unwrap() = search_body(40);
+    f.run(cx);
+    let text = cx.update(|cx| raw.read(cx).text(cx)).unwrap();
+    assert!(
+        text.contains("\"found\": 40"),
+        "a shown tab follows the answers"
+    );
+}
+
+#[gpui_kit::test]
+async fn load_drops_the_running_read(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    let held = f.search.hold_next();
+    f.run(cx);
+    open_query_by(&f, cx, "books", "title");
+    assert!(held.is_closed());
+    assert_eq!(f.result(cx), None);
+}
+
+#[gpui_kit::test]
+async fn removing_the_last_chip_keeps_the_keyboard_in_the_workbench(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.instant_off(cx);
+    f.press(cx, SHOW_JSON);
+    f.set_json(cx, r#"{"q": "*", "query_by": "title"}"#);
+    f.press(cx, SHOW_FORM);
+    let workbench = f.workbench(cx);
+    let form = cx.update(|cx| workbench.read(cx).form().clone());
+    f.act(cx, |window, cx| {
+        form.update(cx, |form, cx| form.focus_chip(0, window, cx))
+    });
+    f.press(cx, "delete");
+    assert!(!f.params(cx).contains_key("query_by"));
+    f.press(cx, SHOW_JSON);
+    assert!(f.has(cx, "json.editor"), "workbench shortcuts still arrive");
 }

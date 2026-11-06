@@ -68,8 +68,12 @@ impl SearchWorkbench {
             return;
         };
         let pages = page_count(result.found, self.per_page());
-        let page = self.page().saturating_add_signed(step);
-        if page >= 1 && page <= pages && page != self.page() {
+        // Clamped: an edit in JSON can leave the draft past the end.
+        let page = self
+            .page()
+            .saturating_add_signed(step)
+            .clamp(1, pages.max(1));
+        if page != self.page() {
             self.write_and_run(&[("page", Some(page.into()))], window, cx);
         }
     }
@@ -106,6 +110,7 @@ impl SearchWorkbench {
         let field = facet.field.clone();
         let field_type = self.field_type(&field);
         let filter = self.filter_text();
+        let blocked = self.json_error.is_some();
         let sampled = facet.sampled.then(|| {
             let note = SharedString::from(t!("search.facet.sampled").to_string());
             div()
@@ -137,7 +142,7 @@ impl SearchWorkbench {
                     .child(
                         Checkbox::new(SharedString::from(id))
                             .checked(facet_active(&filter, &field, value))
-                            .disabled(!writable)
+                            .disabled(!writable || blocked)
                             .label(format!("{value} ({})", grouped(*count)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.toggle_facet(&field, &name, window, cx);
@@ -192,6 +197,7 @@ impl SearchWorkbench {
         if pages == 0 {
             return None;
         }
+        let blocked = self.json_error.is_some();
         Some(
             h_flex()
                 .flex_none()
@@ -209,7 +215,7 @@ impl SearchWorkbench {
                             Some(WORKBENCH),
                             window,
                         ))
-                        .disabled(page <= 1)
+                        .disabled(page <= 1 || blocked)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.turn_page(-1, window, cx);
                         })),
@@ -225,7 +231,7 @@ impl SearchWorkbench {
                             Some(WORKBENCH),
                             window,
                         ))
-                        .disabled(page >= pages)
+                        .disabled(page >= pages || blocked)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.turn_page(1, window, cx);
                         })),
@@ -233,24 +239,27 @@ impl SearchWorkbench {
         )
     }
 
-    /// What was searched, for a result without hits.
+    /// Why the list is empty: nothing matched, or the page lies past the end.
     pub(super) fn no_hits(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let result = self.result.as_ref()?;
         if !result.hits.is_empty() || !result.groups.is_empty() {
             return None;
         }
-        let params = &self.draft().params;
-        let q = value_text(params.get("q"));
+        let q = value_text(self.draft().params.get("q"));
         let filter = self.filter_text();
-        let text = if filter.is_empty() {
-            t!("search.no_hits", q = q)
+        let (id, text) = if result.found > 0 {
+            let found = grouped(result.found);
+            ("search.past_end", t!("search.past_end", found = found))
+        } else if filter.is_empty() {
+            ("search.no_hits", t!("search.no_hits", q = q))
         } else {
-            t!("search.no_hits_filter", q = q, filter = filter)
+            let text = t!("search.no_hits_filter", q = q, filter = filter);
+            ("search.no_hits", text)
         };
         let text = SharedString::from(text.to_string());
         Some(
             div()
-                .id("search.no_hits")
+                .id(id)
                 .test_support()
                 .aria_label(text.clone())
                 .p_3()
