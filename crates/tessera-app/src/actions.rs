@@ -132,7 +132,8 @@ gpui_kit::actions!(
         DeleteResource,
         ReloadResource,
         FocusResourceFilter,
-        SaveResource
+        SaveResource,
+        LeavePreset
     ]
 );
 
@@ -464,6 +465,10 @@ const OPEN_SAVED: &str = "cmd-o";
 #[cfg(not(target_os = "macos"))]
 const OPEN_SAVED: &str = "ctrl-o";
 #[cfg(target_os = "macos")]
+const LEAVE_PRESET: &str = "cmd-shift-g";
+#[cfg(not(target_os = "macos"))]
+const LEAVE_PRESET: &str = "ctrl-shift-g";
+#[cfg(target_os = "macos")]
 const SAVE_QUERY: &str = "cmd-s";
 #[cfg(not(target_os = "macos"))]
 const SAVE_QUERY: &str = "ctrl-s";
@@ -578,6 +583,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     ReloadResource,
     FocusResourceFilter,
     SaveResource,
+    LeavePreset,
     StopWaiting,
     RemoveBodyFile,
     ShowResponseBody,
@@ -872,6 +878,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_HISTORY, OpenHistory, Some(WORKBENCH)),
         KeyBinding::new(OPEN_SAVED, OpenSaved, Some(WORKBENCH)),
         KeyBinding::new(SAVE_QUERY, SaveQuery, Some(WORKBENCH)),
+        KeyBinding::new(LEAVE_PRESET, LeavePreset, Some(WORKBENCH)),
         KeyBinding::new(OPEN_PRESETS, OpenPresets, Some(WORKBENCH)),
         KeyBinding::new(OPEN_EXPORT, OpenExport, Some(WORKBENCH)),
         KeyBinding::new(COPY_DOC_CURL, CopyCurl, Some(WORKBENCH)),

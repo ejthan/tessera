@@ -24,8 +24,8 @@ use tessera_core::relevance::{AliasState, alias_state, name_ok};
 
 use super::super::overview::grouped;
 use super::{
-    Danger, ListRow, ResourceColumn, ResourceList, client_of, confirm_write, dialog_title,
-    empty_state, notice, row_button, toolbar,
+    Danger, ErrorSlot, ListRow, ResourceColumn, ResourceList, client_of, confirm_write,
+    dialog_title, empty_state, notice, report_to, row_button, toolbar,
 };
 use crate::actions::{
     ALIAS_DIALOG, DeleteResource, EditResource, FocusResourceFilter, NewResource, ReloadResource,
@@ -297,14 +297,9 @@ impl Render for AliasesView {
     }
 }
 
-/// Shows a failed write on the view that started it.
-fn report_to(view: WeakEntity<AliasesView>) -> impl Fn(SharedString, &mut App) + 'static {
-    move |text, cx| {
-        view.update(cx, |view, cx| {
-            view.error = Some(text);
-            cx.notify();
-        })
-        .ok();
+impl ErrorSlot for AliasesView {
+    fn error_slot(&mut self) -> &mut Option<SharedString> {
+        &mut self.error
     }
 }
 
@@ -384,8 +379,8 @@ pub struct AliasDialog {
     target: Entity<SelectState<Vec<String>>>,
     /// Repoint of this alias; `None` is New.
     repoint: Option<String>,
-    /// A New named an existing alias: its target, for the Repoint button.
-    existing: Option<String>,
+    /// A New named an existing alias: that name and its target, for the Repoint button.
+    existing: Option<(String, String)>,
     error: Option<SharedString>,
     busy: bool,
     check: Option<Task<()>>,
@@ -511,7 +506,9 @@ impl AliasDialog {
         if self.busy {
             return;
         }
-        let name = self.name.read(cx).value().trim().to_string();
+        // A Repoint keeps the stored name, which may hold spaces at its edges.
+        let typed = self.name.read(cx).value().trim().to_string();
+        let name = self.repoint.clone().unwrap_or(typed);
         let Some(target) = self.target.read(cx).selected_value().cloned() else {
             return self.refuse(t!("aliases.target_required").to_string(), cx);
         };
@@ -567,7 +564,7 @@ impl AliasDialog {
             return self.refuse(t!("aliases.is_collection", name = name).to_string(), cx);
         }
         if let Some(current) = current {
-            self.existing = Some(current.collection_name.clone());
+            self.existing = Some((name.clone(), current.collection_name.clone()));
             let text = t!(
                 "aliases.exists",
                 name = name,
@@ -659,10 +656,9 @@ impl AliasDialog {
 
     /// Turns a New that named an existing alias into its Repoint.
     fn switch_to_repoint(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self.existing.take() else {
+        let Some((name, target)) = self.existing.take() else {
             return;
         };
-        let name = self.name.read(cx).value().trim().to_string();
         window.close_dialog(cx);
         let (view, connection) = (self.view.clone(), self.connection.clone());
         let dialog = Self::open(view.clone(), connection, Some((name, target)), window, cx);

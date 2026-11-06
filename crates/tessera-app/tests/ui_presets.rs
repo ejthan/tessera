@@ -114,6 +114,17 @@ impl Fixture {
         self.settle(cx);
     }
 
+    /// A second collection next to `books`, as the search tab's choice.
+    fn pick_collection(&self, cx: &mut TestAppContext, name: &str) {
+        let workbench = self.workbench(cx);
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            workbench.update(cx, |w, cx| {
+                w.load(vec![SearchDraft::new(name)], false, window, cx);
+            });
+        })
+        .unwrap();
+    }
+
     fn fill(&self, cx: &mut TestAppContext, id: &str, text: &str) {
         self.settle(cx);
         cx.update_window(self.handle.into(), |_, window, cx| {
@@ -305,4 +316,121 @@ async fn leave_keeps_the_drafts(cx: &mut TestAppContext) {
     assert_eq!(draft.params["q"], "dune");
     f.press(cx, SAVE_QUERY);
     assert!(f.has(cx, "search.save.name"));
+}
+
+#[gpui_kit::test]
+async fn an_unedited_wrapper_of_one_search_keeps_its_shape(cx: &mut TestAppContext) {
+    let value = json!({"searches": [{"collection": "films", "q": "dune"}], "union": true});
+    let f = Fixture::new(cx, &[("one", value)]).await;
+    f.click(cx, "presets.row.one");
+    f.press(cx, EDIT);
+    f.press(cx, SAVE_QUERY);
+    let saved = f.saved();
+    assert_eq!(saved[0].1["searches"][0]["collection"], "films");
+    assert_eq!(saved[0].1["searches"][0]["q"], "dune");
+    assert_eq!(saved[0].1["union"], true);
+}
+
+#[gpui_kit::test]
+async fn a_saved_preset_lists_at_once_and_open_reads_it_fresh(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, &[("one", json!({"q": "old"}))]).await;
+    f.press(cx, NEW_DOCUMENT);
+    f.fill(cx, "resources.name", "fresh");
+    f.click(cx, "resources.name.ok");
+    f.press(cx, SAVE_QUERY);
+    f.press(cx, OPEN_PRESETS_TAB);
+    assert!(f.has(cx, "presets.row.fresh"));
+    // Another client changed it after the list loaded.
+    f.search.presets.lock().unwrap()[0].value = json!({"q": "new"});
+    f.click(cx, "presets.row.one");
+    f.press(cx, EDIT);
+    let workbench = f.workbench(cx);
+    let draft = cx.update(|cx| workbench.read(cx).drafts()[0].clone());
+    assert_eq!(draft.params["q"], "new");
+}
+
+#[gpui_kit::test]
+async fn open_says_so_when_the_preset_is_gone(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, &[("one", json!({"q": "a"}))]).await;
+    f.click(cx, "presets.row.one");
+    f.search.presets.lock().unwrap().clear();
+    f.press(cx, EDIT);
+    assert!(f.label(cx, "presets.error").contains("one"));
+    assert_eq!(f.calls(), Vec::<String>::new());
+}
+
+#[gpui_kit::test]
+async fn open_and_new_stay_on_the_tabs_collection(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, &[("one", json!({"q": "a"}))]).await;
+    f.click(cx, "presets.row.one");
+    f.press(cx, EDIT);
+    f.pick_collection(cx, "films");
+    f.press(cx, OPEN_PRESETS_TAB);
+    f.press(cx, EDIT);
+    let workbench = f.workbench(cx);
+    let draft = cx.update(|cx| workbench.read(cx).drafts()[0].clone());
+    assert_eq!(draft.collection, "films");
+    f.pick_collection(cx, "films");
+    f.press(cx, OPEN_PRESETS_TAB);
+    f.press(cx, NEW_DOCUMENT);
+    f.fill(cx, "resources.name", "fresh");
+    f.click(cx, "resources.name.ok");
+    let draft = cx.update(|cx| workbench.read(cx).drafts()[0].clone());
+    assert_eq!(draft.collection, "films");
+}
+
+#[gpui_kit::test]
+async fn the_toolbar_save_goes_to_the_preset(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, &[("one", json!({"q": "a"}))]).await;
+    f.click(cx, "presets.row.one");
+    f.press(cx, EDIT);
+    f.click(cx, "search.save");
+    assert_eq!(f.saved()[0].0, "one");
+    assert!(!f.has(cx, "search.save.name"));
+}
+
+#[gpui_kit::test]
+async fn dropped_key_params_are_reported(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, &[("one", json!({"q": "a", "x_api_key": "hush"}))]).await;
+    f.click(cx, "presets.row.one");
+    f.press(cx, EDIT);
+    f.click(cx, "presets.save");
+    assert!(f.label(cx, "search.queries.error").contains("API key"));
+}
+
+#[gpui_kit::test]
+async fn a_different_stored_value_shows(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, &[("one", json!({"q": "a"}))]).await;
+    f.click(cx, "presets.row.one");
+    f.press(cx, EDIT);
+    *f.search.stored_preset.lock().unwrap() = Some(json!({"q": "b"}));
+    f.click(cx, "presets.save");
+    assert!(f.label(cx, "search.queries.error").contains("one"));
+}
+
+#[gpui_kit::test]
+async fn the_shortcut_leaves_the_mode(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, &[("one", json!({"q": "a"}))]).await;
+    f.click(cx, "presets.row.one");
+    f.press(cx, EDIT);
+    f.press(cx, LEAVE_PRESET);
+    assert_eq!(f.mode(cx), None);
+}
+
+#[gpui_kit::test]
+async fn locked_sends_nothing(cx: &mut TestAppContext) {
+    let mut profile = Profile::new("test", vec![node()]);
+    profile.read_only = true;
+    let f = Fixture::with(cx, profile, &[("one", json!({"q": "a"}))]).await;
+    assert!(f.has(cx, "presets.new.readonly"));
+    f.click(cx, "presets.row.one");
+    f.press(cx, DELETE);
+    assert!(f.has(cx, "danger.input"));
+    assert!(f.calls().is_empty());
+    f.press(cx, "escape");
+    f.press(cx, EDIT);
+    assert!(f.has(cx, "presets.save.readonly"));
+    f.click(cx, "presets.save");
+    assert!(f.has(cx, "danger.input"));
+    assert!(f.saved().is_empty());
 }

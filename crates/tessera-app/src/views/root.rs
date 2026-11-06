@@ -146,9 +146,9 @@ impl RootView {
                     .and_then(|id| connection_tab(this.dock.read(cx), id));
                 if let Some(ConnectionTab::Search(panel)) = tab {
                     let workbench = panel.read(cx).workbench().clone();
-                    workbench.update(cx, |w, cx| {
-                        w.load(drafts, union, window, cx);
-                        w.set_preset(event.2.clone(), cx);
+                    workbench.update(cx, |w, cx| match event.2.clone() {
+                        Some(preset) => w.open_preset(drafts, union, preset, window, cx),
+                        None => w.load(drafts, union, window, cx),
                     });
                 }
             }),

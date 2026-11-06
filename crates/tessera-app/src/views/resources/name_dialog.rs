@@ -6,7 +6,7 @@ use std::cell::Cell;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dialog::Cancel;
+use gpui_kit::component::dialog::{Cancel, Confirm};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
@@ -161,6 +161,11 @@ impl Render for NameDialog {
                         Button::new("resources.name.ok")
                             .primary()
                             .label(t!("resources.name.ok").to_string())
+                            .children(Kbd::binding_for_action(
+                                &Confirm { secondary: false },
+                                Some("Dialog"),
+                                window,
+                            ))
                             .loading(self.busy)
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),

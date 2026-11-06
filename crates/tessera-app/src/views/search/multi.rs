@@ -132,6 +132,9 @@ impl SearchWorkbench {
             return;
         }
         self.union = !self.union;
+        if let Some(wrapper) = self.preset.as_mut().and_then(|p| p.wrapper.as_mut()) {
+            *wrapper = self.union;
+        }
         self.sync_paging_lock(cx);
         self.changed(window, cx);
     }

@@ -397,3 +397,11 @@ async fn nothing_selected_disables_the_row_actions(cx: &mut TestAppContext) {
     assert!(!f.has(cx, "aliases.dialog.name"));
     assert!(!f.has(cx, "confirm.body"));
 }
+
+#[gpui_kit::test]
+async fn repoint_keeps_a_stored_name_with_spaces(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![alias(" shop", "books")]).await;
+    f.repoint(cx, " shop", "films");
+    f.click(cx, "confirm.ok");
+    assert_eq!(f.calls(), ["save_alias  shop films"]);
+}

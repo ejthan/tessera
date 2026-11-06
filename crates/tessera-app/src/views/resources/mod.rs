@@ -18,7 +18,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_fl
 use gpui_kit::{
     Action, AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Hsla,
     IntoElement, ParentElement as _, Render, SharedString, Stateful, Styled as _, Subscription,
-    Task, Window, div, prelude::*, px,
+    Task, WeakEntity, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
 use tessera_client::{Client, Error};
@@ -291,6 +291,15 @@ impl ResourceList {
         self.reselect(cx);
     }
 
+    /// Selects the row of `name`, or none. A row not loaded yet is selected when it arrives.
+    pub(super) fn select(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.selected = name;
+        if self.selected.is_none() {
+            self.table.update(cx, |t, cx| t.clear_selection(cx));
+        }
+        self.reselect(cx);
+    }
+
     /// Selects the row of the selected name again after the rows changed.
     fn reselect(&mut self, cx: &mut Context<Self>) {
         if let Some(name) = self.selected.clone() {
@@ -492,6 +501,25 @@ pub(super) fn dialog_title(
         .child(title)
         .child(div().text_sm().child(profile.name.clone()))
         .child(env_badge::render(&profile.environment, cx))
+}
+
+/// A view that shows why a write failed.
+pub(super) trait ErrorSlot: 'static {
+    /// Where the text goes.
+    fn error_slot(&mut self) -> &mut Option<SharedString>;
+}
+
+/// Shows a failed write on the view that started it.
+pub(super) fn report_to<V: ErrorSlot>(
+    view: WeakEntity<V>,
+) -> impl Fn(SharedString, &mut App) + 'static {
+    move |text, cx| {
+        view.update(cx, |view, cx| {
+            *view.error_slot() = Some(text);
+            cx.notify();
+        })
+        .ok();
+    }
 }
 
 /// What a destructive write asks (D62).

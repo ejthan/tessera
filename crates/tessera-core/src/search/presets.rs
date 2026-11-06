@@ -62,17 +62,30 @@ pub fn preset_drafts(
     }
 }
 
+/// The `searches` wrapper of a stored `value`: `Some(union)`, or `None` for a flat search.
+pub fn preset_wrapper(value: &Value) -> Option<bool> {
+    let searches = value.get("searches")?.as_array()?;
+    (!searches.is_empty()).then(|| value.get("union").and_then(Value::as_bool) == Some(true))
+}
+
 /// What a preset of `drafts` stores: one search without its collection, or all of them, with
-/// `union` when it is on.
-pub fn preset_value(drafts: &[SearchDraft], union: bool) -> Result<Value, ParamError> {
+/// `union` when it is on. `wrapper`, from [`preset_wrapper`], keeps the shape of the preset being
+/// edited for one search: a flat preset fails on `POST /multi_search?preset=`.
+pub fn preset_value(
+    drafts: &[SearchDraft],
+    union: bool,
+    wrapper: Option<bool>,
+) -> Result<Value, ParamError> {
     let mut searches = drafts
         .iter()
         .map(to_search)
         .collect::<Result<Vec<_>, _>>()?;
-    if let [search] = &mut searches[..] {
+    if let ([search], None) = (&mut searches[..], wrapper) {
         search.shift_remove("collection");
         return Ok(Value::Object(std::mem::take(search)));
     }
+    // The workbench clears `union` for one draft, so the wrapper carries it.
+    let union = union || (searches.len() == 1 && wrapper == Some(true));
     let mut value = json!({ "searches": searches });
     if union {
         value["union"] = true.into();
@@ -116,14 +129,14 @@ mod tests {
 
     #[test]
     fn a_preset_of_one_search_keeps_no_collection() {
-        let value = preset_value(&[SearchDraft::new("books")], false).unwrap();
+        let value = preset_value(&[SearchDraft::new("books")], false, None).unwrap();
         assert_eq!(value, json!({"q": "*", "enable_analytics": false}));
     }
 
     #[test]
     fn a_preset_of_several_lists_them() {
         let drafts = [SearchDraft::new("a"), SearchDraft::new("b")];
-        let value = preset_value(&drafts, false).unwrap();
+        let value = preset_value(&drafts, false, None).unwrap();
         assert_eq!(value["searches"][1]["collection"], "b");
         assert!(value.get("union").is_none());
     }
@@ -131,11 +144,35 @@ mod tests {
     #[test]
     fn a_union_survives_a_preset_both_ways() {
         let drafts = [SearchDraft::new("a"), SearchDraft::new("b")];
-        let value = preset_value(&drafts, true).unwrap();
+        let value = preset_value(&drafts, true, None).unwrap();
         assert_eq!(value["union"], true);
         let (loaded, union) = preset_drafts(&value, "other").unwrap();
         assert!(union);
         assert_eq!(loaded.len(), 2);
+    }
+
+    #[test]
+    fn an_unedited_wrapper_of_one_search_round_trips() {
+        let plain = json!({"searches": [{"collection": "books", "q": "a"}]});
+        let union = json!({"searches": [{"collection": "books", "q": "a"}], "union": true});
+        for value in [plain, union] {
+            let (drafts, union) = preset_drafts(&value, "other").unwrap();
+            // As the workbench loads them: `union` needs two drafts.
+            let saved = preset_value(&drafts, union && drafts.len() > 1, preset_wrapper(&value));
+            assert_eq!(saved.unwrap()["searches"][0]["collection"], "books");
+            let saved = preset_value(&drafts, false, preset_wrapper(&value)).unwrap();
+            assert_eq!(saved["union"], value["union"]);
+            assert_eq!(preset_kind(&saved), preset_kind(&value));
+        }
+    }
+
+    #[test]
+    fn wrappers_of_a_stored_value() {
+        assert_eq!(preset_wrapper(&json!({"q": "a"})), None);
+        assert_eq!(preset_wrapper(&json!({"searches": []})), None);
+        assert_eq!(preset_wrapper(&json!({"searches": [{}]})), Some(false));
+        let union = json!({"searches": [{}], "union": true});
+        assert_eq!(preset_wrapper(&union), Some(true));
     }
 
     #[test]

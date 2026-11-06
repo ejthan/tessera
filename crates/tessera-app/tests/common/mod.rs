@@ -1078,6 +1078,8 @@ pub struct FakeSearch {
     pub presets: Mutex<Vec<tessera_client::Preset>>,
     /// Every preset saved, in order.
     pub saved_presets: Mutex<Vec<(String, serde_json::Value)>>,
+    /// `save_preset` stores this instead of the value sent.
+    pub stored_preset: Mutex<Option<serde_json::Value>>,
     /// Every raw request, in order.
     pub raw_calls: Mutex<Vec<tessera_client::RawRequest>>,
     /// The status and body of each raw answer.
@@ -1193,11 +1195,23 @@ impl SearchBackend for FakeSearchBackend {
         _: Client,
         name: String,
         value: serde_json::Value,
-    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
         let fake = &self.0;
-        fake.saved_presets.lock().unwrap().push((name, value));
+        fake.saved_presets
+            .lock()
+            .unwrap()
+            .push((name.clone(), value.clone()));
+        let stored = fake.stored_preset.lock().unwrap().clone().unwrap_or(value);
         let fail = fake.fail.lock().unwrap().clone();
-        Box::pin(async move { fail.map_or(Ok(()), |e| Err(http_error(e))) })
+        if fail.is_none() {
+            let mut presets = fake.presets.lock().unwrap();
+            presets.retain(|p| p.name != name);
+            presets.push(tessera_client::Preset {
+                name,
+                value: stored.clone(),
+            });
+        }
+        Box::pin(async move { fail.map_or(Ok(stored), |e| Err(http_error(e))) })
     }
 
     fn raw(
@@ -1240,6 +1254,7 @@ pub fn install_search_fake(cx: &mut TestAppContext) -> Arc<FakeSearch> {
         multi_body: Mutex::default(),
         presets: Mutex::default(),
         saved_presets: Mutex::default(),
+        stored_preset: Mutex::default(),
         raw_calls: Mutex::default(),
         raw_answer: Mutex::new((200, "{}".to_string())),
         raw_done: Default::default(),
@@ -1262,6 +1277,8 @@ pub struct FakeRelevance {
     pub stopwords: Mutex<Vec<StopwordSet>>,
     /// `save_stopwords` stores these words instead of the ones sent.
     pub stored_words: Mutex<Option<Vec<String>>>,
+    /// The next `save_stopwords` answers once this resolves.
+    pub hold: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 impl FakeRelevance {
@@ -1308,7 +1325,13 @@ impl RelevanceBackend for FakeRelevanceBackend {
             sets.push(set.clone());
             set
         });
-        Box::pin(async move { answer })
+        let hold = self.0.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
     }
 
     fn delete_stopwords(
@@ -1480,6 +1503,8 @@ pub const OPEN_SEARCH: &str = key("cmd-shift-e", "ctrl-shift-e");
 pub const OPEN_HISTORY: &str = key("cmd-shift-h", "ctrl-shift-h");
 pub const OPEN_SAVED: &str = key("cmd-o", "ctrl-o");
 pub const SAVE_QUERY: &str = key("cmd-s", "ctrl-s");
+pub const LEAVE_PRESET: &str = key("cmd-shift-g", "ctrl-shift-g");
+pub const OPEN_PRESETS_TAB: &str = key("alt-cmd-5", "ctrl-alt-5");
 pub const OPEN_PRESETS: &str = key("cmd-alt-p", "ctrl-alt-p");
 pub const OPEN_EXPORT: &str = key("cmd-alt-e", "ctrl-alt-e");
 pub const SHOW_FORM: &str = key("cmd-1", "ctrl-1");
