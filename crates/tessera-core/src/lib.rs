@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod profile;
 pub mod redact;
 pub mod schema;
+pub mod search;
 pub mod secrets;
 pub mod store;
 
