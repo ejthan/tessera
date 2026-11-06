@@ -124,11 +124,11 @@ Everything in the repository is written in English: code, comments, docs, commit
 | Purpose | Crate | Notes |
 |---|---|---|
 | UI framework | `gpui-kit` (0.9.x) | Facade over `gpui-base`, `gpui-component` and default assets. It pins the GPUI version (`gpui-pre`, a snapshot of Zed's GPUI); **never choose it ourselves** |
-| HTTP | `reqwest` (features `rustls-tls`, `json`, `stream`, `gzip`) | no OpenSSL needed |
-| Async runtime for I/O | `tokio` (rt-multi-thread, fs, io-util, time, sync) | bridge to GPUI, see §5.4 |
-| Streaming | `tokio-util` (codec, io), `futures` | JSONL import/export |
+| HTTP | `reqwest` (features `rustls`, `json`, `stream`, `http2`, `charset`) | no OpenSSL needed. `stream` arrives with M5, for exports; `gzip` is not needed so far |
+| Async runtime for I/O | `tokio` (rt-multi-thread, fs, io-util, time, sync, macros) | bridge to GPUI, see §5.4 |
+| Streaming | `tokio-util` (codec, io), `futures` | export lines, cancellation tokens (M5). Import sends one body per batch (D45) |
 | Serialization | `serde`, `serde_json` (feature `preserve_order`) | document field order is preserved |
-| CSV | `csv-async` or `csv` | CSV import |
+| CSV | `csv` | CSV import, on a blocking reader task like the JSON array reader (D51) |
 | Secrets | `keyring`, `secrecy` | macOS Keychain, Windows Credential Manager, Secret Service |
 | Paths | `directories` | config and data directories |
 | Config | `toml`, `serde` | settings |
@@ -138,6 +138,7 @@ Everything in the repository is written in English: code, comments, docs, commit
 | Scoped keys | `hmac`, `sha2`, `base64` | §7.14 |
 | Time | `jiff` or `time` | `expires_at`, timestamps |
 | i18n | `rust-i18n`, `sys-locale` | the same crate GPUI Kit's components use; EN and DE at launch |
+| Temporary files | `tempfile` | error report spool (D47); tests |
 | Tests | `wiremock`, `insta`, `testcontainers` (optional), `gpui_kit::test` | §12 |
 
 **Typesense client:** The community crate `typesense` (typesense/typesense-rust, generated from the OpenAPI spec) exists. An admin tool needs **every** endpoint, raw JSON and full control over streaming. Tessera therefore has its **own lean crate `tessera-client`** on top of `reqwest`:
@@ -292,7 +293,7 @@ Each module lists acceptance criteria (AC).
 - **Create:**
   - Form mode: field editor with a type dropdown (all types including `auto`, `string*`, `object`, `object[]`, `geopoint`, `geopolygon`, `image`, `float[]`), live validation.
   - JSON mode: code editor, synchronized with the form in both directions.
-  - **Infer schema from a file:** JSONL/JSON/CSV sample (first N = 1,000 rows) → suggested type per field, including `optional` when fields are missing. Arrives in M5 with import (D19).
+  - **Infer schema from a file:** JSONL/JSON/CSV sample (first N = 1,000 rows) → suggested type per field, including `optional` when fields are missing. Arrives in M5 with import (D19). Rules in D50: integers are `int64`, and coordinate pairs stay numeric with a suggestion.
   - **Clone:** use the schema of an existing collection as a template.
 - **Modify (PATCH):** add and drop fields (`drop: true`); changing a field is a drop plus an add. A diff preview is shown before sending. Progress comes from the schema change status (§7.18).
 - **Delete:** confirmed by typing the collection name. A warning appears if aliases still point to the collection.
@@ -344,20 +345,20 @@ Each module lists acceptance criteria (AC).
 ### 7.6 Import (P0)
 
 - **Sources:** JSONL, JSON array, CSV (delimiter, header, type conversion based on the schema). Files via file dialog or drag and drop. Clipboard for small amounts.
-- **Options:** `action` (`create` / `upsert` / `update` / `emplace`), `batch_size` (default 1,000), `dirty_values` (`coerce_or_reject` …), `return_id`, target collection (existing, or new with an inferred schema, see §7.3).
-- **Streaming:** the file is read line by line, sent in chunks, and the response is evaluated line by line. Memory stays constant regardless of file size.
-- **Progress:** bytes, documents, rate per second, ETA, error count. Can be cancelled at any time; batches already imported stay imported (the dialog says so).
-- **Error report:** table with line number, error message and original document. Exportable as JSONL. The failed lines can be saved as a new file and imported again.
+- **Options:** `action` (`create` / `upsert` / `update` / `emplace`), `batch_size` (default 1,000), `dirty_values` (default `coerce_or_reject`, always sent, D46), target collection (existing, or new with an inferred schema, see §7.3, created only at Start, D54). `return_id` is always on so that the report has ids (D46). Confirmation in D49.
+- **Streaming:** the file is read record by record, sent as one `POST` per batch (D45), and the response is evaluated line by line. Memory stays constant regardless of file size. A batch also ends at 16 MiB, and a record over 32 MiB is refused.
+- **Progress:** bytes, documents, rate per second, ETA, error count. Can be cancelled at any time; batches already imported stay imported (the dialog says so). Jobs run in the jobs panel and outlive the dialog and the tab (D48).
+- **Error report:** table with line number, error message and original document, the first 1,000 rows in memory and all of them in a temporary file (D47). Exportable as JSONL. The failed lines can be saved as a new file and imported again.
 - **Preview:** the first 20 lines before starting, including schema validation.
 
 **AC:** Importing 1 million documents (≈ 1 GB JSONL) completes with less than 300 MB RSS for the app. Cancelling stops within one batch round trip.
 
 ### 7.7 Export (P0)
 
-- Everything, by `filter_by`, or only the current selection. `include_fields` and `exclude_fields` are selectable.
-- Formats: JSONL (native, streamed) and JSON array. CSV (P1) with nested fields flattened (`a.b.c`).
-- Progress with cancel; the target is chosen in a file dialog.
-- **Backup assistant** (P1): exports schema, all documents, aliases, attached synonym and curation sets, and stopwords for one or more collections into a folder or a `.tar.zst` archive. The **restore assistant** loads it into any cluster.
+- Everything, by `filter_by`, or only the current selection. `include_fields` and `exclude_fields` are selectable, as top-level schema names (D52).
+- Formats: JSONL (native, streamed) and JSON array. CSV (P1, in M5) with nested fields flattened (`a.b.c`), the header taken from the first 1,000 documents.
+- Progress with cancel; the target is chosen in a file dialog and replaced only after a complete export.
+- **Backup assistant** (P1, M8): exports schema, all documents, aliases, attached synonym and curation sets, and stopwords for one or more collections into a folder or a `.tar.zst` archive. The **restore assistant** loads it into any cluster.
 
 ### 7.8 Aliases (P0)
 
@@ -552,7 +553,7 @@ Mockups: [Tessera UX canvas](https://claude.ai/artifact/DucJnCzM4SMUhUo5UvVk1d).
 |---|---|---|
 | NF1 | Cold start to interactive window < 1 s (release build, M1) | timestamp logging |
 | NF2 | Scrolling a DataTable with 200k rows ≥ 60 fps | GPUI debug frame overlay (D29) |
-| NF3 | Import of 1 million documents with RSS < 300 MB | integration test + measurement |
+| NF3 | Import of 1 million documents with RSS < 300 MB | `cargo xtask nf3` plus the app's baseline, nightly (D53) |
 | NF4 | App code never blocks the UI for more than 16 ms | tracing spans, debug assertion |
 | NF5 | Binary size < 40 MB (stripped, per platform) | CI artifact check |
 | NF6 | Idle CPU < 1% without active polling | manual |
@@ -589,7 +590,7 @@ Location via `directories::ProjectDirs::from("org", "tessera", "Tessera")`:
 2. **Integration against real Typesense:** `dev/docker-compose.yml` or a GitHub Actions service container. Version matrix **30.0 and 30.2** (minimum and current), plus a 3-node cluster job (nightly). Covers every endpoint from §6 with create → read → update → delete.
 3. **UI integration (`#[gpui_kit::test]`):** headless window, simulated keyboard and mouse input. Checks focus, state and accessibility. Required for: connection dialog, read-only lock, type-to-confirm, filter autocompletion, import cancel.
 4. **Snapshot tests (`insta`):** generated curl commands, schema JSON from the form, ES → Typesense translation.
-5. **Performance tests (nightly):** import of 1 million documents, scroll benchmark (GPUI benchmarks, if available).
+5. **Performance tests (nightly):** import of 1 million documents through `xtask nf3` (D53), scroll benchmark (GPUI benchmarks, if available).
 6. **Manual QA checklist** before every release in `docs/qa-checklist.md`.
 
 ### 12.2 Seed data
@@ -649,7 +650,7 @@ Each milestone ends with green CI, an updated CHANGELOG and a short demo (GIF in
 | **M2 Collections** | §7.3 without the JOIN graph and schema inference (M5, D19): list, schema view, create (form and JSON), clone, PATCH with diff, delete, truncate, read-only unlock (D10). Creates `tessera-widgets`; `xtask seed` with small data sets. Details: `docs/superpowers/specs/2026-11-05-m2-collections-design.md` | Integration tests for all collection endpoints green |
 | **M3 Document browser** | §7.4: DataTable, infinite scroll, filter with autocompletion, inspector with JSON editor, CRUD, multi-select, delete by query with preview. `xtask seed` gains the 200k `products` set. Details: `docs/superpowers/specs/2026-11-05-m3-documents-design.md` | NF2 met (200k rows); measurement still open, steps in `docs/building.md` |
 | **M4 Search and raw console** | §7.5 (without P2 parts), multi-search, history, saved queries, code export. §7.17 raw console. §7.20 command palette. §7.19 full view of truncated bodies. Details: `docs/superpowers/specs/2026-11-06-m4-search-design.md`, decisions D33–D44 | Exported curl reproduces the response (live test, 30.0 and 30.2); the checks on screen are still open, steps in `docs/building.md` |
-| **M5 Import/export** | §7.6, §7.7 including schema inference, error report, cancel. Jobs panel | NF3 met |
+| **M5 Import/export** | §7.6, §7.7 including schema inference, error report, cancel. Jobs panel. The backup and restore assistant is M8. Details: `docs/superpowers/specs/2026-11-06-m5-import-export-design.md`, decisions D45–D54 | NF3 met, measured headlessly with `cargo xtask nf3` (D53) |
 | **M6 Relevance resources** | §7.8 aliases including the reindex assistant, §7.9 synonym sets, §7.10 curation sets, §7.11 stopwords, §7.12 presets | CRUD and test panels work against 30.0 and 30.2 |
 | **M7 Keys, analytics, AI** | §7.14 including the scoped key generator and decoder, §7.15, §7.16, §7.13 | Scoped key test vectors identical to typesense-js |
 | **M8 Operations and hardening** | §7.18, safety UX §8.2 complete, backup/restore assistant, §9 audit (redaction tests) | Security checklist done |
@@ -728,6 +729,16 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D42 | Keeping full bodies for §7.19 | In memory, at most 32 MiB per body and 64 MiB in all, oldest evicted, released with their entry. The console holds at most 32 MiB of an answer and says when it cut one. Refetching would show a different answer and cannot repeat a write. Disk is ruled out by §9 |
 | D43 | `keymap.toml` shape | `[[binding]]` with `key`, `action` (`tessera::Name`), optional `context`. No action unbinds. Loaded once at start, on top of the defaults. A bad entry is skipped and named above the tabs, a file that does not parse changes nothing and says so there, and `escape` cannot be bound |
 | D44 | Settings in the palette, and §7.21's milestone | No entry until a settings view exists (UX rule 4). §14 names no milestone for §7.21. Recommendation: M8. Open for the maintainer |
+| D45 | One streamed `POST` or one `POST` per batch? | One per batch, in sequence. The cancel AC speaks of a batch round trip, an abort of a streamed body showed nothing stored after 20 MB of 64 MB, and the answer stays bound. A second press drops the request in flight, and its documents count as unconfirmed |
+| D46 | Import defaults | `dirty_values` is `coerce_or_reject`, always sent, because the server's own default rejects on 30.0 and 30.2. `return_id=true` always, so the report has ids. `return_doc` never: the client holds what it sent |
+| D47 | Where the error report lives | The first 1,000 rows in memory, all rows in an unnamed private temp file that disappears with the job or process. A million failures must not grow the app. §9 concerns keys and the log file; this holds the user's own documents for as long as the job row exists |
+| D48 | Who owns a job? | A global `Jobs` entity. Closing a dialog or tab or disconnecting does not stop it. Lock again stops an import at its next batch. Quit stops all jobs; there is no veto (D31) |
+| D49 | Confirmation for imports | `create` or a new collection: none, or a plain confirmation on prod. `upsert`, `update`, `emplace`: `danger_level` on the estimated count, so typing the name above 1,000 or on prod. Export needs none: it is a read |
+| D50 | Schema inference rules | Integers are `int64`, since a sample cannot prove `int32`. Mixed types are `string` with a note. A 2-number array in lat/lng range stays numeric with a "Use geopoint" suggestion. Keys Typesense would misread (`*`, `id`) make no field |
+| D51 | CSV conversion | Cells follow the target's types. Arrays and objects are JSON in the cell, the form CSV export writes. An empty cell leaves the key out. `a.b` headers nest. The sync `csv` crate, not `csv-async`, because the JSON array reader is sync anyway |
+| D52 | Which fields can an export pick? | Top-level names from the schema, by checkbox, each through an allowlist, because `include_fields=nope` answers 200 with `{}` per document and a comma cannot be written. No free text. Keys outside the schema export under All and Exclude |
+| D53 | How is NF3 measured? | `cargo xtask nf3` runs the real pipeline with a real request log against a real server and adds the app's baseline from the `TESSERA_SMOKE` run. Nightly on Linux, and one run through the UI by hand in M5's last PR |
+| D54 | When is a new collection created? | At Start, after the confirmation. The schema dialog gets a pick mode that sends nothing, so cancelling the import leaves the server untouched |
 
 ---
 
