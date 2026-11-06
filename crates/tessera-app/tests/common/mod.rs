@@ -1687,6 +1687,8 @@ pub struct FakeAdmin {
     pub vote_refused: Mutex<bool>,
     /// What `schema_changes` answers.
     pub schema_changes: Mutex<Vec<SchemaChange>>,
+    /// What `roles` answers.
+    pub roles: Mutex<Vec<Option<tessera_client::RaftState>>>,
     /// The keys on the server.
     pub keys: Mutex<Vec<ApiKey>>,
     /// `keys` fails with this status and Typesense message.
@@ -1947,6 +1949,15 @@ impl AdminBackend for FakeAdminBackend {
         value: Value,
     ) -> tessera_app::collections::BoxFuture<Result<bool, Error>> {
         self.operation(format!("set_config {node} {key} {value}"), true)
+    }
+
+    fn roles(
+        &self,
+        _: Client,
+    ) -> tessera_app::collections::BoxFuture<Vec<Option<tessera_client::RaftState>>> {
+        self.0.calls.lock().unwrap().push("roles".into());
+        let answer = self.0.roles.lock().unwrap().clone();
+        Box::pin(async move { answer })
     }
 
     fn schema_changes(

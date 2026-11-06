@@ -30,7 +30,7 @@ use super::search::SearchWorkbench;
 use super::sidebar::Sidebar;
 use super::{env_badge, transport, unlock, welcome};
 use crate::actions::{
-    COLLECTION, COLLECTIONS, CONSOLE, CloneCollection, DeleteCollection, EditSchema,
+    COLLECTION, COLLECTIONS, CONSOLE, CloneCollection, DeleteCollection, EditSchema, EditTransport,
     ExportDocuments, FocusSearch, ImportDocuments, LockAgain, NewCollection, OVERVIEW,
     OpenCollectionRow, REINDEX, RESOURCES, Refresh, ShowDocuments, ShowSchema, ToggleFavorite,
     TogglePolling, TruncateCollection, WORKBENCH, gated,
@@ -188,6 +188,14 @@ impl Render for OverviewPanel {
                     this.connection.update(cx, |c, cx| c.lock(cx));
                 }))
             })
+            .when(
+                transport::editable(&self.connection, &self.state, cx),
+                |el| {
+                    el.on_action(cx.listener(|this, _: &EditTransport, window, cx| {
+                        transport::edit(&this.connection, &this.state, window, cx);
+                    }))
+                },
+            )
             .on_action(cx.listener(|this, _: &TogglePolling, _, cx| {
                 this.connection
                     .update(cx, |c, cx| c.set_paused(!c.paused, cx));
@@ -199,7 +207,13 @@ impl Render for OverviewPanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
-            .children(transport::banner(&self.connection, &self.state, cx))
+            .children(transport::banner(
+                &self.connection,
+                &self.state,
+                OVERVIEW,
+                window,
+                cx,
+            ))
             .children(unlock::banner(&self.connection, OVERVIEW, window, cx))
             .child(self.overview.clone())
     }
@@ -278,6 +292,14 @@ impl Render for CollectionsPanel {
                     this.connection.update(cx, |c, cx| c.lock(cx));
                 }))
             })
+            .when(
+                transport::editable(&self.connection, &self.state, cx),
+                |el| {
+                    el.on_action(cx.listener(|this, _: &EditTransport, window, cx| {
+                        transport::edit(&this.connection, &this.state, window, cx);
+                    }))
+                },
+            )
             .on_action(cx.listener(|this, _: &Refresh, _, cx| {
                 this.list.update(cx, |l, cx| l.reload(cx));
             }))
@@ -312,7 +334,13 @@ impl Render for CollectionsPanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
-            .children(transport::banner(&self.connection, &self.state, cx))
+            .children(transport::banner(
+                &self.connection,
+                &self.state,
+                COLLECTIONS,
+                window,
+                cx,
+            ))
             .children(unlock::banner(&self.connection, COLLECTIONS, window, cx))
             .child(self.list.clone())
     }
@@ -486,6 +514,14 @@ impl Render for CollectionPanel {
                     this.connection.update(cx, |c, cx| c.lock(cx));
                 }))
             })
+            .when(
+                transport::editable(&self.connection, &self.state, cx),
+                |el| {
+                    el.on_action(cx.listener(|this, _: &EditTransport, window, cx| {
+                        transport::edit(&this.connection, &this.state, window, cx);
+                    }))
+                },
+            )
             .on_action(cx.listener(|this, _: &ClosePanel, window, cx| {
                 this.documents.update(cx, |d, cx| d.close_tab(window, cx));
             }))
@@ -532,7 +568,13 @@ impl Render for CollectionPanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
-            .children(transport::banner(&self.connection, &self.state, cx))
+            .children(transport::banner(
+                &self.connection,
+                &self.state,
+                COLLECTION,
+                window,
+                cx,
+            ))
             .children(unlock::banner(&self.connection, COLLECTION, window, cx))
             .child(
                 TabBar::new("collection.views")
@@ -656,10 +698,24 @@ impl Render for SearchPanel {
                     this.connection.update(cx, |c, cx| c.lock(cx));
                 }))
             })
+            .when(
+                transport::editable(&self.connection, &self.state, cx),
+                |el| {
+                    el.on_action(cx.listener(|this, _: &EditTransport, window, cx| {
+                        transport::edit(&this.connection, &this.state, window, cx);
+                    }))
+                },
+            )
             .size_full()
             .border_t_2()
             .border_color(edge)
-            .children(transport::banner(&self.connection, &self.state, cx))
+            .children(transport::banner(
+                &self.connection,
+                &self.state,
+                WORKBENCH,
+                window,
+                cx,
+            ))
             .children(unlock::banner(&self.connection, WORKBENCH, window, cx))
             .child(div().flex_1().min_h_0().child(self.workbench.clone()))
     }
@@ -750,10 +806,24 @@ impl Render for ConsolePanel {
                     this.connection.update(cx, |c, cx| c.lock(cx));
                 }))
             })
+            .when(
+                transport::editable(&self.connection, &self.state, cx),
+                |el| {
+                    el.on_action(cx.listener(|this, _: &EditTransport, window, cx| {
+                        transport::edit(&this.connection, &this.state, window, cx);
+                    }))
+                },
+            )
             .size_full()
             .border_t_2()
             .border_color(edge)
-            .children(transport::banner(&self.connection, &self.state, cx))
+            .children(transport::banner(
+                &self.connection,
+                &self.state,
+                CONSOLE,
+                window,
+                cx,
+            ))
             .children(unlock::banner(&self.connection, CONSOLE, window, cx))
             .child(div().flex_1().min_h_0().child(self.view.clone()))
     }
@@ -852,10 +922,24 @@ impl Render for ResourcePanel {
                     this.connection.update(cx, |c, cx| c.lock(cx));
                 }))
             })
+            .when(
+                transport::editable(&self.connection, &self.state, cx),
+                |el| {
+                    el.on_action(cx.listener(|this, _: &EditTransport, window, cx| {
+                        transport::edit(&this.connection, &this.state, window, cx);
+                    }))
+                },
+            )
             .size_full()
             .border_t_2()
             .border_color(edge)
-            .children(transport::banner(&self.connection, &self.state, cx))
+            .children(transport::banner(
+                &self.connection,
+                &self.state,
+                RESOURCES,
+                window,
+                cx,
+            ))
             .children(unlock::banner(&self.connection, RESOURCES, window, cx))
             .child(div().flex_1().min_h_0().child(self.view.view()))
     }
@@ -965,10 +1049,24 @@ impl Render for ReindexPanel {
                     this.connection.update(cx, |c, cx| c.lock(cx));
                 }))
             })
+            .when(
+                transport::editable(&self.connection, &self.state, cx),
+                |el| {
+                    el.on_action(cx.listener(|this, _: &EditTransport, window, cx| {
+                        transport::edit(&this.connection, &this.state, window, cx);
+                    }))
+                },
+            )
             .size_full()
             .border_t_2()
             .border_color(edge)
-            .children(transport::banner(&self.connection, &self.state, cx))
+            .children(transport::banner(
+                &self.connection,
+                &self.state,
+                REINDEX,
+                window,
+                cx,
+            ))
             .children(unlock::banner(&self.connection, REINDEX, window, cx))
             .child(div().flex_1().min_h_0().child(self.view.clone()))
     }

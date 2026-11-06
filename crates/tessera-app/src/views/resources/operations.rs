@@ -7,6 +7,7 @@ use std::time::Duration;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::searchable_list::SearchableListItem;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
@@ -27,7 +28,7 @@ use tessera_core::operations::{
 use super::{Danger, client_of, confirm_write, notice, row_button};
 use crate::actions::{RunClearCache, RunCompact, RunSnapshot, RunVote, SaveResource};
 use crate::admin::AdminBackendGlobal;
-use crate::connection::{ConnectionState, node_error_text};
+use crate::connection::{ConnectionState, host_label, node_error_text};
 use crate::views::overview::role_text;
 
 /// How often the running schema changes are read.
@@ -54,6 +55,25 @@ impl Job {
             Self::ClearCache => Operation::ClearCache,
             Self::Config(..) => Operation::Config,
         }
+    }
+}
+
+/// A node in the picker. It is picked by index: two nodes can read alike.
+#[derive(Clone, PartialEq)]
+struct NodeItem {
+    index: usize,
+    label: SharedString,
+}
+
+impl SearchableListItem for NodeItem {
+    type Value = usize;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &usize {
+        &self.index
     }
 }
 
@@ -90,9 +110,11 @@ fn config_problem(problem: ConfigProblem) -> String {
 /// The content of an Ops tab.
 pub struct OperationsView {
     connection: Entity<ConnectionState>,
-    node_select: Entity<SelectState<Vec<String>>>,
-    /// The text of each node in the picker, indexed like `Client::nodes`.
-    node_labels: Vec<String>,
+    node_select: Entity<SelectState<Vec<NodeItem>>>,
+    /// The nodes in the picker, indexed like `Client::nodes`.
+    node_items: Vec<NodeItem>,
+    /// What each node last told this tab. The connection's own roles stop with the Overview tab.
+    roles: Vec<Option<RaftState>>,
     /// The picked node. Never changes the active node.
     node: usize,
     path: Entity<InputState>,
@@ -136,9 +158,9 @@ impl OperationsView {
             cx.subscribe_in(
                 &node_select,
                 window,
-                |this, _, event: &SelectEvent<Vec<String>>, _, cx| {
-                    if let SelectEvent::Confirm(Some(label)) = event {
-                        this.pick_node(label, cx);
+                |this, _, event: &SelectEvent<Vec<NodeItem>>, _, cx| {
+                    if let SelectEvent::Confirm(Some(index)) = event {
+                        this.pick_node(*index, cx);
                     }
                 },
             ),
@@ -165,7 +187,8 @@ impl OperationsView {
         let mut this = Self {
             connection,
             node_select,
-            node_labels: Vec::new(),
+            node_items: Vec::new(),
+            roles: Vec::new(),
             node,
             path,
             config_select,
@@ -192,9 +215,15 @@ impl OperationsView {
 
     /// Picks node `index`, as the picker does.
     pub fn pick_node_at(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(label) = self.node_labels.get(index).cloned() {
-            self.pick_node(&label, cx);
-        }
+        self.pick_node(index, cx);
+    }
+
+    /// The picker's text of each node.
+    pub fn node_labels(&self) -> Vec<String> {
+        self.node_items
+            .iter()
+            .map(|n| n.label.to_string())
+            .collect()
     }
 
     /// Picks the config key `name`, as the picker does.
@@ -213,23 +242,36 @@ impl OperationsView {
 
     /// Keeps the picker's roles current; the connection changes with every poll.
     fn take_nodes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let labels = node_labels(&self.connection, cx);
-        if labels == self.node_labels {
+        let items = self.items(cx);
+        if items == self.node_items {
             return;
         }
-        let picked = labels.get(self.node).cloned();
-        self.node_labels.clone_from(&labels);
+        self.node_items.clone_from(&items);
+        let picked = self.node;
         self.node_select.update(cx, |s, cx| {
-            s.set_items(labels, window, cx);
-            if let Some(label) = picked {
-                s.set_selected_value(&label, window, cx);
-            }
+            s.set_items(items, window, cx);
+            s.set_selected_value(&picked, window, cx);
         });
         cx.notify();
     }
 
-    fn pick_node(&mut self, label: &str, cx: &mut Context<Self>) {
-        if let Some(node) = self.node_labels.iter().position(|l| l == label) {
+    fn items(&self, cx: &App) -> Vec<NodeItem> {
+        let Some(client) = client_of(&self.connection, cx) else {
+            return Vec::new();
+        };
+        let urls = client.nodes().iter().enumerate();
+        urls.map(|(index, url)| {
+            let role = role_text(self.role_of(index, cx).unwrap_or(RaftState::Unknown));
+            NodeItem {
+                index,
+                label: format!("{} · {role}", host_of(url)).into(),
+            }
+        })
+        .collect()
+    }
+
+    fn pick_node(&mut self, node: usize, cx: &mut Context<Self>) {
+        if node < self.node_items.len() {
             self.node = node;
             self.changes.clear();
             self.changes_error = None;
@@ -244,18 +286,20 @@ impl OperationsView {
         url.map(|u| host_of(&u)).unwrap_or_default()
     }
 
-    fn role(&self, cx: &App) -> Option<RaftState> {
+    /// What node `index` last reported, here or to the Overview tab until this tab has asked.
+    fn role_of(&self, index: usize, cx: &App) -> Option<RaftState> {
         let nodes = &self.connection.read(cx).nodes;
-        nodes.get(self.node)?.debug.as_ref().map(|d| d.state)
+        let polled = || nodes.get(index)?.debug.as_ref().map(|d| d.state);
+        self.roles.get(index).copied().flatten().or_else(polled)
     }
 
     /// Why a vote cannot help now: both of these answer `success: false` (P4).
     fn vote_block(&self, cx: &App) -> Option<String> {
-        let nodes = client_of(&self.connection, cx).map_or(0, |c| c.nodes().len());
-        if nodes < 2 {
+        if self.connection.read(cx).profile.distinct_nodes() < 2 {
             return Some(t!("ops.vote.one_node").to_string());
         }
-        (self.role(cx) == Some(RaftState::Leader)).then(|| t!("ops.vote.leader").to_string())
+        let leader = self.role_of(self.node, cx) == Some(RaftState::Leader);
+        leader.then(|| t!("ops.vote.leader").to_string())
     }
 
     fn snapshot_path(&self, cx: &App) -> String {
@@ -369,7 +413,7 @@ impl OperationsView {
 
     /// Starts polling when the tab draws. A round in which it did not draw ends the polling, so
     /// a hidden tab sends nothing and closing it stops the task with the view.
-    fn keep_polling(&mut self, cx: &mut Context<Self>) {
+    fn keep_polling(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.drawn = true;
         if self.poll.is_some() {
             return;
@@ -379,7 +423,7 @@ impl OperationsView {
         };
         let backend = cx.global::<AdminBackendGlobal>().0.clone();
         let client = client.polling();
-        self.poll = Some(cx.spawn(async move |this, cx| {
+        self.poll = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 let Ok(Some(node)) = this.update(cx, |this, cx| {
                     let go = std::mem::take(&mut this.drawn).then_some(this.node);
@@ -391,8 +435,14 @@ impl OperationsView {
                 }) else {
                     return;
                 };
-                let answer = backend.schema_changes(client.clone(), node).await;
-                let alive = this.update(cx, |this, cx| {
+                // Both run from here on, so a hanging node delays neither start.
+                let (changes, roles) = (
+                    backend.schema_changes(client.clone(), node),
+                    backend.roles(client.clone()),
+                );
+                let (answer, roles) = (changes.await, roles.await);
+                let alive = this.update_in(cx, |this, window, cx| {
+                    this.take_roles(roles, window, cx);
                     // An answer of a node no longer picked says nothing about the one on screen.
                     if this.node == node {
                         this.take_changes(answer, cx);
@@ -404,6 +454,20 @@ impl OperationsView {
                 cx.background_executor().timer(POLL_EVERY).await;
             }
         }));
+    }
+
+    /// A node that did not answer keeps the role it last reported.
+    fn take_roles(
+        &mut self,
+        roles: Vec<Option<RaftState>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.roles.resize(roles.len(), None);
+        for (known, role) in self.roles.iter_mut().zip(roles) {
+            *known = role.or(*known);
+        }
+        self.take_nodes(window, cx);
     }
 
     fn take_changes(
@@ -547,10 +611,10 @@ impl OperationsView {
             cx,
         )
         .loading(busy);
-        let button = if matches!(op, Operation::ClearCache) {
-            button
-        } else {
+        let button = if matches!(op, Operation::Compact | Operation::Vote) {
             button.danger()
+        } else {
+            button
         };
         let muted = cx.theme().muted_foreground;
         let below = block.map(|b| (format!("ops.{name}.block"), b.into(), muted));
@@ -690,7 +754,7 @@ impl Focusable for OperationsView {
 
 impl Render for OperationsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.keep_polling(cx);
+        self.keep_polling(window, cx);
         let locked = self.connection.read(cx).writes_locked();
         let vote_block = self.vote_block(cx);
         div()
@@ -763,25 +827,8 @@ fn titles(op: Operation, host: &str) -> (String, String) {
 }
 
 fn host_of(url: &url::Url) -> String {
-    let host = url.host_str().unwrap_or_default();
-    match url.port_or_known_default() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    }
-}
-
-fn node_labels(connection: &Entity<ConnectionState>, cx: &App) -> Vec<String> {
-    let Some(client) = client_of(connection, cx) else {
-        return Vec::new();
-    };
-    let nodes = &connection.read(cx).nodes;
-    let urls = client.nodes().iter().enumerate();
-    urls.map(|(i, url)| {
-        let state = nodes.get(i).and_then(|n| n.debug.as_ref()).map(|d| d.state);
-        let role = role_text(state.unwrap_or(RaftState::Unknown));
-        format!("{} · {role}", host_of(url))
-    })
-    .collect()
+    let path = url.path().trim_end_matches('/');
+    format!("{}{path}", host_label(url.as_str()))
 }
 
 /// Sends `job` to `node`. It runs on the backend's runtime whatever happens to the view, and its
@@ -794,10 +841,22 @@ fn send(
     host: String,
     cx: &mut App,
 ) -> Task<Result<(), SharedString>> {
-    let Some(client) = client_of(&connection, cx) else {
-        return Task::ready(Err(t!("status.not_connected").to_string().into()));
-    };
     let op = job.operation() as usize;
+    let Some(client) = client_of(&connection, cx) else {
+        let text = SharedString::from(t!("status.not_connected").to_string());
+        let result = RunResult {
+            node: host,
+            at: Zoned::now().strftime("%H:%M:%S").to_string(),
+            text: text.clone(),
+            failed: true,
+        };
+        view.update(cx, |view, cx| {
+            view.results[op] = Some(result);
+            cx.notify();
+        })
+        .ok();
+        return Task::ready(Err(text));
+    };
     let profile = connection.read(cx).profile.clone();
     let backend = cx.global::<AdminBackendGlobal>().0.clone();
     view.update(cx, |view, cx| {

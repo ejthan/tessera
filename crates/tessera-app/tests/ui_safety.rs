@@ -102,6 +102,28 @@ async fn https_and_local_show_no_banner(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn the_edit_button_and_its_shortcut_open_the_profile(cx: &mut TestAppContext) {
+    let name = "connect.name".to_string();
+    let (handle, _rt) = connected(cx, remote(Protocol::Http)).await;
+    assert!(banner(cx, handle).is_some());
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert!(window.try_find(name.clone()).is_none());
+        window.click("transport.edit".to_string(), cx);
+    })
+    .unwrap();
+    wait_for_element(cx, handle, name.clone(), true).await;
+
+    let (handle, _rt) = connected(cx, remote(Protocol::Http)).await;
+    assert!(banner(cx, handle).is_some());
+    cx.update_window(handle.into(), |_, window, cx| {
+        focus(window, "overview.refresh", cx);
+        window.press(key("cmd-alt-x", "ctrl-alt-x"), cx);
+    })
+    .unwrap();
+    wait_for_element(cx, handle, name, true).await;
+}
+
+#[gpui_kit::test]
 async fn a_temporary_connection_has_nothing_to_edit(cx: &mut TestAppContext) {
     fake_backend(cx, Some((vec![], vec![])));
     fake_documents(cx);
@@ -137,7 +159,7 @@ async fn a_temporary_connection_has_nothing_to_edit(cx: &mut TestAppContext) {
 }
 
 /// The style of a built button cannot be read from a window, so this reads its builder chain.
-const DESTRUCTIVE: [(&str, &str); 14] = [
+const DESTRUCTIVE: [(&str, &str); 16] = [
     ("schema_view.rs", "Button::new(\"schema.truncate\")"),
     ("schema_view.rs", "Button::new(\"schema.delete\")"),
     ("documents/mod.rs", "Button::new(\"documents.delete\")"),
@@ -150,8 +172,14 @@ const DESTRUCTIVE: [(&str, &str); 14] = [
     ("resources/analytics.rs", "\"analytics.delete\".into()"),
     ("resources/aliases.rs", "\"aliases.delete\".into()"),
     ("resources/sets.rs", "format!(\"{prefix}.delete\")"),
+    ("resources/sets.rs", "\"sets.items.delete\""),
     ("resources/stemming.rs", "\"stemming.delete\".into()"),
     ("resources/operations.rs", "\"ops.snapshot.run\".into()"),
+    // Both go through one row builder: this is its choice of red, Compact and Vote together.
+    (
+        "resources/operations.rs",
+        "matches!(op, Operation::Compact | Operation::Vote)",
+    ),
 ];
 
 fn views() -> std::path::PathBuf {
@@ -181,10 +209,10 @@ fn the_audit_knows_every_delete_button() {
                 continue;
             }
             let source = std::fs::read_to_string(&path).unwrap();
-            let buttons = |l: &&str| l.contains("Button::new(\"") || l.contains(".delete\".into()");
-            for line in source.lines().filter(buttons) {
-                let id = line.split('"').nth(1).unwrap();
-                if id.ends_with("delete") || id.ends_with("truncate") {
+            // Any literal ending so counts, whatever helper builds the button. A label is `t!`.
+            let ids = source.lines().filter(|l| !l.contains("t!("));
+            for id in ids.flat_map(|l| l.split('"').skip(1).step_by(2)) {
+                if id.ends_with(".delete") || id.ends_with(".truncate") {
                     let known = DESTRUCTIVE.iter().any(|(_, m)| m.contains(id));
                     assert!(known || LOCAL.contains(&id), "{id} is not in the audit");
                 }

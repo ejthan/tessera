@@ -19,6 +19,7 @@ gpui_kit::actions!(
         ConnectSelected,
         DisconnectSelected,
         EditConnection,
+        EditTransport,
         DeleteConnection,
         ImportProfiles,
         ExportProfiles,
@@ -596,6 +597,10 @@ const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
 const FRAME_OVERLAY: &str = "ctrl-alt-f";
 #[cfg(target_os = "macos")]
+const EDIT_TRANSPORT: &str = "cmd-alt-x";
+#[cfg(not(target_os = "macos"))]
+const EDIT_TRANSPORT: &str = "ctrl-alt-x";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
@@ -612,6 +617,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     Quit,
     DisconnectSelected,
     EditConnection,
+    EditTransport,
     DeleteConnection,
     ImportProfiles,
     ExportProfiles,
@@ -873,6 +879,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(REFRESH, Refresh, Some(OVERVIEW)),
         KeyBinding::new(REFRESH, Refresh, Some(COLLECTIONS)),
         KeyBinding::new(REFRESH, Refresh, Some(COLLECTION)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(OVERVIEW)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(COLLECTIONS)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(COLLECTION)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(RESOURCES)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(REINDEX)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(CONSOLE)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(WORKBENCH)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(OVERVIEW)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(COLLECTIONS)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(COLLECTION)),

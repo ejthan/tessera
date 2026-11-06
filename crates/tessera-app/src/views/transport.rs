@@ -4,14 +4,17 @@
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    App, Entity, IntoElement, ParentElement as _, SharedString, Styled as _, div, prelude::*,
+    App, Entity, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
+    prelude::*,
 };
 use rust_i18n::t;
 use tessera_core::profile::TransportRisk;
 
 use super::connect_dialog::ConnectDialog;
+use crate::actions::EditTransport;
 use crate::connection::ConnectionState;
 use crate::state::AppState;
 
@@ -22,11 +25,31 @@ fn risk_text(risk: &TransportRisk) -> String {
     }
 }
 
+/// Whether the banner offers its Edit connection button.
+pub fn editable(conn: &Entity<ConnectionState>, state: &Entity<AppState>, cx: &App) -> bool {
+    let profile = &conn.read(cx).profile;
+    !profile.transport_risks().is_empty()
+        && state.read(cx).profiles.iter().any(|p| p.id == profile.id)
+}
+
+/// Opens the connection's profile, as the banner's button does.
+pub fn edit(
+    conn: &Entity<ConnectionState>,
+    state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let id = conn.read(cx).profile.id;
+    ConnectDialog::open_edit(state.clone(), id, window, cx);
+}
+
 /// One line per risk, or nothing. There is no way to close it: the fix is in the profile, and a
 /// temporary connection has none to edit.
 pub fn banner(
     conn: &Entity<ConnectionState>,
     state: &Entity<AppState>,
+    context: &'static str,
+    window: &Window,
     cx: &App,
 ) -> Option<impl IntoElement> {
     let profile = &conn.read(cx).profile;
@@ -34,9 +57,8 @@ pub fn banner(
     if risks.is_empty() {
         return None;
     }
-    let id = profile.id;
-    let saved = state.read(cx).profiles.iter().any(|p| p.id == id);
-    let state = state.clone();
+    let saved = editable(conn, state, cx);
+    let (conn, state) = (conn.clone(), state.clone());
     let text: Vec<String> = risks.iter().map(risk_text).collect();
     let theme = cx.theme();
     Some(
@@ -62,9 +84,12 @@ pub fn banner(
                     Button::new("transport.edit")
                         .xsmall()
                         .label(t!("transport.edit").to_string())
-                        .on_click(move |_, window, cx| {
-                            ConnectDialog::open_edit(state.clone(), id, window, cx);
-                        }),
+                        .children(Kbd::binding_for_action(
+                            &EditTransport,
+                            Some(context),
+                            window,
+                        ))
+                        .on_click(move |_, window, cx| edit(&conn, &state, window, cx)),
                 )
             }),
     )

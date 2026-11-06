@@ -249,6 +249,13 @@ pub enum TransportRisk {
 }
 
 impl Profile {
+    /// How many different nodes the profile can reach: its nodes and the nearest node, once each.
+    pub fn distinct_nodes(&self) -> usize {
+        let nodes = self.nodes.iter().chain(&self.nearest_node);
+        let urls: std::collections::BTreeSet<_> = nodes.filter_map(|n| n.url().ok()).collect();
+        urls.len()
+    }
+
     /// Every risk of this profile: each remote `http` node, the nearest node too, then the
     /// certificates.
     pub fn transport_risks(&self) -> Vec<TransportRisk> {
@@ -343,6 +350,12 @@ mod tests {
             ("localhost", Protocol::Http, vec![]),
             ("127.0.0.1", Protocol::Http, vec![]),
             ("::1", Protocol::Http, vec![]),
+            ("[::1]", Protocol::Http, vec![]),
+            (
+                "localhost.evil.com",
+                Protocol::Http,
+                vec![plain("localhost.evil.com")],
+            ),
             (
                 "search.example",
                 Protocol::Http,
@@ -361,6 +374,25 @@ mod tests {
             p.transport_risks(),
             [plain("near.example"), InsecureCertificates]
         );
+    }
+
+    #[test]
+    fn distinct_nodes_counts_the_nearest_node_once() {
+        let node = |host: &str, path: &str| Node {
+            protocol: Protocol::Http,
+            host: host.into(),
+            port: 8108,
+            path: path.into(),
+        };
+        let mut p = Profile::new("p", vec![node("a", "")]);
+        assert_eq!(p.distinct_nodes(), 1);
+        p.nearest_node = Some(node("a", "/"));
+        assert_eq!(p.distinct_nodes(), 1);
+        p.nearest_node = Some(node("near", ""));
+        assert_eq!(p.distinct_nodes(), 2);
+        p.nodes = vec![node("a", ""), node("a", "/two"), node("a", "")];
+        p.nearest_node = None;
+        assert_eq!(p.distinct_nodes(), 2);
     }
 
     #[test]

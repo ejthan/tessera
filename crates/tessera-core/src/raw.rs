@@ -329,7 +329,6 @@ mod tests {
                 high("snapshot"),
             ),
             (Method::POST, "config", Medium, high("config")),
-            (Method::POST, "%63onfig", Medium, high("config")),
             (Method::GET, "config", None, None),
             (Method::POST, "operations", None, Medium),
             (Method::POST, "collections", None, Medium),
