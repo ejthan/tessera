@@ -7,7 +7,7 @@
 //! `TESSERA_IT_KEY` override the defaults `http://localhost:18108` and `xyz`.
 
 use secrecy::SecretString;
-use tessera_client::{Client, ClientOptions, Error, NewKey};
+use tessera_client::{Client, ClientOptions, DocumentQuery, Error, NewKey};
 
 /// Sat, 01 Jan 2100.
 const EXPIRES: i64 = 4102444800;
@@ -75,4 +75,177 @@ async fn live_with_key_uses_the_other_key() {
     let answer = c.with_key(created.value).keys().await;
     c.delete_key(created.key.id).await.expect("delete");
     assert_eq!(status(&answer.expect_err("refused")), Some(401));
+}
+
+// Analytics. Rules and events answer on any server, but the aggregates reach a destination only
+// when it runs with `--enable-search-analytics=true` and `--analytics-dir`: the dev compose file
+// has them, and `TESSERA_IT_ANALYTICS=1` says so. Without it a test sends at most 2 events,
+// because the default limit is 5 a minute and refused requests count.
+
+fn analytics_server() -> bool {
+    std::env::var("TESSERA_IT_ANALYTICS").is_ok_and(|v| v == "1")
+}
+
+async fn make_collection(c: &Client, name: &str, fields: serde_json::Value) {
+    let _ = c.delete_collection(name).await;
+    let schema = serde_json::json!({ "name": name, "fields": fields });
+    c.create_collection(&schema).await.expect("collection");
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_rule_crud() {
+    use serde_json::json;
+    let c = client();
+    let (source, dest, rule) = (
+        "tessera_it_ar_src",
+        "tessera_it_ar_dst",
+        "tessera_it_ar_rule",
+    );
+    let _ = c.delete_analytics_rule(rule).await;
+    make_collection(&c, source, json!([{"name": "title", "type": "string"}])).await;
+    make_collection(
+        &c,
+        dest,
+        json!([{"name": "q", "type": "string"}, {"name": "count", "type": "int32"}]),
+    )
+    .await;
+    let body = |limit: u32| {
+        json!({
+            "name": rule, "type": "popular_queries", "collection": source, "event_type": "search",
+            "params": {"destination_collection": dest, "limit": limit}
+        })
+    };
+    let created = c.create_analytics_rule(&body(100)).await;
+    let duplicate = c.create_analytics_rule(&body(100)).await;
+    let listed = c.analytics_rules().await;
+    let put = c
+        .update_analytics_rule(rule, &json!({"params": {"limit": 7}}))
+        .await;
+    let read = c.analytics_rule(rule).await;
+    let retyped = c.update_analytics_rule(rule, &json!({"type": "log"})).await;
+    let deleted = c.delete_analytics_rule(rule).await;
+    let gone = c.analytics_rule(rule).await;
+    let _ = c.delete_collection(source).await;
+    let _ = c.delete_collection(dest).await;
+
+    created.expect("create");
+    assert_eq!(status(&duplicate.expect_err("duplicate")), Some(400));
+    assert!(listed.expect("list").iter().any(|r| r["name"] == rule));
+    put.expect("put");
+    let read = read.expect("get");
+    assert_eq!(read["params"]["limit"], 7);
+    assert_eq!(
+        read["params"]["destination_collection"], dest,
+        "a partial body merges"
+    );
+    assert_eq!(status(&retyped.expect_err("retype")), Some(400));
+    deleted.expect("delete");
+    assert_eq!(status(&gone.expect_err("gone")), Some(400));
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_put_creates_a_missing_rule() {
+    use serde_json::json;
+    let c = client();
+    let (source, rule) = ("tessera_it_ap_src", "tessera_it_ap_rule");
+    let _ = c.delete_analytics_rule(rule).await;
+    make_collection(&c, source, json!([{"name": "title", "type": "string"}])).await;
+    let put = c
+        .update_analytics_rule(
+            rule,
+            &json!({"type": "log", "collection": source, "event_type": "click"}),
+        )
+        .await;
+    let read = c.analytics_rule(rule).await;
+    let _ = c.delete_analytics_rule(rule).await;
+    let _ = c.delete_collection(source).await;
+    put.expect("an unknown name is created, not refused");
+    assert_eq!(read.expect("exists")["type"], "log");
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_event_is_accepted() {
+    use serde_json::json;
+    let c = client();
+    let (source, rule) = ("tessera_it_ae_src", "tessera_it_ae_rule");
+    let _ = c.delete_analytics_rule(rule).await;
+    make_collection(&c, source, json!([{"name": "title", "type": "string"}])).await;
+    c.create_analytics_rule(&json!({
+        "name": rule, "type": "log", "collection": source, "event_type": "click"
+    }))
+    .await
+    .expect("rule");
+    let sent = c
+        .analytics_event(&json!({
+            "name": rule, "event_type": "click", "data": {"user_id": "u", "doc_id": "1"}
+        }))
+        .await;
+    let _ = c.delete_analytics_rule(rule).await;
+    let _ = c.delete_collection(source).await;
+    sent.expect("event");
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_flush_answers() {
+    client().flush_analytics().await.expect("flush");
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense with the analytics flags, see dev/docker-compose.yml"]
+async fn live_aggregate_reaches_the_destination() {
+    use serde_json::json;
+    if !analytics_server() {
+        eprintln!("skipped: set TESSERA_IT_ANALYTICS=1 on a server with the analytics flags");
+        return;
+    }
+    let c = client();
+    let (source, dest, rule) = (
+        "tessera_it_ag_src",
+        "tessera_it_ag_dst",
+        "tessera_it_ag_rule",
+    );
+    let _ = c.delete_analytics_rule(rule).await;
+    make_collection(&c, source, json!([{"name": "title", "type": "string"}])).await;
+    make_collection(
+        &c,
+        dest,
+        json!([{"name": "q", "type": "string"}, {"name": "count", "type": "int32"}]),
+    )
+    .await;
+    c.create_analytics_rule(&json!({
+        "name": rule, "type": "popular_queries", "collection": source, "event_type": "search",
+        "params": {"destination_collection": dest, "limit": 100}
+    }))
+    .await
+    .expect("rule");
+    c.analytics_event(&json!({
+        "name": rule, "event_type": "search", "data": {"user_id": "u", "q": "tessera shoes"}
+    }))
+    .await
+    .expect("event");
+    c.flush_analytics().await.expect("flush");
+    let mut hits = 0;
+    for _ in 0..20 {
+        let all = DocumentQuery {
+            page: 1,
+            per_page: 10,
+            filter_by: None,
+            sort_by: None,
+            exclude_fields: None,
+        };
+        let page = c.search_documents(dest, &all).await;
+        hits = page.map_or(0, |p| p.found);
+        if hits > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let _ = c.delete_analytics_rule(rule).await;
+    let _ = c.delete_collection(source).await;
+    let _ = c.delete_collection(dest).await;
+    assert!(hits > 0, "no aggregate reached the destination within 10 s");
 }

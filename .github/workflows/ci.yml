@@ -61,8 +61,13 @@ jobs:
         env:
           TYPESENSE_DATA_DIR: /tmp
           TYPESENSE_API_KEY: xyz
+          TYPESENSE_ENABLE_SEARCH_ANALYTICS: "true"
+          TYPESENSE_ANALYTICS_DIR: /tmp/analytics
+          TYPESENSE_ANALYTICS_MINUTE_RATE_LIMIT: "1000"
         ports:
           - 8108:8108
+        # Lets the server reach the stub of a test on the runner.
+        options: --add-host=host.docker.internal:host-gateway
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2.9.3
@@ -75,6 +80,17 @@ jobs:
         env:
           TESSERA_IT_URL: http://localhost:8108
           TESSERA_IT_KEY: xyz
+      - run: cargo test -p tessera-client --test live_admin --locked -- --ignored
+        env:
+          TESSERA_IT_URL: http://localhost:8108
+          TESSERA_IT_ANALYTICS: "1"
+          TESSERA_IT_STUB_HOST: host.docker.internal
+      - run: cargo test -p tessera-core --test live_scoped --test live_actions --locked -- --ignored
+        env:
+          TESSERA_IT_URL: http://localhost:8108
+          TESSERA_IT_KEY: xyz
+          TESSERA_IT_ANALYTICS: "1"
+          TESSERA_IT_STUB_HOST: host.docker.internal
 
   build:
     strategy:

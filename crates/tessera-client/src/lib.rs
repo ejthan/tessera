@@ -2,6 +2,7 @@
 
 //! HTTP client for the Typesense API.
 
+mod analytics;
 mod collections;
 mod documents;
 mod error;
