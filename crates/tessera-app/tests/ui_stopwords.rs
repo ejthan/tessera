@@ -182,6 +182,38 @@ async fn selecting_a_set_fills_the_editor(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn words_can_be_typed(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![set("en", &["the"])]).await;
+    f.click(cx, "stopwords.row.en");
+    let panel = f
+        .handle
+        .update(cx, |root, _, cx| {
+            let view = root.view().clone().downcast::<RootView>().unwrap();
+            let area = view.read(cx).dock().read(cx);
+            area.layout(DockPlacement::Center)
+                .unwrap()
+                .panels()
+                .filter_map(|id| area.panel(id)?.view().downcast::<ResourcePanel>().ok())
+                .next()
+                .unwrap()
+        })
+        .unwrap();
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        let ResourceView::Stopwords(view) = panel.read(cx).view() else {
+            panic!("not the stopwords view");
+        };
+        let editor = view.read(cx).editor().clone();
+        cx.update_entity(&editor, |e, cx| {
+            e.set_text("", window, cx);
+            e.focus(window, cx);
+        });
+    })
+    .unwrap();
+    f.press(cx, "a");
+    assert_eq!(f.editor_text(cx), "a");
+}
+
+#[gpui_kit::test]
 async fn save_shows_the_stored_words(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![set("en", &["the"])]).await;
     f.click(cx, "stopwords.row.en");

@@ -99,7 +99,11 @@ impl StopwordsView {
             load_task: None,
             editing: None,
             followed: None,
-            editor: cx.new(|cx| JsonEditor::plain("", window, cx)),
+            editor: cx.new(|cx| {
+                let mut editor = JsonEditor::plain("", window, cx);
+                editor.set_read_only(false, cx);
+                editor
+            }),
             locale: cx.new(|cx| InputState::new(window, cx)),
             saving: false,
             error: None,
