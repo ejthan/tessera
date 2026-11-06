@@ -138,7 +138,7 @@ pub struct FieldDraft {
     pub num_dim: Option<u32>,
     /// Vector distance metric.
     pub vec_dist: Option<String>,
-    /// Embedding config, edited in JSON mode only.
+    /// Embedding config: the form writes it through `ai::set_embedding`.
     pub embed: Option<Value>,
     /// Field attributes the form does not edit.
     pub extra: Map<String, Value>,
@@ -180,6 +180,13 @@ fn default_optional(name: &str, t: &FieldType) -> bool {
 }
 
 impl FieldDraft {
+    fn model_config(&mut self) -> Option<&mut Map<String, Value>> {
+        self.embed
+            .as_mut()?
+            .get_mut("model_config")?
+            .as_object_mut()
+    }
+
     /// A field with the server defaults.
     pub fn new(name: impl Into<String>, r#type: FieldType) -> Self {
         let name = name.into();
@@ -525,6 +532,43 @@ impl SchemaDraft {
         n
     }
 
+    /// The draft as the JSON tab shows it: credentials under `embed.model_config` read as the
+    /// mask, an empty one stays empty. [`Self::restore_secrets`] undoes this on the way back.
+    pub fn to_masked_json(&self) -> Value {
+        let mut draft = self.clone();
+        for cfg in draft.fields.iter_mut().filter_map(FieldDraft::model_config) {
+            for key in SECRET_KEYS {
+                if cfg
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+                {
+                    cfg.insert(key.into(), crate::redact::MASK.into());
+                }
+            }
+        }
+        draft.to_json()
+    }
+
+    /// Takes back from `known` the credential of a field of the same name where this draft holds
+    /// the mask, which is what parsing the text of [`Self::to_masked_json`] gives.
+    pub fn restore_secrets(&mut self, known: &SchemaDraft) {
+        for f in &mut self.fields {
+            let was = known.fields.iter().find(|k| k.name == f.name);
+            let was = was.and_then(|k| k.embed.as_ref()?.get("model_config")?.as_object());
+            let (Some(cfg), Some(was)) = (f.model_config(), was) else {
+                continue;
+            };
+            for key in SECRET_KEYS {
+                if cfg.get(key).and_then(Value::as_str) == Some(crate::redact::MASK)
+                    && let Some(value) = was.get(key)
+                {
+                    cfg.insert(key.into(), value.clone());
+                }
+            }
+        }
+    }
+
     /// How many credentials under `embed.model_config` are empty.
     pub fn empty_secrets(&self) -> usize {
         let configs = self.fields.iter().filter_map(|f| {
@@ -696,6 +740,33 @@ mod tests {
         let cfg = &j["fields"][0]["embed"]["model_config"];
         assert_eq!(cfg["api_key"], "");
         assert_eq!(cfg["model_name"], "openai/x");
+    }
+
+    #[test]
+    fn masked_json_hides_a_key_and_restore_brings_it_back() {
+        let d = SchemaDraft::from_json(
+            r#"{"name":"e","fields":[
+              {"name":"a","type":"float[]","embed":{"from":["t"],
+                "model_config":{"model_name":"openai/x","api_key":"sk-1"}}},
+              {"name":"b","type":"float[]","embed":{"from":["t"],
+                "model_config":{"model_name":"openai/x","api_key":""}}}]}"#,
+        )
+        .unwrap();
+        let shown = d.to_masked_json();
+        assert!(!shown.to_string().contains("sk-1"));
+        assert_eq!(
+            shown["fields"][0]["embed"]["model_config"]["api_key"],
+            crate::redact::MASK
+        );
+        assert_eq!(shown["fields"][1]["embed"]["model_config"]["api_key"], "");
+        let mut parsed = SchemaDraft::from_json(&shown.to_string()).unwrap();
+        parsed.restore_secrets(&d);
+        assert_eq!(parsed.to_json(), d.to_json());
+        // A renamed field has nothing to take back: the mask stays and stops the send.
+        let mut renamed = SchemaDraft::from_json(&shown.to_string()).unwrap();
+        renamed.fields[0].name = "c".into();
+        renamed.restore_secrets(&d);
+        assert!(crate::redact::contains_mask(&renamed.to_json()));
     }
 
     #[test]

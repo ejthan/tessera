@@ -57,7 +57,9 @@ cargo run -p tessera-app -- --host localhost --port 18108 --api-key-stdin <<< xy
 cargo xtask seed --url http://localhost:18108 [--key xyz] [--reset]
 ```
 
-Fills the server with `books` (10,000 documents, with the alias `books_current` and the synonym set `books_synonyms`), `authors` (500), `books_ref` (2,000, references `authors`), `places` (1,000, geopoints), `articles_vec` (1,000, 8-dimensional vectors) and `products` (200,000, with a nested `dimensions` object, about 10 s to load). The documents are generated from a fixed seed, so every run gives the same data. There is no default URL; without `--url` the command prints its usage and exits with 2. The key defaults to `xyz`. Documents are streamed in batches of 1,000. If one of these collections exists, the command stops and names it; `--reset` drops those collections, the alias and the synonym set first, and nothing else.
+Fills the server with `books` (10,000 documents, with the alias `books_current` and the synonym set `books_synonyms`), `authors` (500), `books_ref` (2,000, references `authors`), `places` (1,000, geopoints), `articles_vec` (1,000, 8-dimensional vectors) and `products` (200,000, with a nested `dimensions` object, about 10 s to load). The documents are generated from a fixed seed, so every run gives the same data. There is no default URL; without `--url` the command prints its usage and exits with 2. The key defaults to `xyz`. Documents are streamed in batches of 1,000. If one of these collections exists, the command stops and names it; `--reset` drops those collections, the alias and the sets first, and nothing else.
+
+It also adds the curation set `books_curation`, the stopword set `en_common`, the preset `books_fantasy`, the search-only key described `tessera-seed-search`, of which it prints only the id and the first characters, the `popular_queries` rule `books_popular` from `books` to `books_queries`, and the stemming dictionary `seed_plurals` with three words. `--reset` removes these too.
 
 ## Tests
 
@@ -72,6 +74,8 @@ cargo test -p tessera-client --test live -- --ignored
 ```
 
 They use `http://localhost:18108` and key `xyz`; override with `TESSERA_IT_URL` and `TESSERA_IT_KEY`.
+
+`live_ai` runs models against a local stub, so it never reaches a provider. `TESSERA_IT_STUB_HOST` names this machine as the server sees it, such as `host.docker.internal`; without it the stub tests return early. `live_builtin_model` downloads a model, so CI leaves it to the nightly job.
 
 ### Cluster tests
 
@@ -111,6 +115,23 @@ context = "Workbench"
 - A binding without a modifier (`cmd`, `ctrl` or `alt`) also fires while typing in a field, so bind a chord.
 
 A control shows the chord that is bound now. A bad entry is skipped and named above the tabs, and the others apply. A file that does not parse, or has a field the format does not know, changes nothing: the default shortcuts stay, and the line above the tabs names the place. `escape` cannot be bound, because it closes every dialog. An unbound action stays reachable from its control and the palette.
+
+## Manual checks of keys, analytics and AI (M7)
+
+Nothing here has been done yet: the views are covered by UI tests with fakes and the client and core by live tests, and none of it has been looked at. Run against the dev server after `cargo run -p xtask -- seed --url http://localhost:18108 --key xyz --reset`. For the analytics steps the server needs its flags: recreate it once with `TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d`, the volume stays. Record the result in the PR description.
+
+1. The key dialog in light and in dark, ⌥⌘6 (Ctrl+Alt+6), then New: the action matrix scrolls, nothing is cut off at the smallest window, and the presets fill it.
+2. The reveal after a create: the value shows masked, Copy works, Esc does not close it, and only Done does.
+3. The date picker in the key dialog, which is a stacked dialog: it opens over the dialog, and Esc closes the picker and leaves the dialog.
+4. The scoped key panel, ⌘2: a key generates as you type from a parent with `documents:search` only, a pasted key decodes, and Test counts documents on a read-only connection.
+5. The analytics view, ⌥⌘7 (Ctrl+Alt+7), on a server with the flags: `books_popular` lists, a search on `books` reaches `books_queries` after Flush now, and a test event goes out.
+6. A stemming import, ⌥⌘8 (Ctrl+Alt+8): a good file, a file with a bad line that stops before anything is sent, and an import into `seed_plurals` that asks first.
+7. The AI tab, ⌥⌘9 (Ctrl+Alt+9): ⌘1 and ⌘2 switch, the eye shows the key field's text, and an edit starts with an empty key field.
+8. If a key is at hand, one real provider for each of a conversation model, an NL search model and an embedding field. Check that a provider's message shows in full and without the key.
+9. The embedding block in the schema form: Auto-embed on a `float[]` row, the completion of the model, a `ts/` model hiding the key and showing the note, the JSON tab showing `••••` for a typed key, and the dialog still reaching Create with two embedded fields at the smallest window.
+10. On macOS, every shortcut shown on a control in these views does what its control does.
+
+What the stub cannot prove, so only step 8 can (design §8.3): that real answers of OpenAI, Azure, Google, Cloudflare, vLLM and GCP parse, the `extraction_method` variants in `llm_response`, the request shapes of Google and GCP, which differ from OpenAI's, and the refresh of GCP tokens.
 
 ## Manual checks of the relevance resources (M6)
 

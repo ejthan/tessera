@@ -441,7 +441,8 @@ pub fn nl_outcome(text: &str) -> NlOutcome {
 }
 
 /// Writes `embed` on `field`, keeping every key it does not know. `api_key` stays as it is when
-/// `None`. A blank `url` removes it. The server sets `num_dim` itself.
+/// `None`, and a blank one removes it. A blank `url` removes it too. The server sets `num_dim`
+/// itself.
 pub fn set_embedding(
     field: &mut FieldDraft,
     from: &[String],
@@ -459,8 +460,10 @@ pub fn set_embedding(
         _ => Map::new(),
     };
     config.insert("model_name".into(), model.into());
-    if let Some(key) = api_key {
-        config.insert("api_key".into(), key.into());
+    match api_key {
+        Some(key) if key.trim().is_empty() => drop(config.remove("api_key")),
+        Some(key) => drop(config.insert("api_key".into(), key.trim().into())),
+        None => {}
     }
     if url.trim().is_empty() {
         config.remove("url");
@@ -811,5 +814,8 @@ mod tests {
             Some(json!("sk"))
         );
         assert_eq!(config.map(|c| c["url"].clone()), Some(json!("http://stub")));
+        set_embedding(&mut field, &[], "openai/x", Some(" "), "http://stub");
+        let config = field.embed.as_ref().map(|e| e["model_config"].clone());
+        assert!(config.is_some_and(|c| c.get("api_key").is_none()));
     }
 }
