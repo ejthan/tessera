@@ -2,6 +2,7 @@
 
 //! The API keys of a connection: a list and what the selected key may do.
 
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex};
 use gpui_kit::{
@@ -398,15 +399,20 @@ impl Render for KeysView {
                     .into_any_element()
             })
             .children(self.error.clone().map(|e| notice("keys.error", e, danger)))
-            .child(div().flex_none().p_2().child(row_button(
-                "keys.delete".into(),
-                t!("keys.delete").to_string(),
-                &DeleteResource,
-                (none, locked),
-                &self.focus_handle,
-                window,
-                cx,
-            )));
+            .child(
+                div().flex_none().p_2().child(
+                    row_button(
+                        "keys.delete".into(),
+                        t!("keys.delete").to_string(),
+                        &DeleteResource,
+                        (none, locked),
+                        &self.focus_handle,
+                        window,
+                        cx,
+                    )
+                    .danger(),
+                ),
+            );
         div()
             .track_focus(&self.focus_handle)
             .size_full()

@@ -446,15 +446,20 @@ impl Render for ModelsView {
                     .into_any_element()
             })
             .children(self.error.clone().map(|e| notice("ai.error", e, danger)))
-            .child(div().flex_none().p_2().child(row_button(
-                "ai.delete".into(),
-                t!("ai.delete").to_string(),
-                &DeleteResource,
-                (none, locked),
-                &self.focus_handle,
-                window,
-                cx,
-            )));
+            .child(
+                div().flex_none().p_2().child(
+                    row_button(
+                        "ai.delete".into(),
+                        t!("ai.delete").to_string(),
+                        &DeleteResource,
+                        (none, locked),
+                        &self.focus_handle,
+                        window,
+                        cx,
+                    )
+                    .danger(),
+                ),
+            );
         div()
             .track_focus(&self.focus_handle)
             .size_full()

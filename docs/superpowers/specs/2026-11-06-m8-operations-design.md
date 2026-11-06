@@ -391,7 +391,7 @@ The three levels are `tessera_core::documents::export::Danger` plus D62, D81 and
 
 ### 7.5 Transport banner (`views/transport.rs`, D98)
 
-`transport::banner(conn, cx)` renders above the tab content next to `unlock::banner`, at the seven call sites in `dock.rs`, when a node of the profile is `Http` and not `is_local()`, or when `tls.allow_insecure`. It names the case, always shows, and has no close button: the fix is in the profile. Edit connection… opens the connect dialog. Text only, no toast. A pure `core::profile::Transport` check is unit tested: `Profile::transport_risks() -> Vec<TransportRisk>`.
+`transport::banner(conn, state, cx)` renders above the tab content next to `unlock::banner`, at the seven call sites in `dock.rs`, when a node of the profile is `Http` and not `is_local()`, or when `tls.allow_insecure`. It names the case, always shows, and has no close button: the fix is in the profile. Edit connection… opens the connect dialog, and a temporary connection has no such button. Text only, no toast. A pure `core::profile::Transport` check is unit tested: `Profile::transport_risks() -> Vec<TransportRisk>`.
 
 ### 7.6 Backup tab (`views/resources/backup.rs`)
 

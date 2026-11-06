@@ -422,7 +422,7 @@ impl RootView {
                 None => {
                     let (id, handle) = match kind {
                         Kind::Overview => {
-                            let panel = cx.new(|cx| OverviewPanel::new(conn, window, cx));
+                            let panel = cx.new(|cx| OverviewPanel::new(conn, state, window, cx));
                             (PanelId::from(panel.entity_id()), panel_handle(panel))
                         }
                         Kind::Collections => {

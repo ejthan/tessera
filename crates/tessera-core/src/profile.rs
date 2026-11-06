@@ -236,6 +236,36 @@ impl Node {
     }
 }
 
+/// What makes a connection readable or changeable on the way (D98).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportRisk {
+    /// `http://` to a host that is not this machine.
+    PlainHttp {
+        /// The node, as `host:port`.
+        host: String,
+    },
+    /// Any server certificate is accepted.
+    InsecureCertificates,
+}
+
+impl Profile {
+    /// Every risk of this profile: each remote `http` node, the nearest node too, then the
+    /// certificates.
+    pub fn transport_risks(&self) -> Vec<TransportRisk> {
+        let plain = self
+            .nodes
+            .iter()
+            .chain(&self.nearest_node)
+            .filter(|n| n.protocol == Protocol::Http && !n.is_local())
+            .map(|n| TransportRisk::PlainHttp { host: n.label() });
+        let insecure = self
+            .tls
+            .allow_insecure
+            .then_some(TransportRisk::InsecureCertificates);
+        plain.chain(insecure).collect()
+    }
+}
+
 /// TLS settings of a profile.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct TlsOptions {
@@ -297,6 +327,42 @@ mod tests {
             p
         );
     }
+    #[test]
+    fn transport_risks_table() {
+        use TransportRisk::*;
+        let node = |protocol, host: &str| Node {
+            protocol,
+            host: host.into(),
+            port: 8108,
+            path: String::new(),
+        };
+        let plain = |host: &str| PlainHttp {
+            host: format!("{host}:8108"),
+        };
+        for (host, protocol, expected) in [
+            ("localhost", Protocol::Http, vec![]),
+            ("127.0.0.1", Protocol::Http, vec![]),
+            ("::1", Protocol::Http, vec![]),
+            (
+                "search.example",
+                Protocol::Http,
+                vec![plain("search.example")],
+            ),
+            ("search.example", Protocol::Https, vec![]),
+        ] {
+            let p = Profile::new("p", vec![node(protocol, host)]);
+            assert_eq!(p.transport_risks(), expected, "{host}");
+        }
+
+        let mut p = Profile::new("p", vec![node(Protocol::Https, "a.example")]);
+        p.nearest_node = Some(node(Protocol::Http, "near.example"));
+        p.tls.allow_insecure = true;
+        assert_eq!(
+            p.transport_risks(),
+            [plain("near.example"), InsecureCertificates]
+        );
+    }
+
     #[test]
     fn local_hosts_and_duplicate_slashes() {
         let n = Node {

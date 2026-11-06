@@ -929,7 +929,7 @@ impl SearchWorkbench {
                             )
                             .child(
                                 Button::new("search.saved.delete")
-                                    .ghost()
+                                    .danger()
                                     .small()
                                     .label(t!("search.saved.delete").to_string())
                                     .children(Kbd::binding_for_action(

@@ -461,15 +461,20 @@ impl Render for StopwordsView {
                     .child(self.list.clone())
                     .into_any_element()
             })
-            .child(div().flex_none().p_2().child(row_button(
-                "stopwords.delete".into(),
-                t!("stopwords.delete").to_string(),
-                &DeleteResource,
-                (none, locked),
-                &self.focus_handle,
-                window,
-                cx,
-            )));
+            .child(
+                div().flex_none().p_2().child(
+                    row_button(
+                        "stopwords.delete".into(),
+                        t!("stopwords.delete").to_string(),
+                        &DeleteResource,
+                        (none, locked),
+                        &self.focus_handle,
+                        window,
+                        cx,
+                    )
+                    .danger(),
+                ),
+            );
         div()
             .track_focus(&self.focus_handle)
             .size_full()
