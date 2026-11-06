@@ -128,11 +128,13 @@ pub enum ResourceKind {
     Keys,
     /// Analytics rules, their destinations and test events.
     Analytics,
+    /// Stemming dictionaries.
+    Stemming,
 }
 
 impl ResourceKind {
     /// Every kind, in sidebar order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Aliases,
         Self::Synonyms,
         Self::Curations,
@@ -140,6 +142,7 @@ impl ResourceKind {
         Self::Presets,
         Self::Keys,
         Self::Analytics,
+        Self::Stemming,
     ];
 
     /// The part of the ids of its row and tab.
@@ -152,6 +155,7 @@ impl ResourceKind {
             Self::Presets => "presets",
             Self::Keys => "keys",
             Self::Analytics => "analytics",
+            Self::Stemming => "stemming",
         }
     }
 
@@ -160,10 +164,14 @@ impl ResourceKind {
         format!("sidebar.{}", self.key())
     }
 
-    /// Whether a server of that support gets a row: synonym sets, curation sets and these
-    /// analytics rules do not exist below v30.
+    /// Whether a server of that support gets a row: synonym sets, curation sets, these
+    /// analytics rules and stemming dictionaries do not exist below v30.
     pub fn shown(self, supported: bool) -> bool {
-        supported || !matches!(self, Self::Synonyms | Self::Curations | Self::Analytics)
+        supported
+            || !matches!(
+                self,
+                Self::Synonyms | Self::Curations | Self::Analytics | Self::Stemming
+            )
     }
 }
 

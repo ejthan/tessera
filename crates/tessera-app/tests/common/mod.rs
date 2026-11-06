@@ -20,7 +20,7 @@ use gpui_kit::{
 };
 use secrecy::ExposeSecret as _;
 use serde_json::Value;
-use tessera_app::admin::{AdminBackend, AdminBackendGlobal};
+use tessera_app::admin::{AdminBackend, AdminBackendGlobal, DictionaryFileError};
 use tessera_app::collections::{CollectionsBackend, CollectionsBackendGlobal};
 use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
 use tessera_app::documents::{DocumentsBackend, DocumentsBackendGlobal, PageResult};
@@ -1702,6 +1702,12 @@ pub struct FakeAdmin {
     pub events: Mutex<Vec<Value>>,
     /// What `top_documents` answers.
     pub top: Mutex<String>,
+    /// The dictionaries on the server.
+    pub dictionaries: Mutex<Vec<tessera_client::StemmingDictionary>>,
+    /// What `read_dictionary_file` answers.
+    pub file: Mutex<Option<Result<Vec<tessera_client::StemmingWord>, DictionaryFileError>>>,
+    /// What `import_dictionary` answers, instead of nothing wrong.
+    pub check: Mutex<Option<tessera_core::stemming::ImportCheck>>,
 }
 
 pub struct FakeAdminBackend(pub Arc<FakeAdmin>);
@@ -1868,6 +1874,79 @@ impl AdminBackend for FakeAdminBackend {
         let top = self.0.top.lock().unwrap().clone();
         let top = if top.is_empty() { search_body(0) } else { top };
         Box::pin(async move { Ok(top) })
+    }
+
+    fn dictionaries(
+        &self,
+        _: Client,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<String>, Error>> {
+        let all = self.0.dictionaries.lock().unwrap();
+        let ids = all.iter().map(|d| d.id.clone()).collect();
+        Box::pin(async move { Ok(ids) })
+    }
+
+    fn dictionary(
+        &self,
+        _: Client,
+        id: String,
+    ) -> tessera_app::collections::BoxFuture<Result<tessera_client::StemmingDictionary, Error>>
+    {
+        let all = self.0.dictionaries.lock().unwrap();
+        let found = all.iter().find(|d| d.id == id).cloned();
+        let answer = found.ok_or_else(|| http_error((404, "Collection not found".into())));
+        Box::pin(async move { answer })
+    }
+
+    fn read_dictionary_file(
+        &self,
+        _: PathBuf,
+    ) -> tessera_app::collections::BoxFuture<
+        Result<Vec<tessera_client::StemmingWord>, DictionaryFileError>,
+    > {
+        let file = self.0.file.lock().unwrap().clone();
+        Box::pin(async move { file.unwrap_or(Ok(Vec::new())) })
+    }
+
+    fn import_dictionary(
+        &self,
+        _: Client,
+        id: String,
+        words: Vec<tessera_client::StemmingWord>,
+    ) -> tessera_app::collections::BoxFuture<Result<tessera_core::stemming::ImportCheck, Error>>
+    {
+        self.0
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("import {id} {}", words.len()));
+        let mut all = self.0.dictionaries.lock().unwrap();
+        if !all.iter().any(|d| d.id == id) {
+            all.push(tessera_client::StemmingDictionary {
+                id,
+                words: words.clone(),
+            });
+        }
+        let check = self.0.check.lock().unwrap().clone();
+        let check = check.unwrap_or(tessera_core::stemming::ImportCheck {
+            sent: words.len(),
+            missing: Vec::new(),
+            kept_root: 0,
+        });
+        Box::pin(async move { Ok(check) })
+    }
+
+    fn delete_dictionary(
+        &self,
+        _: Client,
+        id: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("delete_dictionary {id}"));
+        self.0.dictionaries.lock().unwrap().retain(|d| d.id != id);
+        Box::pin(async move { Ok(()) })
     }
 }
 

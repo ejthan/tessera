@@ -131,6 +131,7 @@ gpui_kit::actions!(
         OpenPresetsTab,
         OpenKeys,
         OpenAnalytics,
+        OpenStemming,
         FlushAnalytics,
         SendTestEvent,
         OpenTopInSearch,
@@ -234,6 +235,10 @@ const RESOURCES_INPUT: &str = "Resources > Input";
 pub const SCOPED_KEYS: &str = "ScopedKeys";
 /// Key context of the dialog that shows a new key.
 pub const KEY_REVEAL: &str = "KeyReveal";
+/// Key context of the stemming import dialog.
+pub const STEMMING_DIALOG: &str = "StemmingDialog";
+/// An input in that dialog, which has its own ⌘↩.
+const STEMMING_INPUT: &str = "StemmingDialog > Input";
 /// Key context of an analytics tab.
 pub const ANALYTICS: &str = "Analytics";
 /// Key context of the alias dialog.
@@ -646,6 +651,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     OpenPresetsTab,
     OpenKeys,
     OpenAnalytics,
+    OpenStemming,
     FlushAnalytics,
     SendTestEvent,
     OpenTopInSearch,
@@ -921,6 +927,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_RESOURCES[4], OpenPresetsTab, None),
         KeyBinding::new(OPEN_RESOURCES[5], OpenKeys, None),
         KeyBinding::new(OPEN_RESOURCES[6], OpenAnalytics, None),
+        KeyBinding::new(OPEN_RESOURCES[7], OpenStemming, None),
+        KeyBinding::new(SAVE, SaveResource, Some(STEMMING_DIALOG)),
+        KeyBinding::new(SAVE, SaveResource, Some(STEMMING_INPUT)),
+        KeyBinding::new(OPEN_SAVED, PickImportFile, Some(STEMMING_DIALOG)),
         KeyBinding::new(UPDATE_QUERY, FlushAnalytics, Some(ANALYTICS)),
         KeyBinding::new(TEST, SendTestEvent, Some(ANALYTICS)),
         KeyBinding::new(OPEN_SEARCH, OpenTopInSearch, Some(ANALYTICS)),

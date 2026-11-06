@@ -328,7 +328,7 @@ impl Client {
 
 Core: design §5.5 verbatim, using `StemmingWord` in place of `WordRoot`. `parse_dictionary` skips blank lines. Line numbers are 1-based. It collects at most 100 `BadLine`s. A value that is not a string is `LineProblem::NotText`. An empty or all-space `word` or `root` is `LineProblem::Empty`. Unknown keys are ignored, as on the server.
 
-`to_jsonl` writes `{"word":…,"root":…}` through `serde_json`, one per line, without a final newline. `check_import`: `missing` holds sent words not in `stored` with the last sent root; `changed_root` counts words of `before` whose root differs in `stored`. `collections_using` compares `Field::attr("stem_dictionary")`.
+`to_jsonl` writes `{"word":…,"root":…}` through `serde_json`, one per line, without a final newline. `check_import`: `missing` holds sent words not in `stored` with the root they had, or else the first root sent; `kept_root` counts words of `before` sent with another root. `collections_using` compares `Field::attr("stem_dictionary")`.
 
 - [ ] **Step 1: Write the failing tests.** Core: `parse_accepts_jsonl`, `parse_names_every_bad_line`, `parse_stops_collecting_at_100`, `empty_word_is_refused`, `numeric_word_is_refused`, `check_import_counts_a_changed_root`, `check_import_finds_a_missing_word`, `last_duplicate_wins_in_the_check`. Client live: `live_stemming_crud` imports two lines, reads, imports a line changing a root and adding a word, reads the merge, deletes, confirms the list; `live_bad_line_keeps_the_lines_before_it` documents the partial store; `live_delete_of_an_unknown_id_answers_200`; `live_odd_id_round_trips` with `a/b c`.
 - [ ] **Step 2: Run** the tests. Expected: fails.
@@ -399,7 +399,7 @@ fn delete_dictionary(&self, client: Client, id: String) -> BoxFuture<Result<(), 
 - Import button in the toolbar, `NewResource`. The dialog: id prefilled with the selection, `prompt_for_paths` as `views/import_dialog.rs` line 67, a line with the file's word count, `BadLine`s listed with `t!(format!("stemming.line.{problem}"))`, at most 100, and the first ones visible.
 - Import button stays disabled until the id passes `name_ok` or is the selected id, and a file parsed clean.
 - With an existing id: `confirm_write` with `Danger { lines: [merge text], expected: id, typed: prod }` before sending.
-- Result line: `stemming.imported` "`sent` words sent. `changed_root` existing words took a new root." plus `missing` as a warning naming the first 10.
+- Result line: `stemming.imported` "`sent` words sent. `kept_root` existing words kept their root." plus `missing` as a warning naming the first 10.
 - Delete: `collections_using(&cached_collections, id)`. `typed` when prod or the list is not empty. Lines: "These collections name this dictionary and keep working without its words: a, b."
 
 - [ ] **Step 1: Write the failing UI tests** in `ui_stemming.rs`: `list_and_words_show`; `file_with_a_bad_line_sends_nothing_and_names_the_line`; `too_large_file_says_so`; `import_of_a_new_id_asks_nothing`; `import_into_an_existing_id_says_it_merges`; `cancel_sends_nothing`; `result_states_changed_roots`; `missing_word_warns`; `delete_names_collections`; `delete_is_typed_when_used`; `read_only_import_asks_to_unlock`; `bad_name_keeps_import_disabled`.
