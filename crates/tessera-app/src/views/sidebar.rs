@@ -25,8 +25,8 @@ use super::env_badge;
 use super::import_dialog::ImportDialog;
 use crate::actions::{
     ConnectSelected, DeleteConnection, DisconnectSelected, EditConnection, ExportProfiles,
-    ImportProfiles, NewConnection, OpenAliases, OpenConsoleTab, OpenCurations, OpenKeys, OpenLink,
-    OpenPresetsTab, OpenSearchTab, OpenStopwords, OpenSynonyms, SIDEBAR_ENTRY,
+    ImportProfiles, NewConnection, OpenAliases, OpenAnalytics, OpenConsoleTab, OpenCurations,
+    OpenKeys, OpenLink, OpenPresetsTab, OpenSearchTab, OpenStopwords, OpenSynonyms, SIDEBAR_ENTRY,
     SIDEBAR_ENTRY_BUTTON, SIDEBAR_LINK, ToggleReopenLast,
 };
 use crate::state::{AppState, ResourceKind};
@@ -606,6 +606,7 @@ fn resource_shortcut(kind: ResourceKind, window: &Window) -> Option<Kbd> {
         ResourceKind::Stopwords => Kbd::global_binding_for_action(&OpenStopwords, window),
         ResourceKind::Presets => Kbd::global_binding_for_action(&OpenPresetsTab, window),
         ResourceKind::Keys => Kbd::global_binding_for_action(&OpenKeys, window),
+        ResourceKind::Analytics => Kbd::global_binding_for_action(&OpenAnalytics, window),
     }
 }
 

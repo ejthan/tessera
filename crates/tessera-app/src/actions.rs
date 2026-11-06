@@ -130,6 +130,10 @@ gpui_kit::actions!(
         OpenStopwords,
         OpenPresetsTab,
         OpenKeys,
+        OpenAnalytics,
+        FlushAnalytics,
+        SendTestEvent,
+        OpenTopInSearch,
         NewResource,
         EditResource,
         DeleteResource,
@@ -230,6 +234,8 @@ const RESOURCES_INPUT: &str = "Resources > Input";
 pub const SCOPED_KEYS: &str = "ScopedKeys";
 /// Key context of the dialog that shows a new key.
 pub const KEY_REVEAL: &str = "KeyReveal";
+/// Key context of an analytics tab.
+pub const ANALYTICS: &str = "Analytics";
 /// Key context of the alias dialog.
 pub const ALIAS_DIALOG: &str = "AliasDialog";
 /// An input in that dialog, which has its own ⌘↩.
@@ -639,6 +645,10 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     OpenStopwords,
     OpenPresetsTab,
     OpenKeys,
+    OpenAnalytics,
+    FlushAnalytics,
+    SendTestEvent,
+    OpenTopInSearch,
     NewResource,
     EditResource,
     DeleteResource,
@@ -910,6 +920,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_RESOURCES[3], OpenStopwords, None),
         KeyBinding::new(OPEN_RESOURCES[4], OpenPresetsTab, None),
         KeyBinding::new(OPEN_RESOURCES[5], OpenKeys, None),
+        KeyBinding::new(OPEN_RESOURCES[6], OpenAnalytics, None),
+        KeyBinding::new(UPDATE_QUERY, FlushAnalytics, Some(ANALYTICS)),
+        KeyBinding::new(TEST, SendTestEvent, Some(ANALYTICS)),
+        KeyBinding::new(OPEN_SEARCH, OpenTopInSearch, Some(ANALYTICS)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(RESOURCES)),
         KeyBinding::new(REVERT, ReindexAlias, Some(RESOURCES)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(REINDEX)),

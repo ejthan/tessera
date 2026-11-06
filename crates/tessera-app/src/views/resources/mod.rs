@@ -3,6 +3,7 @@
 //! The views of the relevance resources, one tab per connection and kind.
 
 pub mod aliases;
+pub mod analytics;
 pub mod attachment;
 pub mod curation_dialog;
 pub mod curations;
@@ -39,6 +40,7 @@ use tessera_widgets::confirm;
 use tessera_widgets::confirm_danger::{self, DangerOptions};
 
 use self::aliases::AliasesView;
+use self::analytics::AnalyticsView;
 use self::keys::KeysView;
 use self::presets::PresetsView;
 use self::sets::SetsView;
@@ -60,6 +62,8 @@ pub enum ResourceView {
     Sets(Entity<SetsView>),
     /// See [`KeysView`].
     Keys(Entity<KeysView>),
+    /// See [`AnalyticsView`].
+    Analytics(Entity<AnalyticsView>),
 }
 
 impl ResourceView {
@@ -90,6 +94,9 @@ impl ResourceView {
             ResourceKind::Keys => {
                 Self::Keys(cx.new(|cx| KeysView::new(connection, state, window, cx)))
             }
+            ResourceKind::Analytics => {
+                Self::Analytics(cx.new(|cx| AnalyticsView::new(connection, state, window, cx)))
+            }
         }
     }
 
@@ -101,6 +108,7 @@ impl ResourceView {
             Self::Presets(view) => view.clone().into(),
             Self::Sets(view) => view.clone().into(),
             Self::Keys(view) => view.clone().into(),
+            Self::Analytics(view) => view.clone().into(),
         }
     }
 
@@ -112,6 +120,7 @@ impl ResourceView {
             Self::Presets(view) => view.focus_handle(cx),
             Self::Sets(view) => view.focus_handle(cx),
             Self::Keys(view) => view.focus_handle(cx),
+            Self::Analytics(view) => view.focus_handle(cx),
         }
     }
 
@@ -123,6 +132,7 @@ impl ResourceView {
             Self::Presets(view) => view.read(cx).gates(cx),
             Self::Sets(view) => view.read(cx).gates(cx),
             Self::Keys(view) => view.read(cx).gates(cx),
+            Self::Analytics(view) => view.read(cx).gates(cx),
         }
     }
 }

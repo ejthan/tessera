@@ -19,6 +19,7 @@ use gpui_kit::{
     WindowOptions, base::Root, px, size,
 };
 use secrecy::ExposeSecret as _;
+use serde_json::Value;
 use tessera_app::admin::{AdminBackend, AdminBackendGlobal};
 use tessera_app::collections::{CollectionsBackend, CollectionsBackendGlobal};
 use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
@@ -1693,6 +1694,14 @@ pub struct FakeAdmin {
     pub searches: Mutex<Vec<ScopedSearch>>,
     /// `scoped_search` fails with this status and Typesense message.
     pub fail_search: Mutex<Option<(u16, String)>>,
+    /// The analytics rules on the server.
+    pub rules: Mutex<Vec<serde_json::Map<String, Value>>>,
+    /// Every `save_rule`: the rule edited, and the body.
+    pub saved: Mutex<Vec<(Option<String>, Value)>>,
+    /// Every event sent.
+    pub events: Mutex<Vec<Value>>,
+    /// What `top_documents` answers.
+    pub top: Mutex<String>,
 }
 
 pub struct FakeAdminBackend(pub Arc<FakeAdmin>);
@@ -1769,6 +1778,96 @@ impl AdminBackend for FakeAdminBackend {
         self.0.searches.lock().unwrap().push(seen);
         let failed = self.0.fail_search.lock().unwrap().clone().map(http_error);
         Box::pin(async move { failed.map_or_else(|| Ok(search_body(2)), Err) })
+    }
+
+    fn rules(
+        &self,
+        _: Client,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<serde_json::Map<String, Value>>, Error>>
+    {
+        self.0.calls.lock().unwrap().push("rules".into());
+        let rules = self.0.rules.lock().unwrap().clone();
+        Box::pin(async move { Ok(rules) })
+    }
+
+    fn save_rule(
+        &self,
+        _: Client,
+        name: Option<String>,
+        body: Value,
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Map<String, Value>, Error>> {
+        self.0
+            .saved
+            .lock()
+            .unwrap()
+            .push((name.clone(), body.clone()));
+        let mut rules = self.0.rules.lock().unwrap();
+        let stored = body.as_object().cloned().unwrap_or_default();
+        let answer = match name {
+            None => {
+                rules.push(stored.clone());
+                Ok(stored)
+            }
+            Some(name) => match rules.iter_mut().find(|r| r["name"] == name.as_str()) {
+                Some(rule) => {
+                    rule.extend(stored);
+                    Ok(rule.clone())
+                }
+                None => Err(http_error((404, "Rule not found".into()))),
+            },
+        };
+        Box::pin(async move { answer })
+    }
+
+    fn delete_rule(
+        &self,
+        _: Client,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("delete_rule {name}"));
+        self.0
+            .rules
+            .lock()
+            .unwrap()
+            .retain(|r| r["name"] != name.as_str());
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn send_event(
+        &self,
+        _: Client,
+        event: Value,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        let failed = self.0.fail.lock().unwrap().clone().map(http_error);
+        if failed.is_none() {
+            self.0.events.lock().unwrap().push(event);
+        }
+        Box::pin(async move { failed.map_or(Ok(()), Err) })
+    }
+
+    fn flush(&self, _: Client) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0.calls.lock().unwrap().push("flush".into());
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn top_documents(
+        &self,
+        _: Client,
+        collection: String,
+        sort_by: String,
+    ) -> tessera_app::collections::BoxFuture<Result<String, Error>> {
+        self.0
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("top_documents {collection} {sort_by}"));
+        let top = self.0.top.lock().unwrap().clone();
+        let top = if top.is_empty() { search_body(0) } else { top };
+        Box::pin(async move { Ok(top) })
     }
 }
 
@@ -2070,7 +2169,7 @@ pub fn entry(profile: &Profile) -> String {
 /// Presses Tab until `id` has keyboard focus.
 pub fn focus(window: &mut gpui_kit::Window, id: &str, cx: &mut gpui_kit::App) {
     window.render_frame(cx);
-    for _ in 0..20 {
+    for _ in 0..40 {
         if window.find(id.to_string()).focused() == Some(true) {
             return;
         }

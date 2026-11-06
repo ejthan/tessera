@@ -126,17 +126,20 @@ pub enum ResourceKind {
     Presets,
     /// API keys.
     Keys,
+    /// Analytics rules, their destinations and test events.
+    Analytics,
 }
 
 impl ResourceKind {
     /// Every kind, in sidebar order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Aliases,
         Self::Synonyms,
         Self::Curations,
         Self::Stopwords,
         Self::Presets,
         Self::Keys,
+        Self::Analytics,
     ];
 
     /// The part of the ids of its row and tab.
@@ -148,6 +151,7 @@ impl ResourceKind {
             Self::Stopwords => "stopwords",
             Self::Presets => "presets",
             Self::Keys => "keys",
+            Self::Analytics => "analytics",
         }
     }
 
@@ -156,10 +160,10 @@ impl ResourceKind {
         format!("sidebar.{}", self.key())
     }
 
-    /// Whether a server of that support gets a row: synonym and curation sets do not exist
-    /// below v30.
+    /// Whether a server of that support gets a row: synonym sets, curation sets and these
+    /// analytics rules do not exist below v30.
     pub fn shown(self, supported: bool) -> bool {
-        supported || !matches!(self, Self::Synonyms | Self::Curations)
+        supported || !matches!(self, Self::Synonyms | Self::Curations | Self::Analytics)
     }
 }
 
