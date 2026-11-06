@@ -135,6 +135,7 @@ gpui_kit::actions!(
         OpenStemming,
         OpenAi,
         OpenOperations,
+        OpenBackup,
         RunSnapshot,
         RunCompact,
         RunClearCache,
@@ -493,6 +494,10 @@ const OPEN_RESOURCES: [&str; 10] = [
     "ctrl-alt-0",
 ];
 #[cfg(target_os = "macos")]
+const OPEN_BACKUP: &str = "alt-cmd-b";
+#[cfg(not(target_os = "macos"))]
+const OPEN_BACKUP: &str = "ctrl-alt-b";
+#[cfg(target_os = "macos")]
 const OPEN_TOP: &str = "cmd-alt-g";
 #[cfg(not(target_os = "macos"))]
 const OPEN_TOP: &str = "ctrl-alt-g";
@@ -673,6 +678,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     OpenStemming,
     OpenAi,
     OpenOperations,
+    OpenBackup,
     RunSnapshot,
     RunCompact,
     RunClearCache,
@@ -963,6 +969,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_RESOURCES[7], OpenStemming, None),
         KeyBinding::new(OPEN_RESOURCES[8], OpenAi, None),
         KeyBinding::new(OPEN_RESOURCES[9], OpenOperations, None),
+        KeyBinding::new(OPEN_BACKUP, OpenBackup, None),
         KeyBinding::new(SAVE, SaveResource, Some(STEMMING_DIALOG)),
         KeyBinding::new(SAVE, SaveResource, Some(STEMMING_INPUT)),
         KeyBinding::new(OPEN_SAVED, PickImportFile, Some(STEMMING_DIALOG)),

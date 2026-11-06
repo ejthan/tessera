@@ -40,6 +40,8 @@ use tessera_client::{
     DocumentQuery, Error, Health, ItemSet, KeyAccess, Metrics, ModelKind, NewKey, NodeClient,
     Origin, SchemaChange, SetKind, Stats, StopwordSet,
 };
+use tessera_core::backup::restore::{RestoreJob, RestoreOutcome, RestoreProgress};
+use tessera_core::backup::run::{BackupOutcome, BackupPlan, BackupProgress};
 use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::relevance::synonym_file::SetFileError;
@@ -814,6 +816,14 @@ enum FakeJob {
         watch::Sender<ExportProgress>,
         oneshot::Sender<ExportOutcome>,
     ),
+    Backup(
+        watch::Sender<BackupProgress>,
+        oneshot::Sender<BackupOutcome>,
+    ),
+    Restore(
+        watch::Sender<RestoreProgress>,
+        oneshot::Sender<RestoreOutcome>,
+    ),
 }
 
 /// What a transfer fake answers and has been asked. Its jobs run until the test ends them.
@@ -836,11 +846,60 @@ pub struct FakeTransfer {
     pub imports: Mutex<Vec<ImportJob>>,
     /// `export` calls.
     pub exports: Mutex<Vec<ExportJob>>,
+    /// `backup` calls.
+    pub backups: Mutex<Vec<BackupPlan>>,
+    /// `restore` calls.
+    pub restores: Mutex<Vec<RestoreJob>>,
     /// `save_report` calls: the path and whether only failed lines.
     pub saves: Mutex<Vec<(PathBuf, bool)>>,
 }
 
 impl FakeTransfer {
+    /// The key of the job starting now, which already stands in its list.
+    fn next_id(&self) -> u64 {
+        let started = self.imports.lock().unwrap().len()
+            + self.exports.lock().unwrap().len()
+            + self.backups.lock().unwrap().len()
+            + self.restores.lock().unwrap().len();
+        started as u64 - 1
+    }
+
+    /// Publishes backup progress of job `id`.
+    pub fn backup_progress(&self, id: JobId, progress: BackupProgress) {
+        match self.jobs.lock().unwrap().get(&id.0) {
+            Some(FakeJob::Backup(tx, _)) => {
+                tx.send_replace(progress);
+            }
+            _ => panic!("no backup {id:?}"),
+        }
+    }
+
+    /// Publishes restore progress of job `id`.
+    pub fn restore_progress(&self, id: JobId, progress: RestoreProgress) {
+        match self.jobs.lock().unwrap().get(&id.0) {
+            Some(FakeJob::Restore(tx, _)) => {
+                tx.send_replace(progress);
+            }
+            _ => panic!("no restore {id:?}"),
+        }
+    }
+
+    /// Ends backup `id` with `outcome`.
+    pub fn finish_backup(&self, id: JobId, outcome: BackupOutcome) {
+        match self.jobs.lock().unwrap().remove(&id.0) {
+            Some(FakeJob::Backup(_, done)) => drop(done.send(outcome)),
+            _ => panic!("no backup {id:?}"),
+        }
+    }
+
+    /// Ends restore `id` with `outcome`.
+    pub fn finish_restore(&self, id: JobId, outcome: RestoreOutcome) {
+        match self.jobs.lock().unwrap().remove(&id.0) {
+            Some(FakeJob::Restore(_, done)) => drop(done.send(outcome)),
+            _ => panic!("no restore {id:?}"),
+        }
+    }
+
     /// Publishes import progress of job `id`.
     pub fn progress(&self, id: JobId, progress: ImportProgress) {
         match self.jobs.lock().unwrap().get(&id.0) {
@@ -933,12 +992,8 @@ impl TransferBackend for FakeTransferBackend {
         progress: watch::Sender<ImportProgress>,
     ) -> tessera_app::collections::BoxFuture<ImportOutcome> {
         let (done, outcome) = oneshot::channel();
-        let id = {
-            let mut imports = self.0.imports.lock().unwrap();
-            imports.push(job);
-            let id = imports.len() + self.0.exports.lock().unwrap().len() - 1;
-            id as u64
-        };
+        self.0.imports.lock().unwrap().push(job);
+        let id = self.0.next_id();
         self.0
             .jobs
             .lock()
@@ -955,18 +1010,49 @@ impl TransferBackend for FakeTransferBackend {
         progress: watch::Sender<ExportProgress>,
     ) -> tessera_app::collections::BoxFuture<ExportOutcome> {
         let (done, outcome) = oneshot::channel();
-        let id = {
-            let mut exports = self.0.exports.lock().unwrap();
-            exports.push(job);
-            let id = exports.len() + self.0.imports.lock().unwrap().len() - 1;
-            id as u64
-        };
+        self.0.exports.lock().unwrap().push(job);
+        let id = self.0.next_id();
         self.0
             .jobs
             .lock()
             .unwrap()
             .insert(id, FakeJob::Export(progress, done));
         Box::pin(async move { outcome.await.unwrap() })
+    }
+
+    fn backup(
+        &self,
+        _: Client,
+        plan: BackupPlan,
+        _: JobControl,
+        progress: watch::Sender<BackupProgress>,
+    ) -> tessera_app::collections::BoxFuture<BackupOutcome> {
+        let (done, outcome) = oneshot::channel();
+        self.0.backups.lock().unwrap().push(plan);
+        let id = self.0.next_id();
+        let job = FakeJob::Backup(progress, done);
+        self.0.jobs.lock().unwrap().insert(id, job);
+        Box::pin(async move { outcome.await.unwrap() })
+    }
+
+    fn restore(
+        &self,
+        _: Client,
+        job: RestoreJob,
+        _: JobControl,
+        progress: watch::Sender<RestoreProgress>,
+    ) -> tessera_app::collections::BoxFuture<RestoreOutcome> {
+        let (done, outcome) = oneshot::channel();
+        self.0.restores.lock().unwrap().push(job);
+        let id = self.0.next_id();
+        let job = FakeJob::Restore(progress, done);
+        self.0.jobs.lock().unwrap().insert(id, job);
+        Box::pin(async move { outcome.await.unwrap() })
+    }
+
+    fn path_taken(&self, path: PathBuf) -> tessera_app::collections::BoxFuture<bool> {
+        let taken = std::fs::symlink_metadata(path).is_ok();
+        Box::pin(async move { taken })
     }
 
     fn save_report(

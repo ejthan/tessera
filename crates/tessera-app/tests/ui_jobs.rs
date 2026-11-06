@@ -179,7 +179,7 @@ async fn newest_progress_wins(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let shown = cx.read(|cx| match &f.jobs.read(cx).jobs()[0].live {
         Live::Import(p) => p.imported,
-        Live::Export(_) => panic!("an import"),
+        _ => panic!("an import"),
     });
     assert_eq!(shown, 9);
 }

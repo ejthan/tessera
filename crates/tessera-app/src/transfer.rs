@@ -9,6 +9,10 @@ use std::time::SystemTime;
 use gpui_kit::Global;
 use rust_i18n::t;
 use tessera_client::{Client, Collection};
+use tessera_core::backup::archive::ArchiveError;
+use tessera_core::backup::format::ManifestProblem;
+use tessera_core::backup::restore::{RestoreJob, RestoreOutcome, RestoreProgress, run_restore};
+use tessera_core::backup::run::{BackupOutcome, BackupPlan, BackupProgress, run_backup};
 use tessera_core::transfer::export::{ExportJob, ExportOutcome, ExportProgress, run_export};
 use tessera_core::transfer::import::{ImportJob, ImportOutcome, ImportProgress, run_import};
 use tessera_core::transfer::infer::{InferredSchema, infer_schema};
@@ -70,6 +74,27 @@ pub trait TransferBackend: Send + Sync {
         control: JobControl,
         progress: watch::Sender<ExportProgress>,
     ) -> BoxFuture<ExportOutcome>;
+
+    /// Runs a backup to its end.
+    fn backup(
+        &self,
+        client: Client,
+        plan: BackupPlan,
+        control: JobControl,
+        progress: watch::Sender<BackupProgress>,
+    ) -> BoxFuture<BackupOutcome>;
+
+    /// Runs a restore to its end.
+    fn restore(
+        &self,
+        client: Client,
+        job: RestoreJob,
+        control: JobControl,
+        progress: watch::Sender<RestoreProgress>,
+    ) -> BoxFuture<RestoreOutcome>;
+
+    /// Whether anything stands at `path`, a link that leads nowhere too.
+    fn path_taken(&self, path: PathBuf) -> BoxFuture<bool>;
 
     /// Saves `report` to `path`, or with `failed_only` the failed lines; how many lines.
     fn save_report(
@@ -138,6 +163,34 @@ impl TransferBackend for TokioBackend {
         self.run(run_export(client, job, control, progress))
     }
 
+    fn backup(
+        &self,
+        client: Client,
+        plan: BackupPlan,
+        control: JobControl,
+        progress: watch::Sender<BackupProgress>,
+    ) -> BoxFuture<BackupOutcome> {
+        self.run(run_backup(client, plan, control, progress))
+    }
+
+    fn restore(
+        &self,
+        client: Client,
+        job: RestoreJob,
+        control: JobControl,
+        progress: watch::Sender<RestoreProgress>,
+    ) -> BoxFuture<RestoreOutcome> {
+        self.run(run_restore(client, job, control, progress))
+    }
+
+    fn path_taken(&self, path: PathBuf) -> BoxFuture<bool> {
+        self.run(async move {
+            let read = tokio::task::spawn_blocking(move || std::fs::symlink_metadata(path).is_ok());
+            // Unknown counts as taken: a backup never replaces anything.
+            read.await.unwrap_or(true)
+        })
+    }
+
     fn save_report(
         &self,
         report: Arc<Report>,
@@ -182,6 +235,50 @@ pub fn read_error_text(err: &ReadError) -> String {
             element = element,
             limit = MAX_DOC_BYTES >> 20
         ),
+    }
+    .to_string()
+}
+
+fn manifest_problem_text(problem: &ManifestProblem) -> String {
+    match problem {
+        ManifestProblem::Unreadable(detail) => {
+            t!("backup.manifest.unreadable", detail = detail)
+        }
+        ManifestProblem::Format(format) => t!("backup.manifest.format", format = format),
+        ManifestProblem::TooManyCollections => t!("backup.manifest.too_many_collections"),
+        ManifestProblem::TooManyFiles => t!("backup.manifest.too_many_files"),
+        ManifestProblem::BadPath(path) => t!("backup.manifest.bad_path", path = path),
+        ManifestProblem::DuplicatePath(path) => t!("backup.manifest.duplicate_path", path = path),
+        ManifestProblem::BadDigest(path) => t!("backup.manifest.bad_digest", path = path),
+        ManifestProblem::DuplicateFile(file) => t!("backup.manifest.duplicate_file", file = file),
+        ManifestProblem::MissingFile(path) => t!("backup.manifest.missing_file", path = path),
+    }
+    .to_string()
+}
+
+/// The sentence for a backup that cannot be packed, unpacked or verified.
+pub fn archive_error_text(err: &ArchiveError) -> String {
+    match err {
+        ArchiveError::Stopped => t!("backup.archive.stopped"),
+        ArchiveError::SymlinkTarget(path) => {
+            t!("backup.archive.link", path = path.display().to_string())
+        }
+        ArchiveError::PartExists(path) => {
+            t!("backup.target_exists", path = path.display().to_string())
+        }
+        ArchiveError::ManifestNotFirst => t!("backup.archive.manifest_not_first"),
+        ArchiveError::ManifestTooLarge => t!("backup.archive.manifest_too_large"),
+        ArchiveError::Manifest(problem) => {
+            return manifest_problem_text(problem);
+        }
+        ArchiveError::NotRegular(path) => t!("backup.archive.not_regular", path = path),
+        ArchiveError::Unlisted(path) => t!("backup.archive.unlisted", path = path),
+        ArchiveError::Duplicate(path) => t!("backup.archive.duplicate", path = path),
+        ArchiveError::TooLong(path) => t!("backup.archive.too_long", path = path),
+        ArchiveError::TooShort(path) => t!("backup.archive.too_short", path = path),
+        ArchiveError::Missing(path) => t!("backup.archive.missing", path = path),
+        ArchiveError::Digest(path) => t!("backup.archive.digest", path = path),
+        ArchiveError::Io(detail) => t!("backup.archive.io", detail = detail),
     }
     .to_string()
 }

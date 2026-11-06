@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Running imports and exports. [`Jobs`] is a global entity, not part of a view or a
+//! Running imports, exports, backups and restores. [`Jobs`] is a global entity, not part of a view or a
 //! connection, so closing a dialog or a tab or disconnecting never drops a job. A disconnect
 //! does lock the client a job shares, which stops a write on a read-only profile.
 
@@ -14,6 +14,11 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use tessera_client::{Client, Error};
+use tessera_core::backup::restore::{
+    RestoreError, RestoreJob, RestoreOutcome, RestoreProgress, RestoreRow, RowFailure, RowKind,
+    RowResult,
+};
+use tessera_core::backup::run::{BackupError, BackupOutcome, BackupPlan, BackupProgress};
 use tessera_core::profile::{Environment, Profile};
 use tessera_core::transfer::export::{ExportJob, ExportOutcome, ExportProgress};
 use tessera_core::transfer::import::{ImportJob, ImportOutcome, ImportProgress};
@@ -24,7 +29,7 @@ use uuid::Uuid;
 
 use crate::collections::BoxFuture;
 use crate::connection::{ConnectionState, long_error_text};
-use crate::transfer::{TransferBackendGlobal, read_error_text};
+use crate::transfer::{TransferBackendGlobal, archive_error_text, read_error_text};
 
 /// The shortest time between two progress updates: at most 30 a second.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(34);
@@ -40,6 +45,10 @@ pub enum JobKind {
     Import,
     /// Writes a collection to a file.
     Export,
+    /// Writes collections and what they use to a folder or an archive.
+    Backup,
+    /// Writes a backup to the server.
+    Restore,
 }
 
 /// The newest numbers of a job.
@@ -49,6 +58,10 @@ pub enum Live {
     Import(ImportProgress),
     /// Of an export.
     Export(ExportProgress),
+    /// Of a backup.
+    Backup(BackupProgress),
+    /// Of a restore.
+    Restore(RestoreProgress),
 }
 
 /// Where a job stands.
@@ -73,6 +86,10 @@ pub enum JobOutcome {
     Import(ImportOutcome),
     /// Of an export.
     Export(ExportOutcome),
+    /// Of a backup.
+    Backup(BackupOutcome),
+    /// Of a restore.
+    Restore(RestoreOutcome),
 }
 
 /// One import or export of the session.
@@ -137,6 +154,8 @@ impl Job {
                 name = name,
                 docs = grouped(p.docs)
             ),
+            (_, Live::Backup(_)) => t!("jobs.toast_backup", connection = connection, name = name),
+            (_, Live::Restore(_)) => t!("jobs.toast_restore", connection = connection, name = name),
         }
         .to_string()
     }
@@ -194,6 +213,100 @@ fn failure_text(err: &TransferError, profile: &Profile) -> SharedString {
         TransferError::Io(detail) => t!("jobs.error.io", detail = detail).to_string(),
     };
     cap_error(&text).to_string().into()
+}
+
+fn backup_failure(err: &BackupError, profile: &Profile) -> SharedString {
+    let text = match err {
+        BackupError::Client(e) => long_error_text(e, profile),
+        BackupError::UnknownCollection(name) => t!("backup.error.unknown", name = name).to_string(),
+        BackupError::Exists(path) => {
+            t!("backup.target_exists", path = path.display().to_string()).to_string()
+        }
+        BackupError::Export { collection, source } => t!(
+            "backup.error.export",
+            collection = collection,
+            detail = failure_text(source, profile)
+        )
+        .to_string(),
+        BackupError::TooLarge(name) => t!("backup.error.too_large", name = name).to_string(),
+        BackupError::Archive(e) => archive_error_text(e),
+        BackupError::Io(detail) => t!("jobs.error.io", detail = detail).to_string(),
+    };
+    cap_error(&text).to_string().into()
+}
+
+/// What went wrong with a row of a restore.
+pub fn row_failure_text(failure: &RowFailure) -> String {
+    let grouped = crate::views::overview::grouped;
+    match failure {
+        RowFailure::Text(text) => text.clone(),
+        RowFailure::Count { expected, found } => t!(
+            "restore.failure.count",
+            expected = grouped(*expected),
+            found = found.map_or_else(|| t!("figure.missing").to_string(), grouped)
+        )
+        .to_string(),
+        RowFailure::Lines {
+            failed,
+            unconfirmed,
+            first_error,
+        } => {
+            let counts = t!(
+                "restore.failure.lines",
+                failed = grouped(*failed),
+                unconfirmed = grouped(*unconfirmed)
+            );
+            match first_error {
+                Some(reason) => format!("{counts} {reason}"),
+                None => counts.to_string(),
+            }
+        }
+        RowFailure::Stopped => t!("restore.failure.stopped").to_string(),
+    }
+}
+
+fn restore_failure(err: &RestoreError, rows: &[RestoreRow], profile: &Profile) -> SharedString {
+    let text = match err {
+        RestoreError::Read(e) => long_error_text(e, profile),
+        RestoreError::NowExists(names) => {
+            t!("restore.error.now_exists", names = names.join(", ")).to_string()
+        }
+        RestoreError::Row { kind, name } => {
+            let result = rows.iter().find(|r| r.kind == *kind && r.name == *name);
+            let detail = match result.map(|r| &r.result) {
+                Some(RowResult::Failed(failure)) => row_failure_text(failure),
+                _ => String::new(),
+            };
+            let what = t!(row_kind_key(*kind));
+            t!(
+                "restore.error.row",
+                what = what,
+                name = name,
+                detail = detail
+            )
+            .to_string()
+        }
+    };
+    cap_error(&text).to_string().into()
+}
+
+/// The locale key of a row's kind.
+pub fn row_kind_key(kind: RowKind) -> &'static str {
+    match kind {
+        RowKind::Stopwords => "restore.kind.stopwords",
+        RowKind::SynonymSet => "restore.kind.synonyms",
+        RowKind::CurationSet => "restore.kind.curations",
+        RowKind::Collection => "restore.kind.collection",
+        RowKind::Alias => "restore.kind.alias",
+    }
+}
+
+fn status_of<E>(end: &JobEnd<E>, failed: impl FnOnce(&E) -> SharedString) -> JobStatus {
+    match end {
+        JobEnd::Finished => JobStatus::Finished,
+        JobEnd::Stopped => JobStatus::Stopped,
+        JobEnd::Failed(e) => JobStatus::Failed(failed(e)),
+    }
 }
 
 /// What `start` needs to know of a job.
@@ -255,6 +368,67 @@ impl Jobs {
             Box::pin(async move { JobOutcome::Export(run.await) })
         };
         self.start(connection, spec, run, receiver, Live::Export, cx)
+    }
+
+    /// Starts a backup on `connection`'s client. It reads, so a read-only connection stays locked.
+    pub fn start_backup(
+        &mut self,
+        connection: &Entity<ConnectionState>,
+        plan: BackupPlan,
+        label: SharedString,
+        cx: &mut Context<Self>,
+    ) -> JobId {
+        let (sender, receiver) = watch::channel(BackupProgress::default());
+        let backend = cx.global::<TransferBackendGlobal>().0.clone();
+        let control = JobControl::default();
+        let spec = Spec {
+            kind: JobKind::Backup,
+            collection: plan.collections.first().cloned().unwrap_or_default(),
+            label,
+            live: Live::Backup(BackupProgress::default()),
+            control: control.clone(),
+        };
+        let run = move |client| -> BoxFuture<JobOutcome> {
+            let run = backend.backup(client, plan, control, sender);
+            Box::pin(async move { JobOutcome::Backup(run.await) })
+        };
+        self.start(connection, spec, run, receiver, Live::Backup, cx)
+    }
+
+    /// Starts a restore on `connection`'s client. `temp` is the unpacked archive, which stays
+    /// until the run ended, whatever becomes of the view that made it.
+    pub fn start_restore(
+        &mut self,
+        connection: &Entity<ConnectionState>,
+        job: RestoreJob,
+        temp: Option<Arc<tempfile::TempDir>>,
+        label: SharedString,
+        cx: &mut Context<Self>,
+    ) -> JobId {
+        let (sender, receiver) = watch::channel(RestoreProgress::default());
+        let backend = cx.global::<TransferBackendGlobal>().0.clone();
+        let control = JobControl::default();
+        let spec = Spec {
+            kind: JobKind::Restore,
+            collection: job
+                .loaded
+                .schemas
+                .first()
+                .map(|s| s.name.clone())
+                .unwrap_or_default(),
+            label,
+            live: Live::Restore(RestoreProgress::default()),
+            control: control.clone(),
+        };
+        let run = move |client| -> BoxFuture<JobOutcome> {
+            let run = backend.restore(client, job, control, sender);
+            Box::pin(async move {
+                let outcome = run.await;
+                drop(temp);
+                JobOutcome::Restore(outcome)
+            })
+        };
+        self.start(connection, spec, run, receiver, Live::Restore, cx)
     }
 
     fn start<P: Clone + Send + Sync + 'static>(
@@ -366,23 +540,27 @@ impl Jobs {
         let end = match &outcome {
             JobOutcome::Import(outcome) => {
                 job.live = Live::Import(outcome.progress.clone());
-                &outcome.end
+                Some(&outcome.end)
             }
             JobOutcome::Export(outcome) => {
                 job.live = Live::Export(outcome.progress.clone());
-                &outcome.end
+                Some(&outcome.end)
             }
+            JobOutcome::Backup(_) | JobOutcome::Restore(_) => None,
         };
-        job.status = match end {
-            JobEnd::Finished => JobStatus::Finished,
-            JobEnd::Stopped => JobStatus::Stopped,
+        job.status = match (end, &outcome) {
             // A disconnect locks the client this job shares (spec 7.1).
-            JobEnd::Failed(TransferError::Client(Error::ReadOnly { .. }))
+            (Some(JobEnd::Failed(TransferError::Client(Error::ReadOnly { .. }))), _)
                 if job.state.upgrade().is_none_or(|c| c.read(cx).closed) =>
             {
                 JobStatus::Failed(t!("jobs.error.locked_by_disconnect").to_string().into())
             }
-            JobEnd::Failed(err) => JobStatus::Failed(failure_text(err, &job.profile)),
+            (Some(end), _) => status_of(end, |e| failure_text(e, &job.profile)),
+            (None, JobOutcome::Backup(o)) => status_of(&o.end, |e| backup_failure(e, &job.profile)),
+            (None, JobOutcome::Restore(o)) => {
+                status_of(&o.end, |e| restore_failure(e, &o.rows, &job.profile))
+            }
+            (None, _) => JobStatus::Finished,
         };
         job.outcome = Some(outcome);
         cx.emit(RunningChanged(self.running()));
