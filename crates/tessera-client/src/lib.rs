@@ -11,6 +11,7 @@ mod models;
 mod raw;
 mod search;
 mod send;
+mod sets;
 mod stopwords;
 
 use std::fmt;
@@ -36,6 +37,7 @@ pub use search::{
 };
 use secrecy::SecretString;
 use serde_json::{Value, json};
+pub use sets::{ItemSet, SetKind};
 pub use stopwords::StopwordSet;
 use url::Url;
 

@@ -7,7 +7,7 @@
 
 use secrecy::SecretString;
 use serde_json::json;
-use tessera_client::{Alias, Client, ClientOptions, Error, StopwordSet};
+use tessera_client::{Alias, Client, ClientOptions, Error, SetKind, StopwordSet};
 use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -208,4 +208,143 @@ async fn writes_on_a_read_only_client_are_refused() {
         c.upsert_stopwords("a", &[], None).await.unwrap_err()
     ));
     assert!(refused(c.delete_stopwords("a").await.unwrap_err()));
+}
+
+const KINDS: [SetKind; 2] = [SetKind::Synonym, SetKind::Curation];
+
+#[tokio::test]
+async fn set_calls_encode_name_and_id() {
+    for kind in KINDS {
+        let server = MockServer::start().await;
+        let set = format!("/{}/a%2Fb%2Cc%20d", kind.path());
+        let item = format!("{set}/items/i%2F1%2C%20x");
+        mount(
+            &server,
+            "GET",
+            &set,
+            r#"{"name":"a/b,c d","items":[{"id":"i"}]}"#,
+        )
+        .await;
+        mount(&server, "DELETE", &set, r#"{"name":"a/b,c d"}"#).await;
+        mount(&server, "GET", &item, r#"{"id":"i/1, x"}"#).await;
+        mount(&server, "DELETE", &item, r#"{"id":"i/1, x"}"#).await;
+        Mock::given(method("PUT"))
+            .and(path(set.as_str()))
+            .and(body_json(json!({"items":[{"id":"i"}]})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"name":"a/b,c d","items":[{"id":"i"}]}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(item.as_str()))
+            .and(body_json(json!({"synonyms":["a","b"]})))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = client(&server.uri());
+        let (name, id) = ("a/b,c d", "i/1, x");
+        assert_eq!(c.set(kind, name).await.unwrap().items.len(), 1);
+        let items = [json!({"id":"i"})];
+        assert_eq!(c.upsert_set(kind, name, &items).await.unwrap().name, name);
+        assert_eq!(c.set_item(kind, name, id).await.unwrap()["id"], id);
+        let body = json!({"id":id,"synonyms":["a","b"]});
+        c.upsert_set_item(kind, name, id, &body).await.unwrap();
+        c.delete_set_item(kind, name, id).await.unwrap();
+        c.delete_set(kind, name).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn sets_decodes_a_bare_array() {
+    for kind in KINDS {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "GET",
+            &format!("/{}", kind.path()),
+            r#"[{"name":"x","items":[{"id":"1"}]},{"name":"y","items":[]}]"#,
+        )
+        .await;
+        let list = client(&server.uri()).sets(kind).await.unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].items, vec![json!({"id":"1"})]);
+        assert_eq!(list[1].name, "y");
+    }
+}
+
+#[tokio::test]
+async fn set_dot_segments_are_refused_without_a_request() {
+    let server = MockServer::start().await;
+    for verb in ["GET", "PUT", "DELETE"] {
+        Mock::given(method(verb))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+    }
+    let c = client(&server.uri());
+    let refused = |e: &Error| matches!(e, Error::UnaddressableId(_));
+    for kind in KINDS {
+        for bad in [".", ".."] {
+            assert!(refused(&c.set(kind, bad).await.unwrap_err()));
+            assert!(refused(&c.upsert_set(kind, bad, &[]).await.unwrap_err()));
+            assert!(refused(&c.delete_set(kind, bad).await.unwrap_err()));
+            assert!(refused(&c.set_item(kind, "s", bad).await.unwrap_err()));
+            assert!(refused(&c.set_item(kind, bad, "i").await.unwrap_err()));
+            let item = json!({});
+            assert!(refused(
+                &c.upsert_set_item(kind, "s", bad, &item).await.unwrap_err()
+            ));
+            assert!(refused(
+                &c.delete_set_item(kind, "s", bad).await.unwrap_err()
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_set_404_keeps_the_server_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_string(r#"{"message":"Synonym index not found"}"#),
+        )
+        .mount(&server)
+        .await;
+    let c = client(&server.uri());
+    for error in [
+        c.set(SetKind::Synonym, "a").await.unwrap_err(),
+        c.set_item(SetKind::Synonym, "a", "i").await.unwrap_err(),
+    ] {
+        assert_eq!(error.typesense_message(), Some("Synonym index not found"));
+    }
+}
+
+#[tokio::test]
+async fn set_writes_on_a_read_only_client_are_refused() {
+    let server = MockServer::start().await;
+    for verb in ["PUT", "DELETE"] {
+        Mock::given(method(verb))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+    }
+    let c = read_only(&server.uri());
+    let refused = |e: Error| matches!(e, Error::ReadOnly { .. });
+    for kind in KINDS {
+        assert!(refused(c.upsert_set(kind, "a", &[]).await.unwrap_err()));
+        assert!(refused(c.delete_set(kind, "a").await.unwrap_err()));
+        let item = json!({});
+        assert!(refused(
+            c.upsert_set_item(kind, "a", "i", &item).await.unwrap_err()
+        ));
+        assert!(refused(
+            c.delete_set_item(kind, "a", "i").await.unwrap_err()
+        ));
+    }
 }
