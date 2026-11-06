@@ -4,12 +4,15 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use secrecy::SecretString;
 use serde_json::json;
 use tessera_client::{Client, ClientOptions, Error, ModelKind, RequestEvent, RequestHook};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -107,6 +110,74 @@ async fn ai_search_is_not_retried_after_a_timeout() {
     let params = [("q".to_string(), "hi".to_string())];
     assert_eq!(client.ai_search("c", &params).await.unwrap(), "{}");
     assert_eq!(tessera_client::AI_TIMEOUT, Duration::from_secs(120));
+}
+
+/// A node that answers the first request, and drops the connection on reading any other. Also
+/// counts what it read.
+async fn node_that_drops_the_second_request() -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let uri = format!("http://{}", listener.local_addr().unwrap());
+    let seen = Arc::new(AtomicUsize::new(0));
+    let count = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let count = count.clone();
+            tokio::spawn(async move {
+                let mut request = [0; 4096];
+                while socket.read(&mut request).await.is_ok_and(|n| n > 0) {
+                    if count.fetch_add(1, Ordering::SeqCst) > 0 {
+                        return;
+                    }
+                    let answer = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}";
+                    socket.write_all(answer.as_bytes()).await.unwrap();
+                }
+            });
+        }
+    });
+    (uri, seen)
+}
+
+#[tokio::test]
+async fn ai_search_never_repeats_a_turn_after_a_dropped_connection() {
+    let (active, seen) = node_that_drops_the_second_request().await;
+    let other = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(0)
+        .mount(&other)
+        .await;
+    let nodes = [active.as_str(), &other.uri()];
+    let key = SecretString::from("k");
+    let client = Client::new(&nodes, key, ClientOptions::default()).unwrap();
+    let params = [("q".to_string(), "hi".to_string())];
+
+    assert_eq!(client.ai_search("c", &params).await.unwrap(), "{}");
+    // The request was read, so the provider may have been paid: no other node, and no second try.
+    let dropped = client.ai_search("c", &params).await;
+
+    assert!(matches!(dropped, Err(Error::Network(_))), "{dropped:?}");
+    assert_eq!(seen.load(Ordering::SeqCst), 2);
+    assert_eq!(client.active_node(), 0);
+}
+
+#[tokio::test]
+async fn ai_search_goes_to_the_active_node() {
+    let (first, second) = (MockServer::start().await, MockServer::start().await);
+    for (server, calls) in [(&first, 0), (&second, 1)] {
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(calls)
+            .mount(server)
+            .await;
+    }
+    let nodes = [first.uri(), second.uri()];
+    let nodes: Vec<&str> = nodes.iter().map(String::as_str).collect();
+    let client = Client::new(&nodes, SecretString::from("k"), ClientOptions::default()).unwrap();
+    client.set_active_node(1);
+
+    let params = [("q".to_string(), "hi".to_string())];
+    assert_eq!(client.ai_search("c", &params).await.unwrap(), "{}");
 }
 
 #[tokio::test]

@@ -101,8 +101,9 @@ impl Client {
     }
 
     /// A search that reaches an LLM. Always a `GET`, because `POST /multi_search` loses
-    /// `conversation` in [`Client::search`]. The timeout is explicit so that a timeout is not
-    /// retried: a retry would call the LLM again and store the turn twice.
+    /// `conversation` in [`Client::search`]. Pinned to the active node, so nothing retries: after
+    /// a timeout or a dropped connection the server may have called the LLM, and another attempt
+    /// would pay for the turn and store it twice, although it is a `GET`.
     pub async fn ai_search(
         &self,
         collection: &str,
@@ -115,7 +116,7 @@ impl Client {
         };
         match self
             .call(
-                None,
+                Some(self.active_node()),
                 Method::GET,
                 &path,
                 Some(&query),

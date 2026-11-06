@@ -174,7 +174,7 @@ impl Client {
 }
 ```
 
-Every model call runs on `self.without_bodies()`: a create carries the provider key, and a read carries its first five characters. Create and update use `AI_TIMEOUT = 120 s`, because the server calls the provider before it answers (the profile default is 5 s). `ai_search` is a `GET` with an explicit timeout of `AI_TIMEOUT`, so a timeout is not retried: a retry would call the LLM again and store the turn twice.
+Every model call runs on `self.without_bodies()`: a create carries the provider key, and a read carries its first five characters. Create and update use `AI_TIMEOUT = 120 s`, because the server calls the provider before it answers (the profile default is 5 s). `ai_search` is a `GET` with an explicit timeout of `AI_TIMEOUT`, pinned to the active node, so neither a timeout nor a dropped connection is retried: a retry would call the LLM again and store the turn twice.
 
 Traps (both, unless noted):
 

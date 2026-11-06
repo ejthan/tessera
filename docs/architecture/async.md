@@ -75,7 +75,7 @@ Every `Client` gets a `RequestHook` that runs on tokio threads after each reques
 
 ## AI calls
 
-A model create, a model update and a search that reaches an LLM hold a request open for up to `AI_TIMEOUT` (120 s), because the server calls the provider before it answers. They run on tokio like any request, but the GPUI side is detached (`cx.spawn(...).detach()`) and not kept in the view: closing the tab cannot abort a call the server goes on with, and the answer is dropped through the `WeakEntity`. A chat turn does not retry after a timeout, since a retry would call the LLM again and store the turn twice.
+A model create, a model update and a search that reaches an LLM hold a request open for up to `AI_TIMEOUT` (120 s), because the server calls the provider before it answers. They run on tokio like any request, but the GPUI side is detached (`cx.spawn(...).detach()`) and not kept in the view: closing the tab cannot abort a call the server goes on with, and the answer is dropped through the `WeakEntity`. A search that reaches an LLM is pinned to the active node and never retries or fails over, not after a timeout and not after a dropped connection, since a retry would call the LLM again, pay for it and store the turn twice.
 
 ## Jobs
 
