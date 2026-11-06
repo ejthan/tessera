@@ -6,6 +6,7 @@ pub mod cli;
 pub mod curl;
 pub mod documents;
 pub mod import;
+pub mod keymap;
 pub mod log;
 pub mod metrics;
 pub mod openapi;

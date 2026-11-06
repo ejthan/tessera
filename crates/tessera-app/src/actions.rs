@@ -4,7 +4,11 @@
 
 use gpui_kit::base::actions::{SelectDown, SelectUp};
 use gpui_kit::component::dock::{ClosePanel, ToggleZoom};
-use gpui_kit::{Action, App, KeyBinding, KeyContext, NoAction};
+use std::rc::Rc;
+
+use gpui_kit::{Action, App, KeyBinding, KeyBindingContextPredicate, KeyContext, NoAction};
+use rust_i18n::t;
+use tessera_core::keymap::UserBinding;
 use tessera_widgets::{BODY_VIEW, NextChunk, PreviousChunk};
 
 gpui_kit::actions!(
@@ -558,6 +562,64 @@ pub fn gated(context: &str, gates: &[(bool, &dyn Action)]) -> KeyContext {
         key.add(action.name());
     }
     key
+}
+
+/// Applies the user's bindings after [`bind_keys`], so they win. A bad entry is skipped and
+/// named in the returned lines; the others apply.
+pub fn apply_keymap(bindings: &[UserBinding], cx: &mut App) -> Vec<String> {
+    let mut errors = Vec::new();
+    for entry in bindings {
+        match user_binding(entry, cx) {
+            Ok(binding) => cx.bind_keys([binding]),
+            Err(error) => errors.push(error),
+        }
+    }
+    errors
+}
+
+fn user_binding(entry: &UserBinding, cx: &App) -> Result<KeyBinding, String> {
+    let key = entry.key.as_str();
+    let action = match &entry.action {
+        None => Box::new(NoAction),
+        Some(name) => cx.build_action(name, None).map_err(|e| {
+            let detail = e.to_string();
+            t!(
+                "keymap.error.action",
+                key = key,
+                action = name,
+                detail = detail
+            )
+            .to_string()
+        })?,
+    };
+    let context = match &entry.context {
+        None => None,
+        Some(text) => Some(Rc::new(KeyBindingContextPredicate::parse(text).map_err(
+            |e| {
+                let detail = e.to_string();
+                t!(
+                    "keymap.error.context",
+                    key = key,
+                    context = text,
+                    detail = detail
+                )
+                .to_string()
+            },
+        )?)),
+    };
+    let binding = KeyBinding::load(key, action, context, false, None, cx).map_err(|e| {
+        let detail = e.to_string();
+        t!("keymap.error.key", key = key, detail = detail).to_string()
+    })?;
+    let Some(first) = binding.keystrokes().first().map(|k| k.inner()) else {
+        return Err(t!("keymap.error.empty").to_string());
+    };
+    // Esc is how a dialog closes, and how a confirmation is refused: no entry may take it,
+    // nor start a sequence with it, which would hold it back.
+    if first.key == "escape" && !first.modifiers.modified() {
+        return Err(t!("keymap.error.reserved", key = key).to_string());
+    }
+    Ok(binding)
 }
 
 /// Registers global key bindings and app-level action handlers.

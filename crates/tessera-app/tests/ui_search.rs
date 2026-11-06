@@ -1874,3 +1874,25 @@ async fn an_export_that_cannot_run_says_why(cx: &mut TestAppContext) {
     assert!(!f.has(cx, "search.export.error"));
     assert!(f.has(cx, "search.export.copied"));
 }
+
+#[gpui_kit::test]
+async fn override_shows_on_the_control(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    let chord = key("cmd-shift-9", "ctrl-shift-9");
+    let errors = cx.update(|cx| {
+        tessera_app::actions::apply_keymap(
+            &[tessera_core::keymap::UserBinding {
+                key: chord.into(),
+                action: Some("tessera::RunSearch".into()),
+                context: Some("Workbench".into()),
+            }],
+            cx,
+        )
+    });
+    assert!(errors.is_empty(), "{errors:?}");
+    let button = f.act(cx, |window, _| window.find("search.run").bounds());
+    let kbd = gpui_kit::VisualTestContext::from_window(f.handle.into(), cx)
+        .debug_bounds(key("kbd:cmd-shift-9", "kbd:ctrl-shift-9"))
+        .expect("a Kbd for the new chord is drawn");
+    assert!(button.contains(&kbd.center()), "{kbd:?} not in {button:?}");
+}
