@@ -59,7 +59,10 @@ gpui_kit::actions!(
         ToggleRow,
         ExtendRows,
         SelectLoaded,
-        DeleteDocuments
+        DeleteDocuments,
+        DeleteByQuery,
+        UpdateByQuery,
+        BulkContinue
     ]
 );
 
@@ -86,6 +89,10 @@ pub const DOCUMENTS_TABLE: &str = "Documents > DataTable";
 pub const INSPECTOR: &str = "Inspector";
 /// Key context of the inspector's editor, whose own ⌘↩ / Ctrl+↩ would add a line.
 const INSPECTOR_EDITOR: &str = "Inspector > Input";
+/// Key context of the delete and update by query dialog.
+pub const BULK_DIALOG: &str = "BulkDialog";
+/// An input in that dialog, which has its own ⌘↩.
+const BULK_INPUT: &str = "BulkDialog > Input";
 /// Key context of the document review.
 pub const DOCUMENT_REVIEW: &str = "DocumentReview";
 /// Key context of the collections table; Enter opens the selected row only there, so a
@@ -234,6 +241,14 @@ const REVERT: &str = "ctrl-shift-r";
 const SELECT_ALL: &str = "cmd-a";
 #[cfg(not(target_os = "macos"))]
 const SELECT_ALL: &str = "ctrl-a";
+#[cfg(target_os = "macos")]
+const DELETE_QUERY: &str = "cmd-shift-k";
+#[cfg(not(target_os = "macos"))]
+const DELETE_QUERY: &str = "ctrl-shift-k";
+#[cfg(target_os = "macos")]
+const UPDATE_QUERY: &str = "cmd-shift-u";
+#[cfg(not(target_os = "macos"))]
+const UPDATE_QUERY: &str = "ctrl-shift-u";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -320,6 +335,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(TRUNCATE, NoAction, Some(DOCUMENTS)),
         // Deeper than COLLECTION, so here ⌘⌫ never reaches the collection's delete.
         KeyBinding::new(DELETE, DeleteDocuments, Some(DOCUMENTS)),
+        KeyBinding::new(DELETE_QUERY, DeleteByQuery, Some(DOCUMENTS)),
+        KeyBinding::new(UPDATE_QUERY, UpdateByQuery, Some(DOCUMENTS)),
+        KeyBinding::new(SAVE, BulkContinue, Some(BULK_DIALOG)),
+        KeyBinding::new(SAVE, BulkContinue, Some(BULK_INPUT)),
         KeyBinding::new(SHOW_FORM, ShowForm, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SHOW_JSON, ShowJson, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SAVE, SubmitSchema, Some(SCHEMA_DIALOG)),

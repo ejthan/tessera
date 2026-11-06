@@ -572,3 +572,49 @@ async fn live_odd_ids_delete_only_themselves() {
     assert_eq!(by_filter.unwrap(), 2);
     assert_eq!(after.unwrap(), 2);
 }
+
+/// What the bulk dialog refuses and why: the count and the write disagree on these filters.
+#[tokio::test]
+#[ignore = "needs a Typesense server"]
+async fn live_filters_that_name_everything() {
+    let client = client();
+    let name = "tessera_live_all_filters";
+    let _ = client.delete_collection(name).await;
+    let schema = serde_json::json!({"name": name, "fields": [
+        {"name": "n", "type": "int32"},
+        {"name": "t", "type": "string", "optional": true},
+    ]});
+    client.create_collection(&schema).await.unwrap();
+    let import = "{\"id\":\"1\",\"n\":1}\n{\"id\":\"2\",\"n\":2}\n{\"id\":\"3\",\"n\":3}";
+    let imported = admin_request(
+        reqwest::Method::POST,
+        &format!("/collections/{name}/documents/import?action=create"),
+    )
+    .body(import)
+    .send()
+    .await
+    .expect("import");
+    assert!(imported.status().is_success());
+    let partial = serde_json::json!({"t": "u"});
+
+    let blank_count = client.count_documents(name, Some("  ")).await;
+    let blank_delete = client.delete_by_filter(name, "  ").await;
+    let blank_update = client.update_by_filter(name, "  ", &partial).await;
+    let star_count = client.count_documents(name, Some("*")).await;
+    let star_delete = client.delete_by_filter(name, "*").await;
+    let star_update = client.update_by_filter(name, " * ", &partial).await;
+    let id_count = client.count_documents(name, Some("id:[a,*]")).await;
+    let id_delete = client.delete_by_filter(name, "id:[a,*]").await;
+    let left = client.count_documents(name, None).await;
+    let _ = client.delete_collection(name).await;
+
+    assert_eq!(blank_count.unwrap(), 3);
+    assert_eq!(blank_delete.unwrap(), 0);
+    assert_eq!(blank_update.unwrap(), 0);
+    assert!(matches!(star_count, Err(Error::Http { status: 400, .. })));
+    assert!(matches!(star_delete, Err(Error::Http { status: 400, .. })));
+    assert_eq!(star_update.unwrap(), 3);
+    assert_eq!(id_count.unwrap(), 3);
+    assert_eq!(id_delete.unwrap(), 3);
+    assert_eq!(left.unwrap(), 0);
+}

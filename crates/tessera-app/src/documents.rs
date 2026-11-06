@@ -94,6 +94,23 @@ pub trait DocumentsBackend: Send + Sync {
         collection: String,
         filter: String,
     ) -> BoxFuture<Result<u64, Error>>;
+
+    /// How many documents match `filter`.
+    fn count(
+        &self,
+        client: Client,
+        collection: String,
+        filter: Option<String>,
+    ) -> BoxFuture<Result<u64, Error>>;
+
+    /// Merges `partial` into the documents matching `filter` and answers how many took it.
+    fn update_by_filter(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+        partial: Value,
+    ) -> BoxFuture<Result<u64, Error>>;
 }
 
 /// The backend the views use.
@@ -189,6 +206,29 @@ impl DocumentsBackend for TokioBackend {
         filter: String,
     ) -> BoxFuture<Result<u64, Error>> {
         self.run(async move { client.delete_by_filter(&collection, &filter).await })
+    }
+
+    fn count(
+        &self,
+        client: Client,
+        collection: String,
+        filter: Option<String>,
+    ) -> BoxFuture<Result<u64, Error>> {
+        self.run(async move { client.count_documents(&collection, filter.as_deref()).await })
+    }
+
+    fn update_by_filter(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+        partial: Value,
+    ) -> BoxFuture<Result<u64, Error>> {
+        self.run(async move {
+            client
+                .update_by_filter(&collection, &filter, &partial)
+                .await
+        })
     }
 }
 

@@ -2,6 +2,7 @@
 
 //! The documents view of a collection tab.
 
+pub mod bulk;
 pub mod columns;
 pub mod copy;
 pub mod inspector;
@@ -36,15 +37,16 @@ use tessera_core::documents::template::template;
 use tessera_widgets::{FacetFetch, FilterField, FilterInput, FilterInputEvent, confirm};
 use uuid::Uuid;
 
+use self::bulk::BulkMode;
 use self::inspector::{DocumentSaved, GoToResult, Inspector};
 use self::table::DocRows;
 use super::env_badge;
 use super::overview::grouped;
 use super::schema_view::COPIED_FOR;
 use crate::actions::{
-    ClearFilter, CopyCell, CopyRowJson, DOCUMENTS, DeleteDocuments, ExtendRows, FocusSearch,
-    GoToId, NarrowerColumn, NewDocument, OpenDocument, SelectLoaded, SortByColumn, ToggleColumns,
-    ToggleInspector, TogglePinColumn, ToggleRow, WiderColumn,
+    ClearFilter, CopyCell, CopyRowJson, DOCUMENTS, DeleteByQuery, DeleteDocuments, ExtendRows,
+    FocusSearch, GoToId, NarrowerColumn, NewDocument, OpenDocument, SelectLoaded, SortByColumn,
+    ToggleColumns, ToggleInspector, TogglePinColumn, ToggleRow, UpdateByQuery, WiderColumn,
 };
 use crate::connection::{CollectionChanged, ConnectionState};
 use crate::documents::DocumentsBackendGlobal;
@@ -77,6 +79,22 @@ fn filter_fields(collection: &Collection) -> Vec<FilterField> {
             facet: f.flag("facet"),
         });
     std::iter::once(id).chain(fields).collect()
+}
+
+/// Facet values of `collection` for a filter input, through the user's client.
+fn facet_fetch(connection: Entity<ConnectionState>, collection: String) -> FacetFetch {
+    Rc::new(move |field, prefix, cx: &mut App| {
+        let Some(connected) = &connection.read(cx).connected else {
+            return Task::ready(Vec::new());
+        };
+        let values = cx.global::<DocumentsBackendGlobal>().0.facet_values(
+            connected.client.clone(),
+            collection.clone(),
+            field,
+            prefix,
+        );
+        cx.spawn(async move |_| values.await.unwrap_or_default())
+    })
 }
 
 /// How long a resize waits for the next one before it is saved, so a drag writes once.
@@ -112,7 +130,7 @@ pub struct DocumentsView {
     copied_reset: Option<Task<()>>,
     copy_task: Option<Task<()>>,
     copy_error: Option<SharedString>,
-    /// A delete is running.
+    /// A delete, or an update by query, is running.
     deleting: bool,
     /// The open copy menu of a cell, where it was asked for, and its dismissal.
     context_menu: Option<(Entity<PopupMenu>, Point<Pixels>, Subscription)>,
@@ -141,19 +159,7 @@ impl DocumentsView {
                 .col_selectable(false)
                 .col_movable(false)
         });
-        let (facets, collection) = (connection.clone(), name.clone());
-        let fetch: FacetFetch = Rc::new(move |field, prefix, cx: &mut App| {
-            let Some(connected) = &facets.read(cx).connected else {
-                return Task::ready(Vec::new());
-            };
-            let values = cx.global::<DocumentsBackendGlobal>().0.facet_values(
-                connected.client.clone(),
-                collection.clone(),
-                field,
-                prefix,
-            );
-            cx.spawn(async move |_| values.await.unwrap_or_default())
-        });
+        let fetch = facet_fetch(connection.clone(), name.clone());
         let filter = cx.new(|cx| FilterInput::new(Vec::new(), fetch, window, cx));
         let inspector = cx.new(|cx| Inspector::new(connection.clone(), name.clone(), window, cx));
         let goto = cx.new(|cx| {
@@ -482,7 +488,43 @@ impl DocumentsView {
 
     fn set_delete_error(&mut self, error: Option<SharedString>, cx: &mut Context<Self>) {
         self.table.update(cx, |t, cx| {
-            t.delegate_mut().delete_error = error;
+            let rows = t.delegate_mut();
+            rows.delete_error = error;
+            rows.bulk_result = None;
+            cx.notify();
+        });
+    }
+
+    /// Opens the delete or update by query dialog on the table's filter. Not while a new query
+    /// runs or a write is going.
+    fn open_bulk(&mut self, mode: BulkMode, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.table.read(cx).delegate();
+        if !self.has_schema || self.deleting || rows.query_pending() {
+            return;
+        }
+        let filter = rows.filter.clone().unwrap_or_default();
+        let view = cx.entity().downgrade();
+        // It reads this view, which is being updated now.
+        window.defer(cx, move |window, cx| {
+            bulk::open(view, mode, filter, window, cx)
+        });
+    }
+
+    /// Takes in the end of a bulk call: `cleared` when it ran, `result` to report.
+    fn bulk_finished(
+        &mut self,
+        cleared: bool,
+        result: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.deleting = false;
+        self.reload(cx);
+        self.table.update(cx, |t, cx| {
+            let rows = t.delegate_mut();
+            rows.bulk_result = result;
+            if cleared {
+                rows.clear_selection();
+            }
             cx.notify();
         });
     }
@@ -842,6 +884,30 @@ impl DocumentsView {
             )
     }
 
+    fn bulk_button(
+        &self,
+        mode: BulkMode,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let idle = !self.deleting && !self.table.read(cx).delegate().query_pending();
+        let (id, label) = match mode {
+            BulkMode::Delete => ("documents.delete_query", t!("documents.delete_query")),
+            BulkMode::Update => ("documents.update_query", t!("documents.update_query")),
+        };
+        let shortcut = match mode {
+            BulkMode::Delete => Kbd::binding_for_action(&DeleteByQuery, Some(DOCUMENTS), window),
+            BulkMode::Update => Kbd::binding_for_action(&UpdateByQuery, Some(DOCUMENTS), window),
+        };
+        Button::new(id)
+            .ghost()
+            .small()
+            .disabled(!idle)
+            .label(label.to_string())
+            .children(shortcut)
+            .on_click(cx.listener(move |this, _, window, cx| this.open_bulk(mode, window, cx)))
+    }
+
     /// The Copy dropdown and the inspector's toggle.
     fn actions(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let label = if self.copied {
@@ -858,6 +924,8 @@ impl DocumentsView {
         let locked = self.connection.read(cx).writes_locked();
         h_flex()
             .gap_2()
+            .flex_wrap()
+            .justify_end()
             .items_center()
             .child(
                 Button::new("documents.copy")
@@ -898,6 +966,14 @@ impl DocumentsView {
             )
             .when(locked, |el| {
                 el.child(env_badge::lock("documents.delete", false, cx))
+            })
+            .child(self.bulk_button(BulkMode::Delete, window, cx))
+            .when(locked, |el| {
+                el.child(env_badge::lock("documents.delete_query", false, cx))
+            })
+            .child(self.bulk_button(BulkMode::Update, window, cx))
+            .when(locked, |el| {
+                el.child(env_badge::lock("documents.update_query", false, cx))
             })
             .child(
                 Button::new("documents.toggle_inspector")
@@ -985,6 +1061,7 @@ impl Render for DocumentsView {
         let query_error = rows.query_error.clone();
         let error = rows.error.clone().or_else(|| self.copy_error.clone());
         let delete_error = rows.delete_error.clone();
+        let bulk_result = rows.bulk_result.clone();
         let selection_note = selection_note(rows);
         let picker = self.has_schema.then(|| {
             columns::picker(
@@ -1048,6 +1125,12 @@ impl Render for DocumentsView {
             .on_action(cx.listener(|this, _: &DeleteDocuments, window, cx| {
                 selection::delete(this, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &DeleteByQuery, window, cx| {
+                this.open_bulk(BulkMode::Delete, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &UpdateByQuery, window, cx| {
+                this.open_bulk(BulkMode::Update, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &SortByColumn, _, cx| this.sort_selected(cx)))
             .on_action(cx.listener(|this, _: &ToggleColumns, _, cx| {
                 this.set_columns_open(!this.columns_open, cx)
@@ -1086,8 +1169,23 @@ impl Render for DocumentsView {
                     .justify_between()
                     .items_center()
                     .child(div().children(self.status(window, cx)))
-                    .child(h_flex().gap_2().children(actions).children(picker)),
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .justify_end()
+                            .children(actions)
+                            .children(picker),
+                    ),
             )
+            .children(bulk_result.map(|text| {
+                div()
+                    .id("bulk.result")
+                    .test_support()
+                    .aria_label(text.clone())
+                    .text_sm()
+                    .child(text)
+            }))
             .children(selection_note.map(|(id, text)| {
                 div()
                     .id(id)

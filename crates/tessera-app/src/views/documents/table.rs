@@ -84,6 +84,8 @@ pub struct DocRows {
     pub selection: Selection,
     /// How the last delete failed.
     pub delete_error: Option<SharedString>,
+    /// What the last delete or update by query did.
+    pub bulk_result: Option<SharedString>,
     /// The last tick ran into `MAX_SELECTION`.
     pub selection_limit: bool,
     /// The last range passed over rows that are not loaded.
@@ -119,6 +121,7 @@ impl DocRows {
             query_error: None,
             selection: Selection::default(),
             delete_error: None,
+            bulk_result: None,
             selection_limit: false,
             selection_unloaded: false,
             query_changed: false,
@@ -196,6 +199,7 @@ impl DocRows {
     pub fn requery(&mut self, cx: &mut Context<TableState<Self>>) {
         self.clear_selection();
         self.delete_error = None;
+        self.bulk_result = None;
         self.query_changed = true;
         self.reload(cx);
     }

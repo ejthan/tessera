@@ -303,6 +303,54 @@ impl Fixture {
         self.settle(cx);
     }
 
+    /// Lets `ms` of the bulk dialog's wait pass.
+    fn wait(&self, cx: &mut TestAppContext, ms: u64) {
+        cx.executor().advance_clock(Duration::from_millis(ms));
+        cx.run_until_parked();
+        self.act(cx, |_, _| {});
+    }
+
+    fn counts(&self) -> Vec<Option<String>> {
+        self.docs.count_calls.lock().unwrap().clone()
+    }
+
+    /// Opens a bulk dialog with `shortcut`, types `filter` and waits for its count.
+    fn bulk(&self, cx: &mut TestAppContext, shortcut: &str, filter: &str) {
+        self.press(cx, shortcut);
+        self.type_bulk_filter(cx, filter);
+        self.wait(cx, 300);
+    }
+
+    /// Replaces the text of the focused input with `text`.
+    fn replace_text(&self, cx: &mut TestAppContext, text: &str) {
+        self.act(cx, |window, cx| {
+            window.press(SELECT_ALL, cx);
+            window.input(text, cx);
+        });
+    }
+
+    fn type_bulk_filter(&self, cx: &mut TestAppContext, text: &str) {
+        self.act(cx, |window, cx| window.input(text, cx));
+    }
+
+    fn type_partial(&self, cx: &mut TestAppContext, text: &str) {
+        self.click(cx, "bulk.editor");
+        self.replace_text(cx, text);
+        self.act(cx, |_, _| {});
+    }
+
+    fn continue_disabled(&self, cx: &mut TestAppContext) -> bool {
+        self.act(cx, |window, _| {
+            window.find("bulk.continue").disabled() == Some(true)
+        })
+    }
+
+    /// Continue, with the second count answered.
+    fn bulk_continue(&self, cx: &mut TestAppContext) {
+        self.click(cx, "bulk.continue");
+        self.settle(cx);
+    }
+
     /// Scrolls over the first `found` rows so their pages are loaded.
     fn load_rows(&self, cx: &mut TestAppContext, found: usize) {
         for row in (0..found).step_by(200) {
@@ -2697,4 +2745,444 @@ async fn count_refreshes_after_delete(cx: &mut TestAppContext) {
         *f.backend.lists.lock().unwrap() > listed,
         "the list reloads"
     );
+}
+
+#[gpui_kit::test]
+async fn delete_query_starts_with_the_table_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.submit_filter(cx, "price:>1");
+    f.press(cx, DELETE_QUERY);
+    f.wait(cx, 300);
+    assert_eq!(f.counts(), [Some("price:>1".to_string())]);
+    assert!(f.text_of(cx, "bulk.count").contains("10"));
+    // The focus is in the filter.
+    f.type_bulk_filter(cx, " && price:<9");
+    f.wait(cx, 300);
+    assert_eq!(f.counts()[1].as_deref(), Some("price:>1 && price:<9"));
+}
+
+#[gpui_kit::test]
+async fn bulk_buttons_open_their_dialogs(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.click(cx, "documents.delete_query");
+    f.settle(cx);
+    assert!(!f.has(cx, "bulk.editor"));
+    f.click(cx, "bulk.cancel");
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.click(cx, "documents.update_query");
+    f.settle(cx);
+    assert!(f.has(cx, "bulk.editor"));
+}
+
+#[gpui_kit::test]
+async fn bulk_waits_for_a_new_query(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let hold = f.docs.hold_next();
+    f.type_filter(cx, "price:>1");
+    f.act(cx, |window, cx| window.press("enter", cx));
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.run_until_parked();
+    assert!(f.act(cx, |window, _| {
+        window.find("documents.delete_query").disabled() == Some(true)
+            && window.find("documents.update_query").disabled() == Some(true)
+    }));
+    f.press(cx, DELETE_QUERY);
+    assert!(!f.has(cx, "bulk.continue"));
+    drop(hold);
+    f.settle(cx);
+    f.press(cx, DELETE_QUERY);
+    assert!(f.has(cx, "bulk.continue"));
+}
+
+#[gpui_kit::test]
+async fn count_shows_after_the_debounce(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 7).await;
+    f.press(cx, DELETE_QUERY);
+    f.type_bulk_filter(cx, "price:>1");
+    assert!(f.text_of(cx, "bulk.count").contains("Counting"));
+    f.wait(cx, 200);
+    assert!(f.counts().is_empty());
+    f.wait(cx, 100);
+    assert_eq!(f.counts().len(), 1);
+    assert!(f.text_of(cx, "bulk.count").contains("Affects 7"));
+}
+
+#[gpui_kit::test]
+async fn newer_filter_replaces_a_slow_count(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 7).await;
+    f.press(cx, DELETE_QUERY);
+    f.type_bulk_filter(cx, "price:>1");
+    let hold = f.docs.hold_next();
+    f.wait(cx, 300);
+    *f.docs.found.lock().unwrap() = 3;
+    f.type_bulk_filter(cx, "0");
+    assert!(f.text_of(cx, "bulk.count").contains("Counting"));
+    f.wait(cx, 300);
+    assert!(f.text_of(cx, "bulk.count").contains("Affects 3"));
+    let _ = hold.send(());
+    f.settle(cx);
+    assert!(f.text_of(cx, "bulk.count").contains("Affects 3"));
+    assert_eq!(f.counts().len(), 2);
+}
+
+#[gpui_kit::test]
+async fn empty_filter_disables_continue(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 7).await;
+    f.press(cx, DELETE_QUERY);
+    f.wait(cx, 300);
+    assert!(f.continue_disabled(cx));
+    assert!(f.text_of(cx, "bulk.count").contains("Truncate"));
+    f.type_bulk_filter(cx, "   ");
+    f.wait(cx, 300);
+    assert!(f.continue_disabled(cx));
+    assert!(f.counts().is_empty(), "a blank filter counts everything");
+}
+
+#[gpui_kit::test]
+async fn a_filter_for_everything_never_reaches_the_server(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 7).await;
+    for (shortcut, filter) in [
+        (DELETE_QUERY, "*"),
+        (UPDATE_QUERY, "*"),
+        (UPDATE_QUERY, " * "),
+        (DELETE_QUERY, "id:*"),
+        (UPDATE_QUERY, "id:=[a,*]"),
+        (UPDATE_QUERY, "   "),
+    ] {
+        f.bulk(cx, shortcut, filter);
+        if shortcut == UPDATE_QUERY {
+            f.type_partial(cx, r#"{"title":"x"}"#);
+        }
+        assert!(f.continue_disabled(cx), "{filter:?}");
+        assert!(f.text_of(cx, "bulk.count").contains("Enter a filter"));
+        f.act(cx, |window, cx| window.press(SAVE, cx));
+        f.settle(cx);
+        assert!(!f.has(cx, "confirm.ok"), "{filter:?}");
+        f.click(cx, "bulk.cancel");
+        wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+        // The kit gives the focus back once the dialog's exit has played.
+        f.wait(cx, 1000);
+    }
+    assert!(f.counts().is_empty());
+    assert!(f.writes().is_empty());
+}
+
+#[gpui_kit::test]
+async fn zero_matches_disables_continue(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 3).await;
+    *f.docs.found.lock().unwrap() = 0;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    assert!(f.continue_disabled(cx));
+    assert!(f.text_of(cx, "bulk.count").contains("No documents"));
+}
+
+#[gpui_kit::test]
+async fn bad_filter_shows_the_server_message(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 3).await;
+    f.press(cx, DELETE_QUERY);
+    *f.docs.fail.lock().unwrap() = Some((400, "Could not parse the filter query.".into()));
+    f.type_bulk_filter(cx, "price:");
+    f.wait(cx, 300);
+    let text = f.text_of(cx, "bulk.error");
+    assert!(text.contains("Could not parse the filter query."), "{text}");
+    assert!(f.continue_disabled(cx));
+}
+
+#[gpui_kit::test]
+async fn continue_counts_again(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    *f.docs.found.lock().unwrap() = 8;
+    f.bulk_continue(cx);
+    assert_eq!(f.counts().len(), 2);
+    let body = f.text_of(cx, "confirm.body");
+    assert!(
+        body.contains("Deletes 8 documents from products matching: price:>1"),
+        "{body}"
+    );
+}
+
+#[gpui_kit::test]
+async fn cancel_changes_nothing(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.click(cx, "confirm.cancel");
+    f.settle(cx);
+    assert!(f.writes().is_empty());
+    assert!(
+        !f.continue_disabled(cx),
+        "the dialog is still there to retry"
+    );
+}
+
+#[gpui_kit::test]
+async fn at_one_thousand_uses_the_simple_confirm(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1000).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    assert!(f.has(cx, "confirm.ok"));
+    assert!(!f.has(cx, "danger.input"));
+}
+
+#[gpui_kit::test]
+async fn above_one_thousand_needs_the_name(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1001).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    assert!(!f.has(cx, "confirm.ok"));
+    let line = f.text_of(cx, "danger.consequence.0");
+    assert!(
+        line.contains("1,001") && line.contains("price:>1"),
+        "{line}"
+    );
+    f.act(cx, |window, cx| window.input("products", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "danger.ok".into(), false).await;
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    assert_eq!(f.writes()[0].0, "delete_by_filter");
+    assert_eq!(f.writes()[0].1, "price:>1");
+    assert!(f.text_of(cx, "bulk.result").contains("1,001"));
+}
+
+#[gpui_kit::test]
+async fn stop_waiting_still_closes_with_the_result(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1001).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.act(cx, |window, cx| window.input("products", cx));
+    let hold = f.docs.hold_next();
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    f.click(cx, "danger.stop_waiting");
+    wait_for_element(cx, f.handle, "danger.ok".into(), false).await;
+    assert!(f.has(cx, "bulk.continue"));
+    drop(hold);
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    assert!(f.has(cx, "bulk.result"));
+}
+
+#[gpui_kit::test]
+async fn prod_needs_the_name(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 2).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    assert!(f.has(cx, "danger.prod"));
+    assert!(!f.has(cx, "confirm.ok"));
+}
+
+#[gpui_kit::test]
+async fn type_to_confirm_is_exact(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 2).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.act(cx, |window, cx| window.input("Products", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    assert!(f.writes().is_empty());
+    assert!(f.has(cx, "danger.ok"));
+}
+
+#[gpui_kit::test]
+async fn delete_reports_the_count_and_reloads(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.tick(cx, "3");
+    let pages = f.docs.pages.lock().unwrap().len();
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert_eq!(f.writes()[0].1, "price:>1");
+    assert!(f.text_of(cx, "bulk.result").contains("Deleted 5"));
+    assert!(f.docs.pages.lock().unwrap().len() > pages);
+    assert!(f.ticked(cx).is_empty());
+    assert!(f.text_of(cx, "documents.status").contains('0'));
+}
+
+#[gpui_kit::test]
+async fn update_sends_filter_and_partial(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    f.type_partial(cx, r#"{"title":"x"}"#);
+    f.bulk_continue(cx);
+    let body = f.text_of(cx, "confirm.body");
+    assert!(body.contains("5") && body.contains("price:>1"), "{body}");
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    let writes = f.writes();
+    assert_eq!(writes[0].0, "update_by_filter");
+    assert_eq!(writes[0].1, "price:>1");
+    assert_eq!(writes[0].2, json!({"title": "x"}));
+    assert!(f.text_of(cx, "bulk.result").contains("Updated 5"));
+}
+
+#[gpui_kit::test]
+async fn update_with_id_is_refused(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    f.type_partial(cx, r#"{"id":"z","title":"x"}"#);
+    assert!(f.continue_disabled(cx));
+    assert!(f.text_of(cx, "bulk.issues").contains("`id`"));
+}
+
+#[gpui_kit::test]
+async fn update_marks_only_the_keys_present(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    f.type_partial(cx, r#"{"price":"x"}"#);
+    let issues = f.text_of(cx, "bulk.issues");
+    assert!(
+        issues.contains("price") && !issues.contains("title"),
+        "{issues}"
+    );
+    assert!(
+        !f.continue_disabled(cx),
+        "marks advise, §7.8 lets it through"
+    );
+}
+
+// Review focus 2.
+#[gpui_kit::test]
+async fn update_mismatch_stays_open_with_the_warning(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    *f.docs.num_updated.lock().unwrap() = Some(0);
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    f.type_partial(cx, r#"{"price":"x"}"#);
+    f.bulk_continue(cx);
+    f.confirm_delete(cx);
+    f.settle(cx);
+    assert!(f.has(cx, "bulk.continue"), "the dialog stays");
+    let text = f.text_of(cx, "bulk.partial");
+    assert!(text.contains("Updated 0 of 5"), "{text}");
+    assert!(!f.has(cx, "bulk.result"), "not reported as a success");
+}
+
+#[gpui_kit::test]
+async fn update_mismatch_on_prod_comes_back_to_the_dialog(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 5).await;
+    *f.docs.num_updated.lock().unwrap() = Some(0);
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    f.type_partial(cx, r#"{"price":"x"}"#);
+    f.bulk_continue(cx);
+    f.act(cx, |window, cx| window.input("products", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "danger.ok".into(), false).await;
+    f.settle(cx);
+    assert!(f.has(cx, "bulk.continue"));
+    assert!(f.text_of(cx, "bulk.partial").contains("Updated 0 of 5"));
+    assert!(!f.has(cx, "bulk.result"));
+}
+
+#[gpui_kit::test]
+async fn update_invalid_json_disables_continue(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    assert!(f.continue_disabled(cx), "{{}} changes nothing");
+    for partial in ["{", "[1]", "{}"] {
+        f.type_partial(cx, partial);
+        assert!(f.continue_disabled(cx), "{partial}");
+    }
+    f.type_partial(cx, r#"{"title":"x"}"#);
+    assert!(!f.continue_disabled(cx));
+}
+
+#[gpui_kit::test]
+async fn locked_profile_unlocks_first_and_sends_nothing_before(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 5;
+    let f = open_profile(cx, plain_schema(), docs, true).await;
+    assert!(f.has(cx, "documents.delete_query.readonly"));
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    assert!(f.has(cx, "danger.input"));
+    assert_eq!(f.counts().len(), 1, "no second count before the unlock");
+    f.click(cx, "danger.input");
+    f.act(cx, |window, cx| window.input("test", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "confirm.ok".into(), true).await;
+    assert_eq!(f.counts().len(), 2);
+    assert!(f.writes().is_empty());
+    f.confirm_delete(cx);
+    assert_eq!(f.writes().len(), 1);
+}
+
+#[gpui_kit::test]
+async fn timeout_uses_the_long_text(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    *f.docs.write_fail.lock().unwrap() = Some((TIMEOUT, String::new()));
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.confirm_delete(cx);
+    f.settle(cx);
+    let text = f.text_of(cx, "bulk.error");
+    assert!(text.contains("did not finish within 30 minutes"), "{text}");
+    assert!(f.has(cx, "bulk.continue"));
+}
+
+#[gpui_kit::test]
+async fn failure_on_prod_shows_in_the_danger_dialog(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 5).await;
+    *f.docs.write_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.act(cx, |window, cx| window.input("products", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    assert!(f.text_of(cx, "danger.error").contains("boom"));
+}
+
+#[gpui_kit::test]
+async fn dialog_buttons_show_their_shortcuts(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    let visual = |f: &Fixture, cx: &mut TestAppContext, id: &'static str, chord: &'static str| {
+        let button = f.act(cx, |window, _| window.find(id).bounds());
+        let kbd = gpui_kit::VisualTestContext::from_window(f.handle.into(), cx)
+            .debug_bounds(chord)
+            .unwrap();
+        assert!(button.contains(&kbd.center()), "{id}");
+    };
+    visual(
+        &f,
+        cx,
+        "documents.delete_query",
+        key("kbd:cmd-shift-k", "kbd:ctrl-shift-k"),
+    );
+    visual(
+        &f,
+        cx,
+        "documents.update_query",
+        key("kbd:cmd-shift-u", "kbd:ctrl-shift-u"),
+    );
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    visual(
+        &f,
+        cx,
+        "bulk.continue",
+        key("kbd:cmd-enter", "kbd:ctrl-enter"),
+    );
+    visual(&f, cx, "bulk.cancel", "kbd:escape");
+}
+
+#[gpui_kit::test]
+async fn closing_the_dialog_gives_the_keyboard_back(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.press(cx, "escape");
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.wait(cx, 1000);
+    f.press(cx, UPDATE_QUERY);
+    assert!(f.has(cx, "bulk.editor"));
+}
+
+#[gpui_kit::test]
+async fn command_enter_continues_from_the_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.press(cx, SAVE);
+    assert!(f.has(cx, "confirm.ok"));
 }

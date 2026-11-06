@@ -429,6 +429,10 @@ pub struct FakeDocs {
     pub filter_short: Mutex<u64>,
     /// Ids of the first rows, in place of their numbers.
     pub ids: Mutex<Vec<String>>,
+    /// The filter of every `count`, in order.
+    pub count_calls: Mutex<Vec<Option<String>>>,
+    /// What `update_by_filter` answers instead of the documents matching.
+    pub num_updated: Mutex<Option<u64>>,
 }
 
 impl FakeDocs {
@@ -660,8 +664,11 @@ impl DocumentsBackend for FakeDocsBackend {
         _: String,
         filter: String,
     ) -> tessera_app::collections::BoxFuture<Result<u64, Error>> {
-        // Two backticks per id.
-        let named = filter.matches('`').count() as u64 / 2;
+        // Two backticks per id; a filter naming no id takes every document.
+        let named = match filter.matches('`').count() as u64 / 2 {
+            0 => *self.0.found.lock().unwrap(),
+            named => named,
+        };
         let removed = named.saturating_sub(*self.0.filter_short.lock().unwrap());
         self.0.remove(
             "delete_by_filter",
@@ -670,6 +677,39 @@ impl DocumentsBackend for FakeDocsBackend {
             removed,
             removed,
         )
+    }
+
+    fn count(
+        &self,
+        _: Client,
+        _: String,
+        filter: Option<String>,
+    ) -> tessera_app::collections::BoxFuture<Result<u64, Error>> {
+        self.0.count_calls.lock().unwrap().push(filter);
+        let answer = match self.0.fail.lock().unwrap().clone() {
+            Some(e) => Err(http_error(e)),
+            None => Ok(*self.0.found.lock().unwrap()),
+        };
+        let hold = self.0.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
+    }
+
+    fn update_by_filter(
+        &self,
+        _: Client,
+        _: String,
+        filter: String,
+        partial: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<u64, Error>> {
+        let found = *self.0.found.lock().unwrap();
+        let updated = self.0.num_updated.lock().unwrap().unwrap_or(found);
+        self.0
+            .remove("update_by_filter", filter, partial, 0, updated)
     }
 }
 
@@ -756,6 +796,8 @@ pub const CLOSE_TAB: &str = key("cmd-w", "ctrl-w");
 pub const COPY_CURL: &str = key("cmd-shift-c", "ctrl-shift-c");
 pub const REFRESH: &str = key("cmd-r", "ctrl-r");
 pub const LOCK_AGAIN: &str = key("cmd-shift-l", "ctrl-shift-l");
+pub const DELETE_QUERY: &str = key("cmd-shift-k", "ctrl-shift-k");
+pub const UPDATE_QUERY: &str = key("cmd-shift-u", "ctrl-shift-u");
 pub const SHOW_DOCUMENTS: &str = key("cmd-1", "ctrl-1");
 pub const SHOW_SCHEMA: &str = key("cmd-2", "ctrl-2");
 pub const SORT: &str = key("cmd-shift-s", "ctrl-shift-s");
