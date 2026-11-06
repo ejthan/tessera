@@ -23,6 +23,7 @@ use tessera_core::ai::{
 
 use super::super::dock::view_tab;
 use super::ai_form::ModelForm;
+use super::ai_test::AiTestPanel;
 use super::{
     Danger, ErrorSlot, ListRow, ResourceColumn, ResourceList, client_of, confirm_write,
     empty_state, list_error_text, notice, report_to, row_button, toolbar,
@@ -127,6 +128,7 @@ pub struct ModelsView {
     /// The model the form followed last, so that only a new one replaces it.
     followed: Option<String>,
     form: Entity<ModelForm>,
+    test: Entity<AiTestPanel>,
     problem: Option<ModelProblem>,
     /// What a save that sent nothing has to say.
     note: Option<SharedString>,
@@ -153,6 +155,7 @@ impl ModelsView {
             this.follow_selection(window, cx);
         });
         let form = cx.new(|cx| ModelForm::new(kind, connection.clone(), window, cx));
+        let test = cx.new(|cx| AiTestPanel::new(kind, connection.clone(), window, cx));
         let mut this = Self {
             kind,
             connection,
@@ -164,6 +167,7 @@ impl ModelsView {
             pane: Pane::Empty,
             followed: None,
             form,
+            test,
             problem: None,
             note: None,
             saving: false,
@@ -178,6 +182,11 @@ impl ModelsView {
     /// The form.
     pub fn form(&self) -> &Entity<ModelForm> {
         &self.form
+    }
+
+    /// The test panel.
+    pub fn test_panel(&self) -> &Entity<AiTestPanel> {
+        &self.test
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
@@ -231,6 +240,7 @@ impl ModelsView {
                 self.pane = Pane::Empty;
                 self.followed = None;
                 self.form.update(cx, |f, cx| f.clear_key(window, cx));
+                self.test.update(cx, |t, cx| t.set_model(None, cx));
             }
             return;
         };
@@ -242,7 +252,8 @@ impl ModelsView {
         self.error = None;
         self.problem = None;
         self.note = None;
-        self.pane = Pane::Edit(id);
+        self.pane = Pane::Edit(id.clone());
+        self.test.update(cx, |t, cx| t.set_model(Some(id), cx));
         let draft = draft_of(self.kind, &model);
         self.form
             .update(cx, |f, cx| f.show(&draft, false, window, cx));
@@ -255,6 +266,7 @@ impl ModelsView {
         self.problem = None;
         self.note = None;
         self.list.update(cx, |l, cx| l.select(None, cx));
+        self.test.update(cx, |t, cx| t.set_model(None, cx));
         self.form.update(cx, |f, cx| {
             f.show(&ModelDraft::default(), true, window, cx);
         });
@@ -376,6 +388,9 @@ impl ModelsView {
                         .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                 ),
             )
+            .when(matches!(self.pane, Pane::Edit(_)), |el| {
+                el.child(self.test.clone())
+            })
     }
 }
 

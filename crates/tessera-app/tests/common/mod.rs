@@ -1719,6 +1719,10 @@ pub struct FakeAdmin {
     pub ai_saved: Mutex<Vec<(Option<String>, Value)>>,
     /// Model calls and AI searches fail with this status and Typesense message.
     pub fail_ai: Mutex<Option<(u16, String)>>,
+    /// `ai_search` fails with this status and Typesense message.
+    pub fail_ai_search: Mutex<Option<(u16, String)>>,
+    /// `ai_search` waits for this before it answers.
+    pub ai_hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// What each `ai_search` answers, in turn.
     pub ai_answers: Mutex<VecDeque<String>>,
     /// Every `ai_search`: the collection and the parameters.
@@ -2056,7 +2060,8 @@ impl AdminBackend for FakeAdminBackend {
             .lock()
             .unwrap()
             .push((collection, params));
-        let answer = match self.0.fail_ai.lock().unwrap().clone() {
+        let hold = self.0.ai_hold.lock().unwrap().take();
+        let answer = match self.0.fail_ai_search.lock().unwrap().clone() {
             Some(fail) => Err(http_error(fail)),
             None => Ok(self
                 .0
@@ -2064,9 +2069,14 @@ impl AdminBackend for FakeAdminBackend {
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or_else(|| "{}".into())),
+                .unwrap_or_else(|| r#"{"found":0,"hits":[]}"#.into())),
         };
-        Box::pin(async move { answer })
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
     }
 }
 

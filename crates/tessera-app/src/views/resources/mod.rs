@@ -4,6 +4,7 @@
 
 pub mod ai;
 pub mod ai_form;
+pub mod ai_test;
 pub mod aliases;
 pub mod analytics;
 pub mod attachment;
