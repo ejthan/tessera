@@ -65,7 +65,8 @@ pub fn has_rows(view: &DocumentsView, cx: &gpui_kit::App) -> bool {
     !target_ids(view, cx).is_empty()
 }
 
-/// The documents of `ids` as JSONL lines. One id takes the document endpoint; several take
+/// The documents of `ids` as JSONL texts, each of one or more lines: the export bodies as
+/// they came, so splitting them is left to the background. One id takes the document endpoint; several take
 /// `id_batches`, whose `single` ids (and the one alone) also go through it. `.` and `..` have
 /// no endpoint, so they keep the filter `id_batches` gives them.
 async fn fetch_lines(
@@ -81,16 +82,27 @@ async fn fetch_lines(
             (batches.filters, batches.single)
         }
     };
-    let mut lines = Vec::new();
+    let mut texts = Vec::new();
     for filter in filters {
-        let text = backend.export(client.clone(), name.clone(), filter).await?;
-        lines.extend(text.lines().filter(|l| !l.is_empty()).map(String::from));
+        texts.push(backend.export(client.clone(), name.clone(), filter).await?);
     }
     for id in single {
         let document = backend.document(client.clone(), name.clone(), id).await?;
-        lines.push(to_jsonl(&[document]));
+        texts.push(to_jsonl(&[document]));
     }
-    Ok(lines)
+    Ok(texts)
+}
+
+/// The non-empty lines of `texts`, as JSONL or as CSV over `columns`.
+fn render(texts: &[String], format: CopyFormat, columns: &[String]) -> Result<String, String> {
+    let lines: Vec<String> = texts
+        .iter()
+        .flat_map(|t| t.lines().filter(|l| !l.is_empty()).map(String::from))
+        .collect();
+    match format {
+        CopyFormat::Jsonl => Ok(lines.join("\n")),
+        CopyFormat::Csv => csv_text(columns, &lines).map_err(|e| e.to_string()),
+    }
 }
 
 /// CSV of JSONL `lines` over `columns`.
@@ -130,15 +142,13 @@ pub fn copy_selection(
         .collect();
     let backend = cx.global::<DocumentsBackendGlobal>().0.clone();
     view.copy_task = Some(cx.spawn_in(window, async move |this, cx| {
-        let lines = fetch_lines(&*backend, client, name, &ids).await;
-        let text = match (lines, format) {
-            (Ok(lines), CopyFormat::Jsonl) => Ok(Ok(lines.join("\n"))),
-            (Ok(lines), CopyFormat::Csv) => Ok(cx
+        let texts = fetch_lines(&*backend, client, name, &ids).await;
+        let text = match texts {
+            Ok(texts) => Ok(cx
                 .background_executor()
-                .spawn(async move { csv_text(&columns, &lines) })
-                .await
-                .map_err(|e| e.to_string())),
-            (Err(e), _) => Err(e),
+                .spawn(async move { render(&texts, format, &columns) })
+                .await),
+            Err(e) => Err(e),
         };
         this.update(cx, |view, cx| {
             let failure = match text {

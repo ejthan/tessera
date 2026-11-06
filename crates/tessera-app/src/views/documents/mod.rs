@@ -522,7 +522,8 @@ impl DocumentsView {
         cx: &mut Context<Self>,
     ) {
         self.deleting = false;
-        self.reload(cx);
+        // The rows reload on `CollectionChanged`, which the dialog announces after this.
+        self.set_delete_error(None, cx);
         self.table.update(cx, |t, cx| {
             let rows = t.delegate_mut();
             rows.bulk_result = result;

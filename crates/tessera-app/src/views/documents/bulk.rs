@@ -500,11 +500,10 @@ impl Bulk {
                 v.bulk_finished(cleared, report, job.draft, window, cx)
             })
             .ok();
-        if self.mode == BulkMode::Delete {
-            let name = self.collection.clone();
-            self.connection
-                .update(cx, |c, cx| c.collection_changed(name, cx));
-        }
+        // It reloads the rows, so `bulk_finished` does not.
+        let name = self.collection.clone();
+        self.connection
+            .update(cx, |c, cx| c.collection_changed(name, cx));
         cx.notify();
         outcome
     }
