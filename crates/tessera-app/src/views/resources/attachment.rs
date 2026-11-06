@@ -31,19 +31,38 @@ fn attach_error_text(error: &AttachError, profile: &Profile) -> String {
     }
 }
 
+fn mismatch_text(list: &[String]) -> String {
+    t!("sets.attach.mismatch", list = list.join(", ")).to_string()
+}
+
+fn dropped_text(names: &[String]) -> Option<SharedString> {
+    (!names.is_empty()).then(|| {
+        t!("sets.attach.dropped", names = names.join(", "))
+            .to_string()
+            .into()
+    })
+}
+
 /// What an answer has to say beyond the box: names that went, and a list unlike the one sent.
 fn outcome_text(outcome: &AttachOutcome) -> (Option<SharedString>, Option<SharedString>) {
-    let note = (!outcome.dropped.is_empty()).then(|| {
-        t!("sets.attach.dropped", names = outcome.dropped.join(", "))
-            .to_string()
-            .into()
-    });
-    let error = outcome.mismatch.then(|| {
-        t!("sets.attach.mismatch", list = outcome.list.join(", "))
-            .to_string()
-            .into()
-    });
-    (note, error)
+    let error = outcome
+        .mismatch
+        .then(|| mismatch_text(&outcome.list).into());
+    (dropped_text(&outcome.dropped), error)
+}
+
+/// The names a detach of `set` left out, or why it did not work. A 200 proves nothing: only the
+/// list read back says the set is gone, and one left attached fails every search once deleted.
+fn detached(
+    answer: Result<AttachOutcome, AttachError>,
+    set: &str,
+    profile: &Profile,
+) -> Result<Vec<String>, String> {
+    let outcome = answer.map_err(|e| attach_error_text(&e, profile))?;
+    if outcome.list.iter().any(|name| name == set) {
+        return Err(mismatch_text(&outcome.list));
+    }
+    Ok(outcome.dropped)
 }
 
 fn missing_text(kind: SetKind, row: &Missing) -> String {
@@ -97,6 +116,7 @@ impl SetsView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let locked = self.connection.read(cx).writes_locked();
+        let danger = cx.theme().danger;
         let needle = self.attach_filter.read(cx).value().to_lowercase();
         let holds = |c: &Collection| attached(c, self.kind).iter().any(|n| n == name);
         let shown = self.collections.iter();
@@ -135,6 +155,10 @@ impl SetsView {
                     .when(locked, |el| {
                         el.child(env_badge::lock("sets.attach", false, cx))
                     }),
+            )
+            .children(
+                self.collections_error()
+                    .map(|error| notice("sets.attach.error", error, danger)),
             )
             .child(
                 v_flex()
@@ -190,6 +214,7 @@ impl SetsView {
             let set = row.set.clone();
             let text = SharedString::from(missing_text(self.kind, &row));
             let (detach, create) = (set.clone(), set.clone());
+            let busy = self.pending.is_some();
             let shortcut = |action: &dyn gpui_kit::Action| {
                 (i == 0)
                     .then(|| Kbd::binding_for_action(action, Some(RESOURCES), window))
@@ -207,6 +232,8 @@ impl SetsView {
                                 .small()
                                 .danger()
                                 .label(t!("sets.detach").to_string())
+                                .loading(busy)
+                                .disabled(busy)
                                 .children(shortcut(&DetachMissing))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.ask_detach_missing(detach.clone(), window, cx);
@@ -226,7 +253,8 @@ impl SetsView {
         rows.collect()
     }
 
-    /// Detaches missing `set` from every collection that names it.
+    /// Detaches missing `set` from every collection that names it, once a fresh list shows it is
+    /// still missing: the rows above the table come from a list that is not polled.
     pub(super) fn ask_detach_missing(
         &mut self,
         set: String,
@@ -234,19 +262,57 @@ impl SetsView {
         cx: &mut Context<Self>,
     ) {
         let row = self.missing_sets().into_iter().find(|m| m.set == set);
-        let Some(row) = row else {
+        let (Some(row), None) = (row, &self.pending) else {
             return;
         };
+        let Some(client) = client_of(&self.connection, cx) else {
+            return;
+        };
+        self.error = None;
+        self.note = None;
+        let fresh = cx
+            .global::<RelevanceBackendGlobal>()
+            .0
+            .sets(client, self.kind);
+        cx.spawn_in(window, async move |this, cx| {
+            let fresh = fresh.await;
+            this.update_in(cx, |view, window, cx| {
+                match fresh {
+                    Ok(sets) if sets.iter().any(|s| s.name == row.set) => {
+                        let text = t!("sets.missing.exists", set = row.set).to_string();
+                        view.note = Some(text.into());
+                        view.reload(window, cx);
+                    }
+                    Ok(_) => view.confirm_detach_missing(row, window, cx),
+                    Err(e) => {
+                        let profile = &view.connection.read(cx).profile;
+                        view.error = Some(error_text(&e, profile).into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn confirm_detach_missing(
+        &mut self,
+        row: Missing,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let this = cx.entity().downgrade();
         let connection = self.connection.clone();
         self.connection.update(cx, |c, cx| {
             c.ensure_writable(window, cx, move |window, cx| {
+                let set = row.set.clone();
                 let danger = Danger {
                     title: t!("sets.detach.title", name = set).to_string(),
                     lines: vec![
                         t!("sets.detach.line", collection = row.collections.join(", ")).to_string(),
                     ],
-                    expected: set.clone(),
+                    expected: set,
                     action: t!("sets.detach").to_string(),
                     typed: false,
                 };
@@ -261,7 +327,8 @@ impl SetsView {
 
     /// Reads collections and the set fresh, then asks (D58, D62).
     pub(super) fn ask_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self.list.read(cx).selected(cx) else {
+        let name = self.list.read(cx).selected(cx);
+        let (Some(name), None) = (name, &self.pending) else {
             return;
         };
         let Some(client) = client_of(&self.connection, cx) else {
@@ -352,6 +419,35 @@ fn target(
     }
 }
 
+/// Holds the controls until `work` ends, then shows the names it left out. A plain Confirm has
+/// closed by then, so nothing else keeps a second run from starting.
+fn held(
+    view: WeakEntity<SetsView>,
+    set: String,
+    work: Task<(Vec<String>, Result<(), SharedString>)>,
+    cx: &mut App,
+) -> Task<Result<(), SharedString>> {
+    let hold = |v: &mut SetsView, cx: &mut Context<SetsView>| {
+        v.pending = Some(set);
+        cx.notify();
+    };
+    view.update(cx, hold).ok();
+    cx.spawn(async move |cx| {
+        let (mut dropped, answer) = work.await;
+        dropped.sort();
+        dropped.dedup();
+        view.update(cx, |v, cx| {
+            v.pending = None;
+            if !dropped.is_empty() {
+                v.note = dropped_text(&dropped);
+            }
+            cx.notify();
+        })
+        .ok();
+        answer
+    })
+}
+
 /// One toggle. Runs on through a closed tab.
 fn send_attach(
     view: WeakEntity<SetsView>,
@@ -411,8 +507,9 @@ fn send_detach_all(
     };
     let profile = connection.read(cx).profile.clone();
     let backend = cx.global::<RelevanceBackendGlobal>().0.clone();
-    window.spawn(cx, async move |cx| {
-        let mut done = Vec::new();
+    let set = row.set.clone();
+    let work = window.spawn(cx, async move |cx| {
+        let (mut done, mut dropped) = (Vec::new(), Vec::new());
         let mut stopped = None;
         for collection in row.collections {
             let detach = backend.attach(
@@ -422,16 +519,19 @@ fn send_detach_all(
                 row.set.clone(),
                 false,
             );
-            match detach.await {
-                Ok(_) => done.push(collection),
-                Err(e) => {
-                    stopped = Some((collection, attach_error_text(&e, &profile)));
+            match detached(detach.await, &row.set, &profile) {
+                Ok(left_out) => {
+                    dropped.extend(left_out);
+                    done.push(collection);
+                }
+                Err(error) => {
+                    stopped = Some((collection, error));
                     break;
                 }
             }
         }
         connection.update(cx, |c, cx| c.invalidate_collections(cx));
-        match stopped {
+        let answer = match stopped {
             Some((collection, error)) => Err(t!(
                 "sets.detach.stopped",
                 collection = collection,
@@ -441,8 +541,10 @@ fn send_detach_all(
             .to_string()
             .into()),
             None => Ok(()),
-        }
-    })
+        };
+        (dropped, answer)
+    });
+    held(view, set, work, cx)
 }
 
 /// Reads who uses the set, detaches it from each, deletes it, and checks that nobody names it
@@ -461,61 +563,74 @@ fn send_delete_set(
     let profile = connection.read(cx).profile.clone();
     let relevance = cx.global::<RelevanceBackendGlobal>().0.clone();
     let collections = cx.global::<CollectionsBackendGlobal>().0.clone();
-    window.spawn(cx, async move |cx| {
+    let set = name.clone();
+    let hold = view.clone();
+    let work = window.spawn(cx, async move |cx| {
+        let mut dropped = Vec::new();
         let text = |e: &Error| error_text(e, &profile);
-        let fresh = collections.list(client.clone()).await;
-        let (fresh, _) = fresh.map_err(|e| SharedString::from(text(&e)))?;
-        let using: Vec<String> = users(&fresh, kind, &name)
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        let mut done = Vec::new();
-        for collection in using {
-            let detach = relevance.attach(
-                client.clone(),
-                kind,
-                collection.clone(),
-                name.clone(),
-                false,
-            );
-            if let Err(e) = detach.await {
-                connection.update(cx, |c, cx| c.invalidate_collections(cx));
+        let answer: Result<(), SharedString> = async {
+            let fresh = collections.list(client.clone()).await;
+            let (fresh, _) = fresh.map_err(|e| SharedString::from(text(&e)))?;
+            let using: Vec<String> = users(&fresh, kind, &name)
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            let mut done = Vec::new();
+            for collection in using {
+                let detach = relevance.attach(
+                    client.clone(),
+                    kind,
+                    collection.clone(),
+                    name.clone(),
+                    false,
+                );
+                match detached(detach.await, &name, &profile) {
+                    Ok(left_out) => dropped.extend(left_out),
+                    Err(error) => {
+                        connection.update(cx, |c, cx| c.invalidate_collections(cx));
+                        return Err(t!(
+                            "sets.delete.stopped",
+                            collection = collection,
+                            error = error,
+                            done = none_if_empty(&done)
+                        )
+                        .to_string()
+                        .into());
+                    }
+                }
+                done.push(collection);
+            }
+            let deleted = relevance
+                .delete_set(client.clone(), kind, name.clone())
+                .await;
+            connection.update(cx, |c, cx| c.invalidate_collections(cx));
+            if let Err(e) = deleted {
                 return Err(t!(
-                    "sets.delete.stopped",
-                    collection = collection,
-                    error = attach_error_text(&e, &profile),
+                    "sets.delete.failed",
+                    error = text(&e),
                     done = none_if_empty(&done)
                 )
                 .to_string()
                 .into());
             }
-            done.push(collection);
+            view.update_in(cx, |view, window, cx| view.set_deleted(&name, window, cx))
+                .ok();
+            let after = collections.list(client).await;
+            let (after, _) = after.map_err(|e| {
+                SharedString::from(t!("sets.delete.unverified", error = text(&e)).to_string())
+            })?;
+            let left = users(&after, kind, &name);
+            if !left.is_empty() {
+                return Err(
+                    t!("sets.delete.still_listed", collections = left.join(", "))
+                        .to_string()
+                        .into(),
+                );
+            }
+            Ok(())
         }
-        let deleted = relevance
-            .delete_set(client.clone(), kind, name.clone())
-            .await;
-        connection.update(cx, |c, cx| c.invalidate_collections(cx));
-        if let Err(e) = deleted {
-            return Err(t!(
-                "sets.delete.failed",
-                error = text(&e),
-                done = none_if_empty(&done)
-            )
-            .to_string()
-            .into());
-        }
-        view.update_in(cx, |view, window, cx| view.set_deleted(&name, window, cx))
-            .ok();
-        let after = collections.list(client).await;
-        let (after, _) = after.map_err(|e| SharedString::from(text(&e)))?;
-        let left = users(&after, kind, &name);
-        if !left.is_empty() {
-            return Err(
-                t!("sets.delete.still_listed", collections = left.join(", "))
-                    .to_string()
-                    .into(),
-            );
-        }
-        Ok(())
-    })
+        .await;
+        (dropped, answer)
+    });
+    held(hold, set, work, cx)
 }

@@ -5,8 +5,9 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
+use tessera_client::SetKind;
 
-use super::changes::{ItemIssue, Level, check_items};
+use super::changes::{ItemIssue, Level, changes, check_items};
 use super::curations::{CurationDraft, check_curation};
 use super::synonyms::{SynonymDraft, check_synonym};
 use crate::transfer::CLIPBOARD_LIMIT;
@@ -209,6 +210,17 @@ fn without_bom(text: &str) -> Result<&str, SetFileError> {
         .map_or(text, |_| &text[BOM.len()..]))
 }
 
+fn issues_of(kind: SetKind, item: &Value) -> Vec<ItemIssue> {
+    match kind {
+        SetKind::Synonym => {
+            SynonymDraft::from_value(item).map_or(Vec::new(), |d| check_synonym(&d))
+        }
+        SetKind::Curation => {
+            CurationDraft::from_value(item).map_or(Vec::new(), |d| check_curation(&d))
+        }
+    }
+}
+
 /// The items of a file or paste. Duplicate ids are refused with both rows, because the server
 /// keeps the last one without a word.
 pub fn parse_synonyms(text: &str, format: SetFormat) -> Result<Vec<Value>, SetFileError> {
@@ -217,15 +229,26 @@ pub fn parse_synonyms(text: &str, format: SetFormat) -> Result<Vec<Value>, SetFi
         SetFormat::Csv => parse_csv(text)?,
         SetFormat::Json => json_items(text)?,
     };
-    checked(items, |item| {
-        SynonymDraft::from_value(item).map_or(Vec::new(), |d| check_synonym(&d))
-    })
+    checked(items, |item| issues_of(SetKind::Synonym, item))
 }
 
-/// The items of a curation set's JSON, checked like [`parse_synonyms`].
-pub fn parse_curations(text: &str) -> Result<Vec<Value>, SetFileError> {
-    checked(json_items(without_bom(text)?)?, |item| {
-        CurationDraft::from_value(item).map_or(Vec::new(), |d| check_curation(&d))
+/// The items of a set's JSON tab, for a save over `stored`. Only rows that are new or changed are
+/// checked: a stored row the user did not touch must not block the save of the others.
+pub fn parse_edited(
+    kind: SetKind,
+    text: &str,
+    stored: &[Value],
+) -> Result<Vec<Value>, SetFileError> {
+    let items = json_items(without_bom(text)?)?;
+    let diff = changes(kind, stored, &items);
+    let touched = |id: &str| diff.added.iter().chain(&diff.changed).any(|t| t == id);
+    checked(items, |item| {
+        let id = item.get("id").and_then(Value::as_str);
+        if id.is_some_and(touched) {
+            issues_of(kind, item)
+        } else {
+            Vec::new()
+        }
     })
 }
 
@@ -250,19 +273,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_curations_refuses_duplicates_and_useless_rows() {
+    fn parse_edited_refuses_duplicates_and_useless_rows() {
+        let parse = |text| parse_edited(SetKind::Curation, text, &[]);
         let ok = r#"[{"id":"a","rule":{"tags":["x"]},"excludes":[{"id":"1"}]}]"#;
-        assert_eq!(parse_curations(ok).unwrap().len(), 1);
+        assert_eq!(parse(ok).unwrap().len(), 1);
         let bad = r#"{"items":[{"id":"a","rule":{}}]}"#;
         assert!(matches!(
-            parse_curations(bad),
+            parse(bad),
             Err(SetFileError::Items(issues)) if matches!(issues[0], ItemIssue::AtRow(1, _))
         ));
         let twice = format!("[{0},{0}]", r#"{"id":"a","rule":{"tags":["x"]}}"#);
         assert!(matches!(
-            parse_curations(&twice),
+            parse(&twice),
             Err(SetFileError::Items(issues))
                 if matches!(issues[0], ItemIssue::DuplicateId { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_edited_lets_an_untouched_row_pass() {
+        let stored = [json!({"id": "a", "root": "", "synonyms": ["one"]})];
+        let parse = |text| parse_edited(SetKind::Synonym, text, &stored);
+        let kept = r#"[{"id":"a","synonyms":["one"]},{"id":"b","synonyms":["x","y"]}]"#;
+        assert_eq!(parse(kept).unwrap().len(), 2);
+        let too_few = Err(SetFileError::Items(vec![ItemIssue::AtRow(
+            1,
+            Box::new(ItemIssue::TooFewSynonyms),
+        )]));
+        assert_eq!(parse(r#"[{"id":"a","synonyms":["two"]}]"#), too_few);
+        assert_eq!(parse(r#"[{"id":"n","synonyms":["two"]}]"#), too_few);
+        assert!(matches!(
+            parse(r#"[{"synonyms":["x","y"]}]"#),
+            Err(SetFileError::Items(issues)) if issues == [ItemIssue::NoId]
         ));
     }
 

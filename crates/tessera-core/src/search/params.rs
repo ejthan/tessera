@@ -220,6 +220,13 @@ pub fn text_query_fields(c: &Collection) -> Vec<String> {
     fields.map(|f| f.name.clone()).collect()
 }
 
+/// The [`text_query_fields`] that hold text. For a lookup of documents by what they say: an
+/// embedding field would answer with whatever lies nearest.
+pub fn plain_text_fields(c: &Collection) -> Vec<String> {
+    let fields = c.fields.iter().filter(|f| queryable(f) && !is_vector(f));
+    fields.map(|f| f.name.clone()).collect()
+}
+
 fn queryable(f: &Field) -> bool {
     f.flag("index")
         && f.name != "id"
@@ -513,6 +520,16 @@ mod tests {
             {"name":"vec","type":"float[]","embed":{"from":["title"]}}
         ]));
         assert_eq!(text_query_fields(&c), ["title", "vec"]);
+    }
+
+    #[test]
+    fn plain_text_fields_leave_every_vector_out() {
+        let c = collection(json!([
+            {"name":"title","type":"string"},
+            {"name":"vec","type":"float[]","embed":{"from":["title"]}},
+            {"name":"raw","type":"float[]","num_dim":3}
+        ]));
+        assert_eq!(plain_text_fields(&c), ["title"]);
     }
 
     #[test]

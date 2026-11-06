@@ -36,7 +36,7 @@ use tessera_core::relevance::curations::{
     CurationDraft, Exclude, Include, RuleDraft, check_curation,
 };
 use tessera_core::relevance::synonyms::ModelError;
-use tessera_core::search::params::text_query_fields;
+use tessera_core::search::params::plain_text_fields;
 use tessera_widgets::json_editor::{JsonEditor, JsonEditorEvent};
 
 use super::item_save::{ItemDialog, ItemSave, submit_item};
@@ -94,6 +94,15 @@ struct IncludeRow {
     _subscription: Subscription,
 }
 
+/// Keys of the stamps.
+const FROM_KEY: &str = "effective_from_ts";
+const TO_KEY: &str = "effective_to_ts";
+
+/// Whether a picker can hold stamp `time`.
+fn shows(time: i64) -> bool {
+    DateTime::from_timestamp(time, 0).is_some()
+}
+
 fn picked(time: Option<i64>) -> PickedTime {
     let at = time.and_then(|t| DateTime::from_timestamp(t, 0));
     PickedTime::Single(at.map(|at| at.naive_utc()))
@@ -136,6 +145,8 @@ pub struct CurationItemDialog {
     to: Entity<DatePickerState>,
     /// The stamps as loaded, see [`stamp`].
     loaded_times: (Option<i64>, Option<i64>),
+    /// The tags as loaded: the input cannot tell a comma in a tag from one between tags.
+    loaded_tags: Vec<String>,
     metadata: Entity<JsonEditor>,
     extra: Entity<JsonEditor>,
     json: Entity<JsonEditor>,
@@ -315,6 +326,7 @@ impl CurationItemDialog {
             from,
             to,
             loaded_times: (None, None),
+            loaded_tags: Vec::new(),
             metadata,
             extra,
             json,
@@ -369,9 +381,19 @@ impl CurationItemDialog {
         let metadata = draft.metadata.as_ref().map_or(String::new(), pretty);
         self.metadata
             .update(cx, |e, cx| e.set_text(&metadata, window, cx));
+        self.loaded_tags.clone_from(&rule.tags);
         let mut merged = draft.extra.clone();
         for (key, value) in &rule.extra {
             merged.insert(format!("rule.{key}"), value.clone());
+        }
+        // A stamp the picker cannot show stays in the raw block, or a save would lose it.
+        for (key, time) in [
+            (FROM_KEY, draft.effective_from_ts),
+            (TO_KEY, draft.effective_to_ts),
+        ] {
+            if let Some(time) = time.filter(|t| !shows(*t)) {
+                merged.insert(key.to_string(), time.into());
+            }
         }
         let extra = if merged.is_empty() {
             String::new()
@@ -478,13 +500,21 @@ impl CurationItemDialog {
             };
         }
         let query = text(&self.query);
-        // Without a query there is no match to set; a stored one stays.
-        let r#match = if !query.is_empty() && self.match_kind.is_empty() {
-            "exact".to_string()
-        } else {
-            self.match_kind.clone()
+        // The server refuses a match without a query.
+        let r#match = match (query.is_empty(), self.match_kind.is_empty()) {
+            (true, _) => String::new(),
+            (false, true) => "exact".to_string(),
+            (false, false) => self.match_kind.clone(),
         };
         let tags = text(&self.tags);
+        // shortcut: a tag with a comma survives only while the input is untouched, a list
+        // editor would keep it through edits
+        let tags: Vec<String> = if tags == self.loaded_tags.join(", ").trim() {
+            self.loaded_tags.clone()
+        } else {
+            let tags = tags.split(',').map(str::trim).filter(|t| !t.is_empty());
+            tags.map(str::to_string).collect()
+        };
         let mut includes: Vec<Include> = self
             .includes
             .iter()
@@ -496,18 +526,21 @@ impl CurationItemDialog {
             .collect();
         includes.sort_by_key(|i| i.position);
         let picked = |state: &Entity<DatePickerState>| state.read(cx).date_time();
+        let from = stamp(picked(&self.from), self.loaded_times.0);
+        let to = stamp(picked(&self.to), self.loaded_times.1);
+        // A picked date replaces a stamp the raw block kept.
+        for (key, time) in [(FROM_KEY, from), (TO_KEY, to)] {
+            if time.is_some() {
+                extra.remove(key);
+            }
+        }
         Ok(CurationDraft {
             id: text(&self.id),
             rule: RuleDraft {
                 query,
                 r#match,
                 filter_by: text(&self.rule_filter),
-                tags: tags
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                    .map(str::to_string)
-                    .collect(),
+                tags,
                 synonyms: self.synonyms,
                 stem: self.stem,
                 extra: rule_extra,
@@ -520,8 +553,8 @@ impl CurationItemDialog {
             remove_matched_tokens: self.remove_tokens,
             filter_curated_hits: self.filter_curated,
             stop_processing: self.stop,
-            effective_from_ts: stamp(picked(&self.from), self.loaded_times.0),
-            effective_to_ts: stamp(picked(&self.to), self.loaded_times.1),
+            effective_from_ts: from,
+            effective_to_ts: to,
             metadata,
             extra,
         })
@@ -616,7 +649,10 @@ impl CurationItemDialog {
         if id.is_empty() || self.includes.iter().any(|r| r.id == id) {
             return;
         }
-        let position = self.includes.len() as i64 + 1;
+        // After the last one: the row count can be a position already taken after a removal.
+        let position = |r: &IncludeRow| r.position.read(cx).value().parse::<i64>().ok();
+        let position = self.includes.iter().filter_map(position).max();
+        let position = position.unwrap_or(0) + 1;
         let include = Include {
             id,
             position,
@@ -683,6 +719,7 @@ impl CurationItemDialog {
     /// Takes `name` as the collection to search.
     pub fn pick_collection(&mut self, name: &str, cx: &mut Context<Self>) {
         self.picker_schema = self.collections.iter().find(|c| c.name == name).cloned();
+        self.hits.clear();
         self.schedule_search(cx);
     }
 
@@ -698,7 +735,7 @@ impl CurationItemDialog {
         };
         let q = self.picker_q.read(cx).value().trim().to_string();
         let q = if q.is_empty() { "*".to_string() } else { q };
-        let query_by = text_query_fields(schema).join(",");
+        let query_by = plain_text_fields(schema).join(",");
         let mut params = vec![("q".to_string(), q)];
         if !query_by.is_empty() {
             params.push(("query_by".to_string(), query_by));
@@ -738,6 +775,7 @@ impl CurationItemDialog {
                     }
                     Err(e) => {
                         let profile = &this.save.connection.read(cx).profile;
+                        this.hits.clear();
                         this.picker_error = Some(error_text(&e, profile).into());
                     }
                 }

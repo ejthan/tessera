@@ -29,7 +29,7 @@ use super::item_save::{ItemDialog, ItemSave, submit_item};
 use super::sets::{SetsView, issue_text};
 use super::stopwords::words_of;
 use super::{ListRow, ResourceColumn, dialog_title};
-use crate::actions::{SET_ITEM_DIALOG, SaveResource};
+use crate::actions::{NextControl, PreviousControl, RAW_BLOCK, SET_ITEM_DIALOG, SaveResource};
 use crate::connection::ConnectionState;
 
 /// Width of the dialog.
@@ -132,7 +132,11 @@ impl SynonymItemDialog {
         let (id, root) = (input(&draft.id, cx), input(&draft.root, cx));
         let locale = input(&draft.locale, cx);
         let symbols = input(&draft.symbols_to_index.join(", "), cx);
-        let words = cx.new(|cx| JsonEditor::plain(&draft.synonyms.join("\n"), window, cx));
+        let words = cx.new(|cx| {
+            let mut words = JsonEditor::plain(&draft.synonyms.join("\n"), window, cx);
+            words.set_read_only(false, cx);
+            words
+        });
         let raw = (!draft.extra.is_empty()).then(|| {
             let text = serde_json::to_string_pretty(&draft.extra).unwrap_or_default();
             cx.new(|cx| JsonEditor::new(&text, false, window, cx))
@@ -255,6 +259,8 @@ impl Render for SynonymItemDialog {
             .key_context(SET_ITEM_DIALOG)
             .gap_2()
             .on_action(cx.listener(|this, _: &SaveResource, window, cx| this.submit(window, cx)))
+            .on_action(|_: &NextControl, window, cx| window.focus_next(cx))
+            .on_action(|_: &PreviousControl, window, cx| window.focus_prev(cx))
             .child(field(
                 t!("sets.item.id").to_string(),
                 "sets.item.id",
@@ -269,7 +275,12 @@ impl Render for SynonymItemDialog {
                 ))
             })
             .child(t!("sets.item.words").to_string())
-            .child(div().h(px(WORDS_HEIGHT)).child(self.words.clone()))
+            .child(
+                div()
+                    .key_context(RAW_BLOCK)
+                    .h(px(WORDS_HEIGHT))
+                    .child(self.words.clone()),
+            )
             .child(field(
                 t!("sets.item.locale").to_string(),
                 "sets.item.locale",
@@ -282,7 +293,7 @@ impl Render for SynonymItemDialog {
             ))
             .when_some(self.raw.clone(), |el, raw| {
                 el.child(t!("sets.item.raw").to_string())
-                    .child(div().h(px(RAW_HEIGHT)).child(raw))
+                    .child(div().key_context(RAW_BLOCK).h(px(RAW_HEIGHT)).child(raw))
             })
             .children(issues.iter().enumerate().map(|(i, issue)| {
                 line(

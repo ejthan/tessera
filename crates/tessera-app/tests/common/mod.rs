@@ -1275,6 +1275,9 @@ pub fn install_search_fake(cx: &mut TestAppContext) -> Arc<FakeSearch> {
     fake
 }
 
+/// A change on the server behind the app's back.
+pub type ServerChange = Box<dyn FnOnce(&FakeData) + Send>;
+
 /// A relevance backend that records each call as text.
 #[derive(Default)]
 pub struct FakeRelevance {
@@ -1312,8 +1315,12 @@ pub struct FakeRelevance {
     pub file_text: Mutex<Option<Result<String, SetFileError>>>,
     /// What `write_set_file` was given.
     pub written: Mutex<Vec<(PathBuf, String)>>,
-    /// The next `save_stopwords` answers once this resolves.
+    /// The next `save_stopwords`, `save_set` or `delete_set` answers once this resolves.
     pub hold: Mutex<Option<oneshot::Receiver<()>>>,
+    /// `save_set` stores no key of this name.
+    pub strip_key: Mutex<Option<String>>,
+    /// Runs when a set is deleted, for what changes behind that.
+    pub on_delete: Mutex<Option<ServerChange>>,
 }
 
 impl FakeRelevance {
@@ -1387,13 +1394,23 @@ impl RelevanceBackend for FakeRelevanceBackend {
             if let Some(keep) = *self.0.keep_items.lock().unwrap() {
                 items.truncate(keep);
             }
+            if let Some(key) = &*self.0.strip_key.lock().unwrap() {
+                let objects = items.iter_mut().filter_map(|i| i.as_object_mut());
+                objects.for_each(|item| drop(item.remove(key)));
+            }
             let set = ItemSet { name, items };
             let mut sets = self.0.sets.lock().unwrap();
             sets.retain(|s| s.name != set.name);
             sets.push(set.clone());
             set
         });
-        Box::pin(async move { answer })
+        let hold = self.0.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
     }
 
     fn delete_set(
@@ -1405,8 +1422,18 @@ impl RelevanceBackend for FakeRelevanceBackend {
         let answer = self.0.write(format!("delete_set {name}"));
         if answer.is_ok() {
             self.0.sets.lock().unwrap().retain(|s| s.name != name);
+            let change = self.0.on_delete.lock().unwrap().take();
+            if let (Some(change), Some(data)) = (change, &*self.0.data.lock().unwrap()) {
+                change(data);
+            }
         }
-        Box::pin(async move { answer })
+        let hold = self.0.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
     }
 
     fn attach(
@@ -1421,7 +1448,7 @@ impl RelevanceBackend for FakeRelevanceBackend {
         let mut list = Vec::new();
         if let Some(data) = &*self.0.data.lock().unwrap() {
             let mut data = data.data.lock().unwrap();
-            let all = &mut data.as_mut().unwrap().0;
+            let all = data.as_mut().map_or(&mut [][..], |d| &mut d.0[..]);
             if let Some(found) = all.iter_mut().find(|c| c.name == collection) {
                 if answer.is_ok() && !*self.0.attach_ignored.lock().unwrap() {
                     found.synonym_sets.retain(|n| *n != set);

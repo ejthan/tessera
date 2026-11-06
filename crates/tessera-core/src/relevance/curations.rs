@@ -328,13 +328,17 @@ pub fn check_curation(draft: &CurationDraft) -> Vec<ItemIssue> {
     if !has_action {
         issues.push(ItemIssue::NoAction);
     }
+    let mut taken = Vec::new();
     for Include { id, position, .. } in &draft.includes {
         if id.is_empty() {
             issues.push(ItemIssue::BadInclude(id.clone()));
         }
         if *position < 1 {
             issues.push(ItemIssue::BadPosition(*position));
+        } else if taken.contains(position) {
+            issues.push(ItemIssue::DuplicatePosition(*position));
         }
+        taken.push(*position);
         if !id.is_empty() && draft.excludes.iter().any(|e| &e.id == id) {
             issues.push(ItemIssue::IncludedAndExcluded(id.clone()));
         }
@@ -370,6 +374,20 @@ mod tests {
             position,
             ..Include::default()
         }
+    }
+
+    #[test]
+    fn two_pins_on_one_position_are_refused() {
+        let draft = CurationDraft {
+            id: "a".into(),
+            rule: RuleDraft {
+                tags: vec!["x".into()],
+                ..RuleDraft::default()
+            },
+            includes: vec![include("3", 1), include("4", 1), include("5", 2)],
+            ..CurationDraft::default()
+        };
+        assert_eq!(check_curation(&draft), [ItemIssue::DuplicatePosition(1)]);
     }
 
     fn exclude(id: &str) -> Exclude {

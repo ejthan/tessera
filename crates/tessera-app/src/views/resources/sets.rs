@@ -21,10 +21,10 @@ use rust_i18n::t;
 use serde_json::Value;
 use tessera_client::{Collection, ItemSet, SetKind};
 use tessera_core::relevance::attachment::users;
-use tessera_core::relevance::changes::{ItemIssue, changes};
+use tessera_core::relevance::changes::{ItemIssue, changes, dropped_by_id};
 use tessera_core::relevance::curations::CurationDraft;
 use tessera_core::relevance::synonym_file::{
-    SET_FILE_LIMIT, SetFileError, SetFormat, parse_curations, parse_synonyms, synonyms_to_json,
+    SET_FILE_LIMIT, SetFileError, parse_edited, synonyms_to_json,
 };
 use tessera_core::relevance::synonyms::SynonymDraft;
 use tessera_widgets::confirm;
@@ -100,6 +100,7 @@ pub(super) fn issue_text(issue: &ItemIssue) -> String {
         ItemIssue::NoAction => t!("sets.issue.no_action").to_string(),
         ItemIssue::BadInclude(id) => t!("sets.issue.bad_include", id = id).to_string(),
         ItemIssue::BadPosition(n) => t!("sets.issue.bad_position", n = n).to_string(),
+        ItemIssue::DuplicatePosition(n) => t!("sets.issue.duplicate_position", n = n).to_string(),
         ItemIssue::IncludedAndExcluded(id) => t!("sets.issue.both", id = id).to_string(),
         ItemIssue::DatesReversed => t!("sets.issue.dates").to_string(),
         ItemIssue::UnknownSortField { field, collection } => t!(
@@ -132,6 +133,15 @@ pub(super) fn file_error_text(error: &SetFileError) -> String {
     }
 }
 
+/// What the server did not keep, as a note.
+fn dropped_note(keys: &[String]) -> Option<SharedString> {
+    (!keys.is_empty()).then(|| {
+        t!("sets.dropped", keys = keys.join(", "))
+            .to_string()
+            .into()
+    })
+}
+
 /// The content of a sets tab. `kind` decides the endpoints, the items do the rest.
 pub struct SetsView {
     pub(super) kind: SetKind,
@@ -146,11 +156,13 @@ pub struct SetsView {
     /// The last collection list. An invalidated one stays until the next arrives.
     pub(super) collections: Vec<Collection>,
     collections_loaded: Option<Instant>,
+    /// Why the last load of the collection list failed.
+    collections_error: Option<SharedString>,
     /// The set on the right, which the selection follows.
     pub(super) followed: Option<String>,
     tab: SetTab,
     pub(super) attach_filter: Entity<InputState>,
-    /// The collection a toggle is running for.
+    /// The collection a toggle is running for, or the set a delete or a detach-all.
     pub(super) pending: Option<String>,
     json: Entity<JsonEditor>,
     /// What the JSON tab held when it was filled.
@@ -212,6 +224,7 @@ impl SetsView {
             load_task: None,
             collections: Vec::new(),
             collections_loaded: None,
+            collections_error: None,
             followed: None,
             tab: SetTab::Items,
             attach_filter,
@@ -230,7 +243,13 @@ impl SetsView {
             _subscriptions: subscriptions,
         };
         this.reload(window, cx);
+        this.take_collections(cx);
         this
+    }
+
+    /// Why the collection list failed to load, for the Collections tab.
+    pub(super) fn collections_error(&self) -> Option<SharedString> {
+        self.collections_error.clone()
     }
 
     /// The JSON tab's editor.
@@ -253,7 +272,7 @@ impl SetsView {
         self.dialog.as_ref()
     }
 
-    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(client) = client_of(&self.connection, cx) else {
             return;
         };
@@ -288,6 +307,11 @@ impl SetsView {
     fn take_collections(&mut self, cx: &mut Context<Self>) {
         let cache = &self.connection.read(cx).collection_cache;
         let (loaded, collections) = (cache.loaded_at, cache.collections.clone());
+        let error = cache.error.clone();
+        if error != self.collections_error {
+            self.collections_error = error;
+            cx.notify();
+        }
         if let (true, Some(collections)) = (loaded != self.collections_loaded, collections) {
             self.collections_loaded = loaded;
             self.collections = collections;
@@ -421,7 +445,7 @@ impl SetsView {
                         typed: false,
                     };
                     let run = move |window: &mut Window, cx: &mut App| {
-                        send_set(view.clone(), name.clone(), Vec::new(), window, cx)
+                        send_set(view.clone(), name.clone(), Vec::new(), None, window, cx)
                     };
                     write_after_prod_confirm(danger, &this, &conn, run, window, cx);
                 };
@@ -437,8 +461,11 @@ impl SetsView {
             return;
         };
         let item = editing.then(|| self.selected_item(cx)).flatten();
+        self.error = None;
         if editing && item.is_none() {
-            return;
+            let id = self.items.read(cx).selected(cx);
+            self.error = id.map(|id| t!("sets.item.unreadable", id = id).to_string().into());
+            return cx.notify();
         }
         let this = cx.entity().downgrade();
         let connection = self.connection.clone();
@@ -488,11 +515,7 @@ impl SetsView {
         cx: &mut Context<Self>,
     ) {
         self.error = failed;
-        self.note = (!dropped.is_empty()).then(|| {
-            t!("sets.dropped", keys = dropped.join(", "))
-                .to_string()
-                .into()
-        });
+        self.note = dropped_note(dropped);
         self.reload(window, cx);
         cx.notify();
     }
@@ -523,26 +546,16 @@ impl SetsView {
         });
     }
 
-    /// Parses the JSON tab and reads the set fresh: the review counts what the save really does.
+    /// Reads the set fresh, then parses the JSON tab against it: the review counts what the save
+    /// really does, and a row nobody touched is no reason to refuse.
     fn save_json(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.followed.clone().filter(|_| !self.saving);
         let (Some(name), SetTab::Json) = (name, self.tab) else {
             return;
         };
         self.note = None;
-        let text = self.json.read(cx).text(cx);
-        let parsed = match self.kind {
-            SetKind::Synonym => parse_synonyms(&text, SetFormat::Json),
-            SetKind::Curation => parse_curations(&text),
-        };
-        let items = match parsed {
-            Ok(items) => items,
-            Err(error) => {
-                self.error = Some(file_error_text(&error).into());
-                return cx.notify();
-            }
-        };
         self.error = None;
+        let text = self.json.read(cx).text(cx);
         let Some(client) = client_of(&self.connection, cx) else {
             return;
         };
@@ -556,7 +569,10 @@ impl SetsView {
             this.update_in(cx, |this, window, cx| {
                 this.saving = false;
                 match fresh {
-                    Ok(stored) => this.review(stored, items, window, cx),
+                    Ok(stored) => match parse_edited(this.kind, &text, &stored.items) {
+                        Ok(items) => this.review(stored, items, Some(text), window, cx),
+                        Err(error) => this.error = Some(file_error_text(&error).into()),
+                    },
                     Err(e) => {
                         let profile = &this.connection.read(cx).profile;
                         this.error = Some(error_text(&e, profile).into());
@@ -569,11 +585,13 @@ impl SetsView {
         cx.notify();
     }
 
-    /// D62: a save that removes items asks, by name on prod; on prod any save asks.
+    /// D62: a save that removes items asks, by name on prod; on prod any save asks. `json` is the
+    /// text of the JSON tab the items came from.
     pub(super) fn review(
         &mut self,
         stored: ItemSet,
         items: Vec<Value>,
+        json: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -602,7 +620,8 @@ impl SetsView {
                 };
                 let view = this.clone();
                 let run = move |window: &mut Window, cx: &mut App| {
-                    send_set(view.clone(), name.clone(), items.clone(), window, cx)
+                    let json = json.clone();
+                    send_set(view.clone(), name.clone(), items.clone(), json, window, cx)
                 };
                 if removes {
                     confirm_write(danger, &connection, run, report_to(this), window, cx);
@@ -613,15 +632,24 @@ impl SetsView {
         });
     }
 
-    /// `stored` is what the server holds now.
-    fn take_stored(&mut self, stored: ItemSet, window: &mut Window, cx: &mut Context<Self>) {
+    /// `stored` is what the server holds now. The JSON tab follows unless it holds work that did
+    /// not go into this save: only `json`, the text that did, may be replaced.
+    fn take_stored(
+        &mut self,
+        stored: ItemSet,
+        json: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let name = stored.name.clone();
         self.sets.retain(|s| s.name != name);
         self.sets.push(stored);
         self.sets.sort_by(|a, b| a.name.cmp(&b.name));
         self.show_rows(cx);
         if self.followed.as_ref() == Some(&name) {
-            self.forget_json(cx);
+            if json.is_some_and(|sent| sent == self.json.read(cx).text(cx)) {
+                self.forget_json(cx);
+            }
             self.show_items(window, cx);
         } else {
             self.list.update(cx, |l, cx| l.select(Some(name), cx));
@@ -660,10 +688,11 @@ impl SetsView {
         let no_item = self.items.read(cx).selected(cx).is_none();
         let no_row = self.list.read(cx).selected(cx).is_none();
         let none_missing = self.missing_sets().is_empty();
+        let busy = self.pending.is_some();
         vec![
-            (no_row, &DeleteResource),
+            (no_row || busy, &DeleteResource),
             (no_set, &ExportResource),
-            (none_missing, &DetachMissing),
+            (none_missing || busy, &DetachMissing),
             (none_missing, &CreateMissingSet),
             (no_set, &NewSetItem),
             (no_item, &EditResource),
@@ -882,7 +911,7 @@ impl Render for SetsView {
                         format!("{prefix}.delete"),
                         t!("sets.delete").to_string(),
                         &DeleteResource,
-                        (no_row, locked),
+                        (no_row || self.pending.is_some(), locked),
                         &self.focus_handle,
                         window,
                         cx,
@@ -958,6 +987,8 @@ impl Render for SetsView {
                 this.show_tab(SetTab::Json, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ReloadResource, window, cx| {
+                this.connection
+                    .update(cx, |c, cx| c.load_collection_list(cx));
                 this.reload(window, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusResourceFilter, window, cx| {
@@ -1022,12 +1053,14 @@ pub(super) fn exists(
     })
 }
 
-/// `PUT`s the whole set and compares the count read back: the server keeps the last of equal
-/// ids without a word. Runs on through a closed tab.
+/// `PUT`s the whole set and compares what it reads back: the server keeps the last of equal ids
+/// and drops unknown keys without a word. Runs on through a closed tab. `json`: see
+/// [`SetsView::take_stored`].
 pub(super) fn send_set(
     view: WeakEntity<SetsView>,
     name: String,
     items: Vec<Value>,
+    json: Option<String>,
     window: &mut Window,
     cx: &mut App,
 ) -> Task<Result<(), SharedString>> {
@@ -1041,7 +1074,7 @@ pub(super) fn send_set(
         return Task::ready(Err(t!("status.not_connected").to_string().into()));
     };
     let profile = connection.read(cx).profile.clone();
-    let sent = items.len();
+    let sent = items.clone();
     let save = cx
         .global::<RelevanceBackendGlobal>()
         .0
@@ -1051,13 +1084,20 @@ pub(super) fn send_set(
             .await
             .map_err(|e| SharedString::from(error_text(&e, &profile)))?;
         let kept = stored.items.len();
+        let dropped = dropped_by_id(&sent, &stored.items);
         view.update_in(cx, |view, window, cx| {
-            view.take_stored(stored, window, cx);
+            view.take_stored(stored, json.as_deref(), window, cx);
             cx.notify();
         })
         .ok();
-        if kept != sent {
-            return Err(t!("sets.count_differs", sent = sent, stored = kept)
+        // In its own update: selecting a new set clears the note as that update ends.
+        view.update(cx, |view, cx| {
+            view.note = dropped_note(&dropped);
+            cx.notify();
+        })
+        .ok();
+        if kept != sent.len() {
+            return Err(t!("sets.count_differs", sent = sent.len(), stored = kept)
                 .to_string()
                 .into());
         }

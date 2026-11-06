@@ -384,6 +384,85 @@ async fn a_rule_of_tags_sends_no_match(cx: &mut TestAppContext) {
     f.fill(cx, "curations.tags", "vip, new");
     f.press(cx, save_key());
     assert_eq!(f.sent()[0]["rule"], json!({"tags": ["vip", "new"]}));
+
+    // Clearing the query of a stored rule takes its match along: the server refuses one alone.
+    let mut item = rule();
+    item["rule"]["tags"] = json!(["vip"]);
+    let f = Fixture::editing(cx, item).await;
+    f.fill(cx, "curations.query", "");
+    f.press(cx, save_key());
+    assert_eq!(f.sent()[0]["rule"], json!({"tags": ["vip"]}));
+}
+
+#[gpui_kit::test]
+async fn a_tag_with_a_comma_survives_the_form(cx: &mut TestAppContext) {
+    let mut item = rule();
+    item["rule"]["tags"] = json!(["a,b", "c"]);
+    let f = Fixture::editing(cx, item).await;
+    f.press(cx, save_key());
+    assert_eq!(f.sent()[0]["rule"]["tags"], json!(["a,b", "c"]));
+}
+
+#[gpui_kit::test]
+async fn a_stamp_the_picker_cannot_hold_stays_in_the_raw_block(cx: &mut TestAppContext) {
+    let mut item = rule();
+    item["effective_from_ts"] = json!(i64::MAX);
+    let f = Fixture::editing(cx, item).await;
+    let dialog = f.dialog(cx);
+    let raw = cx.update(|cx| dialog.read(cx).extra().read(cx).text(cx));
+    assert!(raw.contains(&i64::MAX.to_string()), "{raw}");
+    f.press(cx, save_key());
+    assert_eq!(f.sent()[0]["effective_from_ts"], json!(i64::MAX));
+}
+
+#[gpui_kit::test]
+async fn a_picked_date_replaces_a_stamp_in_the_raw_block(cx: &mut TestAppContext) {
+    let mut item = rule();
+    item["effective_from_ts"] = json!(i64::MAX);
+    let f = Fixture::editing(cx, item).await;
+    let dialog = f.dialog(cx);
+    let at = stamp("2026-03-01T08:30:00Z");
+    let picked = DateTime::from_timestamp(at, 0).unwrap().naive_utc();
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        let state = dialog.read(cx).dates()[0].clone();
+        state.update(cx, |s, cx| {
+            s.set_date_time(PickedTime::Single(Some(picked)), window, cx);
+        });
+    })
+    .unwrap();
+    f.press(cx, save_key());
+    assert_eq!(f.sent()[0]["effective_from_ts"], json!(at));
+}
+
+#[gpui_kit::test]
+async fn a_new_pin_takes_the_place_after_the_last(cx: &mut TestAppContext) {
+    let mut item = rule();
+    item["includes"] = json!([{"id": "1", "position": 1}, {"id": "2", "position": 2}]);
+    let f = Fixture::editing(cx, item).await;
+    f.click(cx, "curations.include.0.remove");
+    f.pin(cx, &["3"]);
+    let positions: Vec<i64> = f.draft(cx).includes.iter().map(|i| i.position).collect();
+    assert_eq!(positions, [2, 3]);
+}
+
+#[gpui_kit::test]
+async fn two_pins_on_one_place_block_the_save(cx: &mut TestAppContext) {
+    let mut item = rule();
+    item["includes"] = json!([{"id": "3", "position": 1}, {"id": "4", "position": 1}]);
+    let f = Fixture::editing(cx, item).await;
+    assert!(f.label(cx, "sets.item.issue.0").contains("position 1"));
+    f.press(cx, save_key());
+    assert!(f.sent().is_empty());
+}
+
+#[gpui_kit::test]
+async fn a_stored_position_of_zero_does_not_block_a_json_save(cx: &mut TestAppContext) {
+    let mut item = rule();
+    item["includes"] = json!([{"id": "3", "position": 0}]);
+    let f = Fixture::new(cx, vec![item]).await;
+    f.click(cx, "sets.tab.json");
+    f.click(cx, "sets.json.save");
+    assert_eq!(f.calls(), ["save_set c 1"]);
 }
 
 #[gpui_kit::test]
@@ -530,6 +609,29 @@ async fn picker_error_shows_inline(cx: &mut TestAppContext) {
     f.fill(cx, "curations.picker.q", "a");
     f.wait_for_picker(cx);
     assert!(f.label(cx, "curations.picker.error").contains("Bad query"));
+}
+
+#[gpui_kit::test]
+async fn old_hits_go_with_an_error_and_a_new_collection(cx: &mut TestAppContext) {
+    let f = Fixture::adding(cx, vec![]).await;
+    *f.search.body.lock().unwrap() = r#"{"found":1,"out_of":1,"page":1,"search_time_ms":1,"hits":[
+        {"document":{"id":"7","title":"Lamp"},"highlights":[]}]}"#
+        .to_string();
+    let search = |q: &str, cx: &mut TestAppContext| {
+        f.fill(cx, "curations.picker.q", q);
+        f.wait_for_picker(cx);
+    };
+    search("a", cx);
+    assert!(f.has(cx, "curations.hit.0.pin"));
+    *f.search.fail.lock().unwrap() = Some((400, "Bad query".into()));
+    search("ab", cx);
+    assert!(!f.has(cx, "curations.hit.0.pin"));
+    *f.search.fail.lock().unwrap() = None;
+    search("a", cx);
+    assert!(f.has(cx, "curations.hit.0.pin"));
+    let dialog = f.dialog(cx);
+    dialog.update(cx, |d, cx| d.pick_collection("other", cx));
+    assert!(!f.has(cx, "curations.hit.0.pin"), "before the new answer");
 }
 
 #[gpui_kit::test]

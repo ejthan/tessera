@@ -27,7 +27,7 @@ use tessera_core::relevance::name_ok;
 use tessera_core::relevance::synonym_file::{
     SetFormat, format_of, merged, parse_synonyms, synonyms_to_csv, synonyms_to_json,
 };
-use tessera_core::relevance::synonyms::SynonymDraft;
+use tessera_core::relevance::synonyms::{ModelError, SynonymDraft};
 
 use super::sets::{SetsView, exists, file_error_text, send_set, write_after_prod_confirm};
 use super::{Danger, client_of, dialog_title};
@@ -63,6 +63,21 @@ fn format_group(
             t!("sets.file.format_csv").to_string(),
             SetFormat::Csv,
         ))
+}
+
+/// The rows of a CSV, or which item has none and why.
+fn csv_rows(items: &[Value]) -> Result<Vec<SynonymDraft>, String> {
+    let row = |item: &Value| {
+        SynonymDraft::from_value(item).map_err(|error| {
+            let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+            match error {
+                ModelError::NotObject => t!("sets.export.not_object"),
+                ModelError::BadField(key) => t!("sets.export.bad_field", id = id, key = key),
+            }
+            .to_string()
+        })
+    };
+    items.iter().map(row).collect()
 }
 
 /// Takes the items of a file into a new set, or into the selected one by Merge or Replace.
@@ -216,7 +231,14 @@ impl SetImportDialog {
                 };
                 let target = view.clone();
                 let run = move |window: &mut Window, cx: &mut App| {
-                    send_set(target.clone(), name.clone(), items.clone(), window, cx)
+                    send_set(
+                        target.clone(),
+                        name.clone(),
+                        items.clone(),
+                        None,
+                        window,
+                        cx,
+                    )
                 };
                 let connection = this.connection.clone();
                 write_after_prod_confirm(danger, &view, &connection, run, window, cx);
@@ -226,7 +248,9 @@ impl SetImportDialog {
         cx.notify();
     }
 
-    /// Reads the set fresh, so that Merge keeps a colleague's new rows and the review is true.
+    /// Reads the set fresh, so that Merge keeps a colleague's new rows and the review is true. A
+    /// set unlike the one the counts came from shows the new counts and asks again: a save with
+    /// no removals runs without a review, so these counts are the only one.
     fn start_selected(
         &mut self,
         incoming: Vec<Value>,
@@ -249,10 +273,14 @@ impl SetImportDialog {
             this.update_in(cx, |this, window, cx| match fresh {
                 Ok(stored) => {
                     this.busy = false;
+                    if this.selected.as_ref() != Some(&stored) {
+                        this.selected = Some(stored);
+                        return this.refuse(t!("sets.import.changed").to_string(), cx);
+                    }
                     let items = this.items_for(&stored, &incoming);
                     window.close_dialog(cx);
                     this.view
-                        .update(cx, |view, cx| view.review(stored, items, window, cx))
+                        .update(cx, |view, cx| view.review(stored, items, None, window, cx))
                         .ok();
                 }
                 Err(e) => {
@@ -547,25 +575,34 @@ impl SetsView {
             let Ok(Ok(Some(path))) = picked.await else {
                 return;
             };
-            let written: Result<(), String> = async {
+            // The ids of the items that lost keys, which a CSV has no column for.
+            let written: Result<Vec<String>, String> = async {
                 let set = backend.set(client, kind, name).await;
                 let set = set.map_err(|e| error_text(&e, &profile))?;
+                let mut cut = Vec::new();
                 let text = match format {
                     SetFormat::Json => synonyms_to_json(&set.items),
                     SetFormat::Csv => {
-                        let drafts: Result<Vec<_>, _> =
-                            set.items.iter().map(SynonymDraft::from_value).collect();
-                        synonyms_to_csv(&drafts.map_err(|e| e.to_string())?)
+                        let rows = csv_rows(&set.items)?;
+                        let lossy = rows.iter().filter(|d| !d.extra.is_empty());
+                        cut.extend(lossy.map(|d| d.id.clone()));
+                        synonyms_to_csv(&rows)
                     }
                 };
-                backend.write_set_file(path.clone(), text).await
+                backend.write_set_file(path.clone(), text).await?;
+                Ok(cut)
             }
             .await;
             this.update(cx, |view, cx| {
                 match written {
-                    Ok(()) => {
+                    Ok(cut) => {
                         let path = path.display().to_string();
-                        view.note = Some(t!("sets.export.done", path = path).to_string().into());
+                        let mut note = t!("sets.export.done", path = path).to_string();
+                        if !cut.is_empty() {
+                            let ids = cut.join(", ");
+                            note = format!("{note} {}", t!("sets.export.cut", ids = ids));
+                        }
+                        view.note = Some(note.into());
                     }
                     Err(error) => view.error = Some(error.into()),
                 }

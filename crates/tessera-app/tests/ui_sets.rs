@@ -67,6 +67,7 @@ impl Fixture {
         let collections = collections.iter().map(|(name, attached)| Collection {
             name: (*name).into(),
             synonym_sets: attached.iter().map(ToString::to_string).collect(),
+            curation_sets: attached.iter().map(ToString::to_string).collect(),
             ..Collection::default()
         });
         let data = fake_backend(cx, Some((collections.collect(), vec![])));
@@ -192,6 +193,57 @@ impl Fixture {
         })
         .unwrap();
         self.settle(cx);
+    }
+
+    fn json_text(&self, cx: &mut TestAppContext) -> String {
+        self.settle(cx);
+        let view = self.view(cx);
+        cx.update(|cx| view.read(cx).json().read(cx).text(cx))
+    }
+
+    /// The collections on the server, which `None` makes fail to list.
+    fn list_answers(&self, data: Option<(Vec<Collection>, Vec<tessera_client::Alias>)>) {
+        let fake = self.relevance.data.lock().unwrap();
+        *fake.as_ref().unwrap().data.lock().unwrap() = data;
+    }
+
+    fn collections(&self) -> Option<(Vec<Collection>, Vec<tessera_client::Alias>)> {
+        let fake = self.relevance.data.lock().unwrap();
+        let data = fake.as_ref().unwrap().data.lock().unwrap();
+        data.clone()
+    }
+
+    /// Whether `id` is on screen and not disabled.
+    fn enabled(&self, cx: &mut TestAppContext, id: &str) -> bool {
+        self.settle(cx);
+        cx.update_window(self.handle.into(), |_, window, _| {
+            window.find(id.to_string()).disabled() != Some(true)
+        })
+        .unwrap()
+    }
+
+    /// The ids of `wanted` that take the focus within `presses` of `key`.
+    fn reached(
+        &self,
+        cx: &mut TestAppContext,
+        key: &str,
+        presses: usize,
+        wanted: &[&'static str],
+    ) -> Vec<&'static str> {
+        let mut seen = Vec::new();
+        for _ in 0..presses {
+            self.press(cx, key);
+            cx.update_window(self.handle.into(), |_, window, _| {
+                for id in wanted {
+                    let found = window.try_find(id.to_string());
+                    if found.is_some_and(|e| e.focused() == Some(true)) && !seen.contains(id) {
+                        seen.push(*id);
+                    }
+                }
+            })
+            .unwrap();
+        }
+        seen
     }
 
     fn set_words(&self, cx: &mut TestAppContext, text: &str) {
@@ -423,6 +475,79 @@ async fn json_count_differences_show(cx: &mut TestAppContext) {
     f.open_json(cx);
     f.click(cx, "sets.json.save");
     assert!(f.label(cx, "sets.error").contains("Sent 2"));
+}
+
+#[gpui_kit::test]
+async fn an_untouched_row_does_not_block_a_json_save(cx: &mut TestAppContext) {
+    let items = vec![item("a", &["one"]), item("b", &["p", "q"])];
+    let f = Fixture::new(cx, vec![set("s", items)]).await;
+    f.open_json(cx);
+    f.click(cx, "sets.json.save");
+    assert_eq!(f.calls(), ["save_set s 2"]);
+    f.set_json(
+        cx,
+        r#"[{"id":"a","synonyms":["one"]},{"id":"b","synonyms":["p"]}]"#,
+    );
+    f.click(cx, "sets.json.save");
+    assert!(f.label(cx, "sets.error").contains("Row 2"));
+    assert_eq!(f.calls().len(), 1);
+}
+
+#[gpui_kit::test]
+async fn a_whole_set_save_names_what_the_server_dropped(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    *f.relevance.strip_key.lock().unwrap() = Some("lost".into());
+    f.open_json(cx);
+    f.set_json(
+        cx,
+        r#"[{"id":"a","synonyms":["x","y"],"lost":1},{"id":"b","synonyms":["p","q"]}]"#,
+    );
+    f.click(cx, "sets.json.save");
+    assert!(f.label(cx, "sets.note").contains("a: lost"));
+    f.import(
+        cx,
+        "in.json",
+        r#"[{"id":"c","synonyms":["x","y"],"lost":1}]"#,
+    );
+    f.click(cx, "sets.import.new");
+    f.fill(cx, "sets.import.name", "fresh");
+    f.click(cx, "sets.import.start");
+    assert_eq!(f.label(cx, "sets.current"), "fresh");
+    assert!(f.label(cx, "sets.note").contains("c: lost"));
+}
+
+#[gpui_kit::test]
+async fn text_typed_during_a_save_stays(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.open_json(cx);
+    let (release, hold) = tokio::sync::oneshot::channel();
+    *f.relevance.hold.lock().unwrap() = Some(hold);
+    f.click(cx, "sets.json.save");
+    f.set_json(cx, "{\"typed\":1}");
+    release.send(()).unwrap();
+    assert_eq!(f.json_text(cx), "{\"typed\":1}");
+}
+
+#[gpui_kit::test]
+async fn a_saved_text_takes_the_stored_form(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.open_json(cx);
+    f.set_json(cx, r#"[{"id":"a","synonyms":["x","y"]}]"#);
+    f.click(cx, "sets.json.save");
+    f.click(cx, "confirm.ok");
+    assert!(f.json_text(cx).contains("\"items\""));
+}
+
+#[gpui_kit::test]
+async fn an_import_keeps_unsaved_json(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.open_json(cx);
+    f.set_json(cx, "{\"typed\":1}");
+    f.import(cx, "in.json", INCOMING);
+    f.click(cx, "sets.import.start");
+    assert_eq!(f.calls(), ["save_set s 3"]);
+    assert_eq!(f.json_text(cx), "{\"typed\":1}");
+    assert_eq!(f.label(cx, "synonyms.items.s"), "3");
 }
 
 #[gpui_kit::test]
@@ -683,12 +808,148 @@ async fn delete_stops_at_a_failed_detach(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 async fn delete_checks_afterwards(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, two()).await;
-    *f.relevance.attach_ignored.lock().unwrap() = true;
+    *f.relevance.on_delete.lock().unwrap() = Some(Box::new(|data| {
+        let mut data = data.data.lock().unwrap();
+        data.as_mut().unwrap().0[0].synonym_sets = vec!["s".into()];
+    }));
     f.click(cx, "synonyms.row.s");
     f.click(cx, "synonyms.delete");
     f.fill(cx, "danger.input", "s");
     f.click(cx, "danger.ok");
     assert!(f.label(cx, "danger.error").contains("still name"));
+}
+
+#[gpui_kit::test]
+async fn delete_stops_when_a_detach_leaves_the_set_attached(cx: &mut TestAppContext) {
+    let profile = Profile::new("test", vec![node()]);
+    let f = Fixture::on(cx, profile, two(), ONE).await;
+    *f.relevance.attach_ignored.lock().unwrap() = true;
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.delete");
+    f.fill(cx, "danger.input", "s");
+    f.click(cx, "danger.ok");
+    assert_eq!(f.calls(), ["attach books s false"]);
+    let error = f.label(cx, "danger.error");
+    assert!(
+        error.contains("books") && error.contains("still exists"),
+        "{error}"
+    );
+}
+
+#[gpui_kit::test]
+async fn detach_of_a_missing_set_stops_when_it_stays_attached(cx: &mut TestAppContext) {
+    let lists: &[(&str, &[&str])] = &[("books", &["gone"]), ("films", &["gone"])];
+    let profile = Profile::new("test", vec![node()]);
+    let f = Fixture::on(cx, profile, two(), lists).await;
+    *f.relevance.attach_ignored.lock().unwrap() = true;
+    f.click(cx, "sets.missing.detach.gone");
+    assert_eq!(f.calls(), ["attach books gone false"]);
+    assert!(f.label(cx, "sets.error").contains("Stopped at books"));
+}
+
+#[gpui_kit::test]
+async fn names_left_out_on_the_way_show(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    *f.relevance.attach_dropped.lock().unwrap() = vec!["old".into()];
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.delete");
+    f.fill(cx, "danger.input", "s");
+    f.click(cx, "danger.ok");
+    assert!(f.label(cx, "sets.note").contains("old"));
+
+    let lists: &[(&str, &[&str])] = &[("books", &["gone"]), ("films", &["gone"])];
+    let profile = Profile::new("other", vec![node()]);
+    let f = Fixture::on(cx, profile, two(), lists).await;
+    *f.relevance.attach_dropped.lock().unwrap() = vec!["old".into()];
+    f.press(cx, DETACH_MISSING);
+    assert_eq!(f.label(cx, "sets.note").matches("old").count(), 1);
+}
+
+#[gpui_kit::test]
+async fn a_failed_check_after_a_delete_says_the_set_is_gone(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    *f.relevance.on_delete.lock().unwrap() =
+        Some(Box::new(|data| *data.data.lock().unwrap() = None));
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.delete");
+    f.fill(cx, "danger.input", "s");
+    f.click(cx, "danger.ok");
+    let error = f.label(cx, "danger.error");
+    assert!(
+        error.contains("is deleted") && error.contains("not verified"),
+        "{error}"
+    );
+}
+
+#[gpui_kit::test]
+async fn a_running_delete_holds_the_controls(cx: &mut TestAppContext) {
+    let profile = Profile::new("test", vec![node()]);
+    let lists: &[(&str, &[&str])] = &[("books", &[])];
+    let f = Fixture::on(cx, profile, two(), lists).await;
+    let (release, hold) = tokio::sync::oneshot::channel();
+    *f.relevance.hold.lock().unwrap() = Some(hold);
+    f.click(cx, "synonyms.row.s");
+    f.press(cx, DELETE);
+    f.click(cx, "confirm.ok");
+    assert!(!f.enabled(cx, "synonyms.delete"));
+    f.press(cx, DELETE);
+    assert!(!f.has(cx, "confirm.ok"));
+    release.send(()).unwrap();
+    f.settle(cx);
+    assert_eq!(f.calls(), ["delete_set s"]);
+    assert!(!f.has(cx, "synonyms.row.s"));
+}
+
+#[gpui_kit::test]
+async fn a_set_created_elsewhere_is_not_detached(cx: &mut TestAppContext) {
+    let lists: &[(&str, &[&str])] = &[("books", &["gone"])];
+    let profile = Profile::new("test", vec![node()]);
+    let f = Fixture::on(cx, profile, two(), lists).await;
+    f.relevance.sets.lock().unwrap().push(set("gone", vec![]));
+    f.press(cx, DETACH_MISSING);
+    assert!(f.calls().is_empty());
+    assert!(f.label(cx, "sets.note").contains("gone"));
+    assert!(!f.has(cx, "sets.missing.gone"));
+}
+
+#[gpui_kit::test]
+async fn a_failed_read_before_a_detach_shows(cx: &mut TestAppContext) {
+    let lists: &[(&str, &[&str])] = &[("books", &["gone"])];
+    let profile = Profile::new("test", vec![node()]);
+    let f = Fixture::on(cx, profile, two(), lists).await;
+    *f.relevance.fail_reads.lock().unwrap() = true;
+    f.press(cx, DETACH_MISSING);
+    assert!(f.calls().is_empty());
+    assert!(f.label(cx, "sets.error").contains("no list"));
+}
+
+#[gpui_kit::test]
+async fn a_failed_collection_list_shows_in_the_tab(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.open_collections(cx);
+    let all = f.collections();
+    f.list_answers(None);
+    f.click(cx, "sets.attach.films");
+    assert!(f.has(cx, "sets.attach.error"));
+    f.list_answers(all);
+    f.press(cx, REFRESH);
+    assert!(!f.has(cx, "sets.attach.error"));
+}
+
+#[gpui_kit::test]
+async fn a_cached_collection_list_shows_at_once(cx: &mut TestAppContext) {
+    let lists: &[(&str, &[&str])] = &[("books", &["gone"])];
+    let profile = Profile::new("test", vec![node()]);
+    let f = Fixture::on(cx, profile, two(), lists).await;
+    let data = f.relevance.data.lock().unwrap().clone().unwrap();
+    let loads = *data.lists.lock().unwrap();
+    cx.update(|cx| {
+        f.state.update(cx, |s, cx| {
+            s.open_resource(f.id, ResourceKind::Curations, cx);
+        });
+    });
+    assert!(f.has(cx, "sets.missing.gone"));
+    assert_eq!(*data.lists.lock().unwrap(), loads);
 }
 
 #[gpui_kit::test]
@@ -724,6 +985,25 @@ async fn import_merge_counts(cx: &mut TestAppContext) {
         counts.contains("Adds 1, changes 1 and removes 0"),
         "{counts}"
     );
+    f.click(cx, "sets.import.start");
+    assert_eq!(f.calls(), ["save_set s 3"]);
+}
+
+#[gpui_kit::test]
+async fn import_counts_again_when_the_set_changed(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.click(cx, "synonyms.row.s");
+    f.import(cx, "in.json", INCOMING);
+    assert!(f.label(cx, "sets.import.counts").contains("Adds 1"));
+    // A colleague adds the row the file calls new.
+    f.relevance.sets.lock().unwrap()[0]
+        .items
+        .push(item("c", &["theirs", "too"]));
+    f.click(cx, "sets.import.start");
+    assert!(f.calls().is_empty());
+    let counts = f.label(cx, "sets.import.counts");
+    assert!(counts.contains("Adds 0, changes 2"), "{counts}");
+    assert!(f.label(cx, "sets.import.error").contains("changed"));
     f.click(cx, "sets.import.start");
     assert_eq!(f.calls(), ["save_set s 3"]);
 }
@@ -798,6 +1078,84 @@ async fn export_writes_csv(cx: &mut TestAppContext) {
     );
     assert!(written[0].1.contains("a,,x;y"), "{}", written[0].1);
     assert!(f.label(cx, "sets.note").contains("s.csv"));
+}
+
+#[gpui_kit::test]
+async fn csv_export_names_what_it_leaves_out(cx: &mut TestAppContext) {
+    let kept = json!({"id": "a", "root": "", "synonyms": ["x", "y"], "kept": 1});
+    let f = Fixture::new(cx, vec![set("s", vec![kept, item("b", &["p", "q"])])]).await;
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.export");
+    f.click(cx, "sets.export.format.csv");
+    f.click(cx, "sets.export.start");
+    cx.simulate_new_path_selection(|_| Some("/tmp/s.csv".into()));
+    let note = f.label(cx, "sets.note");
+    assert!(note.contains("s.csv") && note.contains("a"), "{note}");
+    assert!(note.contains("no column"), "{note}");
+}
+
+#[gpui_kit::test]
+async fn csv_export_says_which_item_does_not_fit(cx: &mut TestAppContext) {
+    let bad = json!({"id": "a", "synonyms": "x"});
+    let f = Fixture::new(cx, vec![set("s", vec![bad])]).await;
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.export");
+    f.click(cx, "sets.export.format.csv");
+    f.click(cx, "sets.export.start");
+    cx.simulate_new_path_selection(|_| Some("/tmp/s.csv".into()));
+    let error = f.label(cx, "sets.error");
+    assert!(
+        error.contains("Item a") && error.contains("synonyms"),
+        "{error}"
+    );
+    assert!(f.relevance.written.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn edit_says_when_the_form_cannot_read_an_item(cx: &mut TestAppContext) {
+    let bad = json!({"id": "a", "synonyms": "x"});
+    let f = Fixture::new(cx, vec![set("s", vec![bad])]).await;
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.items.row.a");
+    f.click(cx, "sets.items.edit");
+    assert!(f.label(cx, "sets.error").contains("JSON tab"));
+    assert!(!f.has(cx, "sets.item.id"));
+}
+
+#[gpui_kit::test]
+async fn tab_leaves_the_word_list_and_the_raw_block(cx: &mut TestAppContext) {
+    let stored = json!({"id": "a", "root": "", "synonyms": ["x", "y"], "kept": 1});
+    let f = Fixture::new(cx, vec![set("s", vec![stored])]).await;
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "synonyms.items.row.a");
+    f.click(cx, "sets.items.edit");
+    let after_the_blocks = ["sets.item.locale", "sets.item.cancel", "sets.item.save"];
+    assert_eq!(
+        f.reached(cx, "tab", 10, &after_the_blocks),
+        after_the_blocks
+    );
+    let view = f.view(cx);
+    let words = cx.update(|cx| view.read(cx).dialog().unwrap().read(cx).words().clone());
+    assert_eq!(cx.update(|cx| words.read(cx).text(cx)), "x\ny");
+    let before = ["sets.item.symbols", "sets.item.one_way", "sets.item.id"];
+    assert_eq!(f.reached(cx, "shift-tab", 10, &before), before);
+}
+
+#[gpui_kit::test]
+async fn words_can_be_typed(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, two()).await;
+    f.click(cx, "synonyms.row.s");
+    f.click(cx, "sets.items.add");
+    let view = f.view(cx);
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        let dialog = view.read(cx).dialog().unwrap().clone();
+        let words = dialog.read(cx).words().clone();
+        cx.update_entity(&words, |e, cx| e.focus(window, cx));
+    })
+    .unwrap();
+    f.press(cx, "a");
+    let words = cx.update(|cx| view.read(cx).dialog().unwrap().read(cx).words().clone());
+    assert_eq!(cx.update(|cx| words.read(cx).text(cx)), "a");
 }
 
 #[gpui_kit::test]

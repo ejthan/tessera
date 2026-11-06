@@ -45,6 +45,8 @@ pub enum ItemIssue {
     BadInclude(String),
     /// An include whose position is below 1.
     BadPosition(i64),
+    /// Two includes hold this position; the server answers 200 and curates only one of them.
+    DuplicatePosition(i64),
     /// The same document is included and excluded; holds its id.
     IncludedAndExcluded(String),
     /// `effective_from_ts` is after `effective_to_ts`.
@@ -208,27 +210,57 @@ pub fn sort_warnings(sort_by: &str, collections: &[Collection]) -> Vec<ItemIssue
     issues
 }
 
-/// Keys of `sent` that `stored` lacks, as dotted paths, one level into `rule`. The server
-/// drops unknown attributes silently, and its answer to a `PUT` does not show it.
+fn missing_keys(sent: &Value, kept: &Value) -> Vec<String> {
+    let (Some(sent), Some(kept)) = (sent.as_object(), kept.as_object()) else {
+        return Vec::new();
+    };
+    let lost = sent.keys().filter(|k| !kept.contains_key(*k));
+    lost.cloned().collect()
+}
+
+/// Keys of `sent` that `stored` lacks, as dotted paths: one level into `rule` and `diversity`, and
+/// into each row of `includes` and `excludes`, named by its id. The server drops unknown
+/// attributes silently, and its answer to a `PUT` does not show it.
 pub fn dropped_keys(sent: &Value, stored: &Value) -> Vec<String> {
     let (Some(sent), Some(stored)) = (sent.as_object(), stored.as_object()) else {
         return Vec::new();
     };
     let mut dropped = Vec::new();
     for (key, value) in sent {
-        match stored.get(key) {
-            None => dropped.push(key.clone()),
-            Some(kept) if key == "rule" => {
-                if let (Some(sent_rule), Some(kept_rule)) = (value.as_object(), kept.as_object()) {
-                    dropped.extend(
-                        sent_rule
-                            .keys()
-                            .filter(|k| !kept_rule.contains_key(*k))
-                            .map(|k| format!("rule.{k}")),
-                    );
+        match (stored.get(key), key.as_str()) {
+            (None, _) => dropped.push(key.clone()),
+            (Some(kept), "rule" | "diversity") => {
+                let lost = missing_keys(value, kept);
+                dropped.extend(lost.into_iter().map(|k| format!("{key}.{k}")));
+            }
+            (Some(kept), "includes" | "excludes") => {
+                let rows = value.as_array().map_or(&[][..], Vec::as_slice);
+                let kept = kept.as_array().map_or(&[][..], Vec::as_slice);
+                for (id, row) in rows.iter().filter_map(|row| Some((id_of(row)?, row))) {
+                    match kept.iter().find(|k| id_of(k) == Some(id)) {
+                        Some(kept) => {
+                            let lost = missing_keys(row, kept);
+                            dropped.extend(lost.into_iter().map(|k| format!("{key}.{id}.{k}")));
+                        }
+                        None => dropped.push(format!("{key}.{id}")),
+                    }
                 }
             }
-            Some(_) => {}
+            _ => {}
+        }
+    }
+    dropped
+}
+
+/// [`dropped_keys`] of every sent item the server still holds, each as `id: key`.
+pub fn dropped_by_id(sent: &[Value], stored: &[Value]) -> Vec<String> {
+    let stored: HashMap<&str, &Value> =
+        stored.iter().filter_map(|v| Some((id_of(v)?, v))).collect();
+    let mut dropped = Vec::new();
+    for item in sent {
+        if let Some((id, kept)) = id_of(item).and_then(|id| Some((id, *stored.get(id)?))) {
+            let keys = dropped_keys(item, kept);
+            dropped.extend(keys.into_iter().map(|key| format!("{id}: {key}")));
         }
     }
     dropped
@@ -379,6 +411,44 @@ mod tests {
             }]
         );
         assert!(sort_warnings("", &collections).is_empty());
+    }
+
+    #[test]
+    fn dropped_by_id_names_the_item() {
+        let sent = [
+            json!({"id": "a", "lost": 1, "kept": 1}),
+            json!({"id": "b", "kept": 1}),
+            json!({"id": "gone", "lost": 1}),
+            json!({"lost": 1}),
+        ];
+        let stored = [json!({"id": "b", "kept": 1}), json!({"id": "a", "kept": 1})];
+        assert_eq!(dropped_by_id(&sent, &stored), ["a: lost"]);
+    }
+
+    #[test]
+    fn dropped_keys_look_into_rows_and_diversity() {
+        let sent = json!({
+            "id": "a",
+            "includes": [{"id": "1", "position": 1, "note": "x"}, {"id": "2", "position": 2}],
+            "excludes": [{"id": "3", "note": "x"}],
+            "diversity": {"similarity_metric": [], "future": 1},
+        });
+        let stored = json!({
+            "id": "a",
+            "includes": [{"id": "1", "position": 1}],
+            "excludes": [{"id": "3"}],
+            "diversity": {"similarity_metric": []},
+        });
+        assert_eq!(
+            dropped_keys(&sent, &stored),
+            [
+                "diversity.future",
+                "excludes.3.note",
+                "includes.1.note",
+                "includes.2"
+            ]
+        );
+        assert!(dropped_keys(&sent, &sent).is_empty());
     }
 
     #[test]
