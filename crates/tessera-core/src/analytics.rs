@@ -111,24 +111,28 @@ impl RuleDraft {
             _ => Map::new(),
         };
         let destination = text(&mut p, "destination_collection");
-        let counter_field = text(&mut p, "counter_field");
-        let limit = p
-            .remove("limit")
+        // What this type's form does not show stays in `extra_params`, and goes back.
+        let (query, counter) = (rule_type.is_query(), rule_type == RuleType::Counter);
+        let take = |p: &mut Map<String, Value>, key: &str, shown: bool| {
+            if shown { p.remove(key) } else { None }
+        };
+        let counter_field = match take(&mut p, "counter_field", counter) {
+            Some(Value::String(s)) => s,
+            _ => String::new(),
+        };
+        let limit = take(&mut p, "limit", query)
             .and_then(|v| v.as_u64())
             .and_then(|n| u32::try_from(n).ok());
-        let weight = p
-            .remove("weight")
+        let weight = take(&mut p, "weight", counter)
             .and_then(|v| v.as_i64())
             .and_then(|n| i32::try_from(n).ok());
-        let capture_search_requests = p
-            .remove("capture_search_requests")
+        let capture_search_requests = take(&mut p, "capture_search_requests", query)
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let expand_query = p
-            .remove("expand_query")
+        let expand_query = take(&mut p, "expand_query", query)
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let meta_fields = match p.remove("meta_fields") {
+        let meta_fields = match take(&mut p, "meta_fields", query) {
             Some(Value::Array(a)) => a
                 .into_iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
@@ -201,12 +205,20 @@ impl RuleDraft {
     }
 
     /// The body of `PUT /analytics/rules/{name}`: the name is in the path and the type cannot
-    /// change.
+    /// change. The `PUT` merges, so a cleared tag or field list goes out empty. A limit or
+    /// weight has no such form: the server answers 400 to `null`, and [`check_rule`] asks for
+    /// both.
     pub fn update_body(&self) -> Value {
         let mut body = self.to_body();
         if let Some(o) = body.as_object_mut() {
             o.remove("name");
             o.remove("type");
+            o.insert("rule_tag".into(), self.rule_tag.clone().into());
+            if self.rule_type.is_query()
+                && let Some(params) = o.get_mut("params").and_then(Value::as_object_mut)
+            {
+                params.insert("meta_fields".into(), json!(self.meta_fields));
+            }
         }
         body
     }
@@ -343,6 +355,62 @@ mod tests {
         let body = draft.update_body();
         assert!(body.get("name").is_none() && body.get("type").is_none());
         assert_eq!(body["collection"], "c");
+    }
+
+    #[test]
+    fn update_body_clears_the_tag_and_the_meta_fields() {
+        let mut draft = RuleDraft::from_rule(&rule(json!({
+            "name": "q", "type": "popular_queries", "collection": "c", "event_type": "search",
+            "rule_tag": "web",
+            "params": {"destination_collection": "d", "limit": 10, "meta_fields": ["filter_by"]}
+        })))
+        .expect("known");
+        draft.rule_tag.clear();
+        draft.meta_fields.clear();
+        let body = draft.update_body();
+        assert_eq!(body["rule_tag"], "");
+        assert_eq!(body["params"]["meta_fields"], json!([]));
+    }
+
+    #[test]
+    fn update_body_clears_the_tag_of_a_counter_and_a_log() {
+        for t in [RuleType::Counter, RuleType::Log] {
+            let draft = RuleDraft {
+                rule_type: t,
+                ..good_counter()
+            };
+            let body = draft.update_body();
+            assert_eq!(body["rule_tag"], "");
+            assert!(
+                body.get("params")
+                    .is_none_or(|p| p.get("meta_fields").is_none())
+            );
+        }
+    }
+
+    #[test]
+    fn a_cleared_limit_or_weight_is_refused_not_sent() {
+        let mut query = good_query();
+        query.limit = None;
+        assert_eq!(check_rule(&query), [RuleProblem::BadLimit]);
+        assert!(query.update_body()["params"].get("limit").is_none());
+        let mut counter = good_counter();
+        counter.weight = None;
+        assert_eq!(check_rule(&counter), [RuleProblem::BadWeight]);
+        assert!(counter.update_body()["params"].get("weight").is_none());
+    }
+
+    #[test]
+    fn a_counter_keeps_the_keys_of_a_query_rule() {
+        let src = json!({
+            "name": "c", "type": "counter", "collection": "products", "event_type": "click",
+            "params": {
+                "destination_collection": "products", "counter_field": "popularity", "weight": 3,
+                "capture_search_requests": true, "expand_query": true
+            }
+        });
+        let draft = RuleDraft::from_rule(&rule(src.clone())).expect("known");
+        assert_eq!(draft.to_body(), src);
     }
 
     #[test]

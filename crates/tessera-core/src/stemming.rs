@@ -3,7 +3,7 @@
 //! Stemming dictionary files. The server stores the lines before a bad one, so a file is
 //! checked whole before anything is sent. Words nothing, the app translates the enums.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 use tessera_client::{Collection, StemmingWord};
@@ -43,7 +43,7 @@ pub struct BadLine {
 }
 
 /// The words of a JSON Lines file, blank lines skipped, or up to 100 bad lines. Unknown keys
-/// are ignored, as on the server, and the last of a repeated word wins there.
+/// are ignored, as on the server, and the first of a repeated word wins there.
 pub fn parse_dictionary(text: &str) -> Result<Vec<StemmingWord>, Vec<BadLine>> {
     let mut words = Vec::new();
     let mut bad = Vec::new();
@@ -97,10 +97,12 @@ pub fn to_jsonl(words: &[StemmingWord]) -> String {
 pub struct ImportCheck {
     /// Lines sent.
     pub sent: usize,
-    /// Sent words that are not stored with the root sent last.
+    /// Sent words that are not stored with the root they should have: the root they had, or
+    /// else the first one sent.
     pub missing: Vec<String>,
-    /// Words of the dictionary before the import whose root is another one now.
-    pub changed_root: usize,
+    /// Words of the dictionary before the import that were sent with another root and keep
+    /// the one they have.
+    pub kept_root: usize,
 }
 
 fn roots(words: &[StemmingWord]) -> HashMap<&str, &str> {
@@ -110,30 +112,33 @@ fn roots(words: &[StemmingWord]) -> HashMap<&str, &str> {
         .collect()
 }
 
-/// Compares what was sent with what is stored. `changed_root` is the merge the user should
-/// hear about: the import changes a root and does not remove the word.
+/// Compares what was sent with what is stored. The server keeps the root a word has, from an
+/// earlier import or an earlier line, so `kept_root` is what the user should hear about.
 pub fn check_import(
     before: &[StemmingWord],
     sent: &[StemmingWord],
     stored: &[StemmingWord],
 ) -> ImportCheck {
+    let before_roots = roots(before);
     let stored_roots = roots(stored);
-    let sent_roots = roots(sent);
-    let mut missing: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut missing = Vec::new();
+    let mut kept_root = 0;
     for w in sent {
-        let last = sent_roots[w.word.as_str()];
-        if stored_roots.get(w.word.as_str()) != Some(&last) && !missing.contains(&w.word) {
+        let word = w.word.as_str();
+        if !seen.insert(word) {
+            continue;
+        }
+        let had = before_roots.get(word).copied();
+        if stored_roots.get(word).copied() != Some(had.unwrap_or(&w.root)) {
             missing.push(w.word.clone());
         }
+        kept_root += usize::from(had.is_some_and(|root| root != w.root));
     }
-    let changed_root = roots(before)
-        .into_iter()
-        .filter(|(word, root)| stored_roots.get(word).is_some_and(|now| now != root))
-        .count();
     ImportCheck {
         sent: sent.len(),
         missing,
-        changed_root,
+        kept_root,
     }
 }
 
@@ -242,16 +247,16 @@ mod tests {
     }
 
     #[test]
-    fn check_import_counts_a_changed_root() {
+    fn check_import_counts_a_kept_root() {
         let before = [w("a", "x"), w("b", "y")];
-        let sent = [w("a", "z"), w("c", "q")];
-        let stored = [w("a", "z"), w("b", "y"), w("c", "q")];
+        let sent = [w("a", "z"), w("b", "y"), w("c", "q")];
+        let stored = [w("a", "x"), w("b", "y"), w("c", "q")];
         assert_eq!(
             check_import(&before, &sent, &stored),
             ImportCheck {
-                sent: 2,
+                sent: 3,
                 missing: vec![],
-                changed_root: 1
+                kept_root: 1
             }
         );
     }
@@ -265,10 +270,20 @@ mod tests {
     }
 
     #[test]
-    fn last_duplicate_wins_in_the_check() {
+    fn first_duplicate_wins_in_the_check() {
         let sent = [w("a", "x"), w("a", "y")];
-        assert!(check_import(&[], &sent, &[w("a", "y")]).missing.is_empty());
-        assert_eq!(check_import(&[], &sent, &[w("a", "x")]).missing, ["a"]);
+        let check = check_import(&[], &sent, &[w("a", "x")]);
+        assert!(check.missing.is_empty() && check.kept_root == 0);
+        assert_eq!(check_import(&[], &sent, &[w("a", "y")]).missing, ["a"]);
+    }
+
+    #[test]
+    fn a_stored_word_is_compared_with_its_old_root() {
+        let before = [w("a", "x")];
+        let moved = check_import(&before, &[w("a", "y")], &[w("a", "y")]);
+        assert_eq!(moved.missing, ["a"]);
+        let repeated = [w("a", "y"), w("a", "x")];
+        assert_eq!(check_import(&before, &repeated, &before).kept_root, 1);
     }
 
     #[test]

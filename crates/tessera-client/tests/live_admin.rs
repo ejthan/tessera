@@ -228,7 +228,7 @@ async fn live_aggregate_reaches_the_destination() {
     .await
     .expect("event");
     c.flush_analytics().await.expect("flush");
-    let mut hits = 0;
+    let mut hits = Ok(0);
     for _ in 0..20 {
         let all = DocumentQuery {
             page: 1,
@@ -237,9 +237,8 @@ async fn live_aggregate_reaches_the_destination() {
             sort_by: None,
             exclude_fields: None,
         };
-        let page = c.search_documents(dest, &all).await;
-        hits = page.map_or(0, |p| p.found);
-        if hits > 0 {
+        hits = c.search_documents(dest, &all).await.map(|p| p.found);
+        if !matches!(hits, Ok(0)) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -247,7 +246,57 @@ async fn live_aggregate_reaches_the_destination() {
     let _ = c.delete_analytics_rule(rule).await;
     let _ = c.delete_collection(source).await;
     let _ = c.delete_collection(dest).await;
+    let hits = hits.expect("search of the destination");
     assert!(hits > 0, "no aggregate reached the destination within 10 s");
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_put_clears_the_tag_and_the_meta_fields() {
+    use serde_json::json;
+    let c = client();
+    let (source, dest, rule) = (
+        "tessera_it_clr_src",
+        "tessera_it_clr_dst",
+        "tessera_it_clr_rule",
+    );
+    let _ = c.delete_analytics_rule(rule).await;
+    make_collection(&c, source, json!([{"name": "title", "type": "string"}])).await;
+    make_collection(
+        &c,
+        dest,
+        json!([{"name": "q", "type": "string"}, {"name": "count", "type": "int32"}]),
+    )
+    .await;
+    let created = c
+        .create_analytics_rule(&json!({
+            "name": rule, "type": "popular_queries", "collection": source,
+            "event_type": "search", "rule_tag": "web",
+            "params": {"destination_collection": dest, "limit": 10, "meta_fields": ["filter_by"]}
+        }))
+        .await;
+    let updated = c
+        .update_analytics_rule(
+            rule,
+            &json!({
+                "collection": source, "event_type": "search", "rule_tag": "",
+                "params": {"destination_collection": dest, "limit": 10, "meta_fields": []}
+            }),
+        )
+        .await;
+    let stored = c.analytics_rule(rule).await;
+    let _ = c.delete_analytics_rule(rule).await;
+    let _ = c.delete_collection(source).await;
+    let _ = c.delete_collection(dest).await;
+    created.expect("create");
+    updated.expect("update");
+    let stored = stored.expect("get");
+    assert_eq!(stored["rule_tag"], "");
+    assert!(
+        stored["params"]
+            .get("meta_fields")
+            .is_none_or(|f| f == &json!([]))
+    );
 }
 
 // Stemming dictionaries.
@@ -276,6 +325,21 @@ fn pair(w: &str, r: &str) -> (String, String) {
 
 #[tokio::test]
 #[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_first_duplicate_of_an_import_wins() {
+    let c = client();
+    let id = "tessera_it_stem_dup";
+    let _ = c.delete_stemming(id).await;
+    let imported = c
+        .import_stemming(id, &lines(&[("a", "x"), ("a", "y")]))
+        .await;
+    let stored = c.stemming_dictionary(id).await;
+    let _ = c.delete_stemming(id).await;
+    imported.expect("import");
+    assert_eq!(roots(&stored.expect("get")), [pair("a", "x")]);
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
 async fn live_stemming_crud() {
     let c = client();
     let id = "tessera_it_stem_crud";
@@ -295,8 +359,7 @@ async fn live_stemming_crud() {
 
     assert_eq!(first.expect("get").id, id);
     // Measured on 30.0 and 30.2: an import adds new words to an existing dictionary but keeps
-    // the root a word already has, whatever the docs and design 4.5 say. A new root needs a
-    // delete first, which `check_import` reports as a missing word.
+    // the root a word already has, whatever the docs say. A new root needs a delete first.
     assert_eq!(
         roots(&merged.expect("merged")),
         [
