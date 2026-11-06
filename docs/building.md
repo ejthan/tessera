@@ -112,6 +112,19 @@ context = "Workbench"
 
 A control shows the chord that is bound now. A bad entry is skipped and named above the tabs, and the others apply. A file that does not parse, or has a field the format does not know, changes nothing: the default shortcuts stay, and the line above the tabs names the place. `escape` cannot be bound, because it closes every dialog. An unbound action stays reachable from its control and the palette.
 
+## Manual checks of the relevance resources (M6)
+
+Nothing here has been done yet: the views are covered by UI tests with fakes and the client and core by live tests, and none of it has been looked at. Run against the dev server after `cargo run -p xtask -- seed --url http://localhost:18108 --key xyz --reset`. Record the result in the PR description.
+
+1. Each view, ⌥⌘1 to ⌥⌘5 (Ctrl+Alt+1 to 5): aliases, synonym sets, curation sets, stopwords and presets list the seeded `books_current`, `books_synonyms`, `books_curation`, `en_common` and `books_fantasy`. Create, edit and delete one of each.
+2. The curation dialog of `books_curation` in light and in dark: Form ⌘1, JSON ⌘2, include rows, hide rows, the document picker. Nothing is cut off at the smallest window, and the body scrolls.
+3. Drag an include to another position, then the same with ⌥↑ and ⌥↓. The positions follow the order.
+4. Open the date picker in the curation dialog, which is a stacked dialog: it opens over the dialog, its time field shows, and Esc closes the picker and leaves the dialog.
+5. The Test tab of `books_synonyms` and of `books_curation`: both sides run, and each says what it means.
+6. One reindex of `books` through `books_current`: on the Aliases tab select it and press ⇧⌘R. Check that nothing is sent before Start and that the Jobs tab opens without taking focus. After the copy, the compare shows 10,000 on both sides. Switch, check that `books_current` points to the new collection, Switch back, Switch again, then Delete `books`, typing the name. `--reset` does not know the new collection, so delete it by hand before the next seed.
+7. A stopped reindex: Start again, press ⌘. during the export, and check that the alias did not move, the temp directory under `$TMPDIR` named `tessera-reindex-*` is gone, and `Delete {new}` and `Start over` show.
+8. On macOS, every shortcut shown on a control in these views does what its control does.
+
 ## Manual checks of import and export (M5)
 
 Nothing here has been done yet. The headless run above is NF3's number; this is the run through the window, and it stays open until someone records it in the last PR's description.
