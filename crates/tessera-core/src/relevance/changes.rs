@@ -5,7 +5,10 @@
 use std::collections::HashMap;
 
 use serde_json::Value;
-use tessera_client::Collection;
+use tessera_client::{Collection, SetKind};
+
+use super::curations::CurationDraft;
+use super::synonyms::SynonymDraft;
 
 /// Whether an issue stops a save.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +56,8 @@ pub enum ItemIssue {
         /// The collection.
         collection: String,
     },
+    /// An issue of the item in this row (1-based) of a file or paste.
+    AtRow(usize, Box<ItemIssue>),
 }
 
 impl ItemIssue {
@@ -60,6 +65,7 @@ impl ItemIssue {
     pub fn level(&self) -> Level {
         match self {
             Self::UnknownSortField { .. } => Level::Warning,
+            Self::AtRow(_, issue) => issue.level(),
             _ => Level::Error,
         }
     }
@@ -108,8 +114,19 @@ fn id_of(item: &Value) -> Option<&str> {
     item.get("id").and_then(Value::as_str)
 }
 
-/// Compares two lists by `id`. A different order alone is no change.
-pub fn changes(old: &[Value], new: &[Value]) -> Changes {
+/// `item` as the form would send it, or as it is if the form cannot read it. The server adds
+/// `"root":""` and the flags that `to_value` leaves out or fills in.
+fn normal(kind: SetKind, item: &Value) -> Value {
+    let read = match kind {
+        SetKind::Synonym => SynonymDraft::from_value(item).map(|d| d.to_value()),
+        SetKind::Curation => CurationDraft::from_value(item).map(|d| d.to_value()),
+    };
+    read.unwrap_or_else(|_| item.clone())
+}
+
+/// Compares two lists by `id`. A different order alone is no change, and neither is a form the
+/// server stores differently.
+pub fn changes(kind: SetKind, old: &[Value], new: &[Value]) -> Changes {
     let old_by: HashMap<&str, &Value> = old.iter().filter_map(|v| Some((id_of(v)?, v))).collect();
     let new_by: HashMap<&str, &Value> = new.iter().filter_map(|v| Some((id_of(v)?, v))).collect();
     let mut out = Changes::default();
@@ -117,7 +134,9 @@ pub fn changes(old: &[Value], new: &[Value]) -> Changes {
         let Some(id) = id_of(item) else { continue };
         match old_by.get(id) {
             None => out.added.push(id.to_string()),
-            Some(before) if **before != *item => out.changed.push(id.to_string()),
+            Some(before) if normal(kind, before) != normal(kind, item) => {
+                out.changed.push(id.to_string());
+            }
             Some(_) => {}
         }
     }
@@ -284,7 +303,7 @@ mod tests {
             json!({"id": "a", "synonyms": ["x", "z"]}),
             json!({"id": "d"}),
         ];
-        let got = changes(&old, &new);
+        let got = changes(SetKind::Synonym, &old, &new);
         assert_eq!(got.added, ["d"]);
         assert_eq!(got.changed, ["a"]);
         assert_eq!(got.removed, ["b"]);
@@ -295,9 +314,30 @@ mod tests {
     fn a_reorder_alone_changes_nothing() {
         let old = [json!({"id": "a", "x": 1, "y": 2}), json!({"id": "b"})];
         let new = [json!({"y": 2, "id": "a", "x": 1}), json!({"id": "b"})];
-        assert!(changes(&old, &new).is_empty());
+        assert!(changes(SetKind::Synonym, &old, &new).is_empty());
         let swapped = [old[1].clone(), old[0].clone()];
-        assert!(changes(&old, &swapped).is_empty());
+        assert!(changes(SetKind::Synonym, &old, &swapped).is_empty());
+    }
+
+    #[test]
+    fn a_stored_item_equals_its_export() {
+        // As `GET /synonym_sets/x` answers on 30.2.
+        let stored = [json!({"id": "m", "root": "", "synonyms": ["a", "b"]})];
+        let exported = [json!({"id": "m", "synonyms": ["a", "b"]})];
+        assert!(changes(SetKind::Synonym, &stored, &exported).is_empty());
+        let edited = [json!({"id": "m", "root": "", "synonyms": ["a", "c"]})];
+        assert_eq!(changes(SetKind::Synonym, &stored, &edited).changed, ["m"]);
+    }
+
+    #[test]
+    fn a_stored_rule_equals_its_form() {
+        let rule = json!({"query": "a", "match": "exact"});
+        let stored = [
+            json!({"id": "r", "rule": rule, "remove_matched_tokens": true,
+            "filter_curated_hits": false, "stop_processing": true}),
+        ];
+        let sent = [json!({"id": "r", "rule": rule})];
+        assert!(changes(SetKind::Curation, &stored, &sent).is_empty());
     }
 
     #[test]

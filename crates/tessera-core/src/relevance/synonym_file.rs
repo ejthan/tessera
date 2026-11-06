@@ -6,9 +6,10 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use super::changes::{ItemIssue, check_items};
-use super::synonyms::SynonymDraft;
+use super::changes::{ItemIssue, Level, check_items};
+use super::synonyms::{SynonymDraft, check_synonym};
 use crate::transfer::CLIPBOARD_LIMIT;
+use crate::transfer::source::BOM;
 
 /// Files and pastes are read whole, up to this size.
 pub const SET_FILE_LIMIT: usize = CLIPBOARD_LIMIT;
@@ -91,7 +92,7 @@ pub fn synonyms_to_csv(items: &[SynonymDraft]) -> String {
     String::from_utf8(writer.into_inner().unwrap_or_default()).unwrap_or_default()
 }
 
-fn parse_cell(cell: &str, row: u64) -> Result<Vec<String>, SetFileError> {
+fn parse_cell(cell: &str, row: u64, separator: char) -> Result<Vec<String>, SetFileError> {
     if cell.starts_with('[') {
         return serde_json::from_str(cell).map_err(|e| SetFileError::Csv {
             row,
@@ -99,17 +100,33 @@ fn parse_cell(cell: &str, row: u64) -> Result<Vec<String>, SetFileError> {
         });
     }
     Ok(cell
-        .split(';')
+        .split(separator)
         .map(str::trim)
         .filter(|w| !w.is_empty())
         .map(String::from)
         .collect())
 }
 
+/// The delimiter of the header line: a `.tsv` uses tabs, and a German Excel writes `;` into its
+/// "CSV". A tie stays with the comma.
+fn delimiter_of(text: &str) -> u8 {
+    let header = text.lines().next().unwrap_or_default();
+    let count = |c: char| header.matches(c).count();
+    match (count(','), count(';'), count('\t')) {
+        (comma, semicolon, tab) if tab > comma && tab >= semicolon => b'\t',
+        (comma, semicolon, _) if semicolon > comma => b';',
+        _ => b',',
+    }
+}
+
 fn parse_csv(text: &str) -> Result<Vec<Value>, SetFileError> {
     let header_error = |message: String| SetFileError::Csv { row: 0, message };
+    let delimiter = delimiter_of(text);
+    // `;` separates a list unless it separates the columns.
+    let separator = if delimiter == b';' { ',' } else { ';' };
     let mut reader = csv::ReaderBuilder::new()
         .flexible(true)
+        .delimiter(delimiter)
         .from_reader(text.as_bytes());
     let headers = reader
         .headers()
@@ -131,14 +148,14 @@ fn parse_csv(text: &str) -> Result<Vec<Value>, SetFileError> {
         })?;
         let cell = |at: Option<usize>| at.and_then(|n| record.get(n)).unwrap_or_default();
         let draft = SynonymDraft {
-            id: match cell(Some(id)) {
+            id: match cell(Some(id)).trim() {
                 "" => format!("row_{row}"),
                 given => given.to_string(),
             },
             root: cell(root).to_string(),
-            synonyms: parse_cell(cell(Some(synonyms)), row)?,
+            synonyms: parse_cell(cell(Some(synonyms)), row, separator)?,
             locale: cell(locale).to_string(),
-            symbols_to_index: parse_cell(cell(symbols), row)?,
+            symbols_to_index: parse_cell(cell(symbols), row, separator)?,
             extra: Default::default(),
         };
         items.push(draft.to_value());
@@ -152,6 +169,10 @@ pub fn parse_synonyms(text: &str, format: SetFormat) -> Result<Vec<Value>, SetFi
     if text.len() > SET_FILE_LIMIT {
         return Err(SetFileError::TooLarge(text.len() as u64));
     }
+    let text = text
+        .as_bytes()
+        .strip_prefix(BOM)
+        .map_or(text, |_| &text[BOM.len()..]);
     let items = match format {
         SetFormat::Csv => parse_csv(text)?,
         SetFormat::Json => {
@@ -175,7 +196,15 @@ pub fn parse_synonyms(text: &str, format: SetFormat) -> Result<Vec<Value>, SetFi
             }
         }
     };
-    let issues = check_items(&items);
+    let mut issues = check_items(&items);
+    for (i, item) in items.iter().enumerate() {
+        // An item the form cannot read goes to the server, which says what it thinks of it.
+        let found = SynonymDraft::from_value(item).map_or(Vec::new(), |d| check_synonym(&d));
+        let stops = found
+            .into_iter()
+            .filter(|issue| issue.level() == Level::Error && !matches!(issue, ItemIssue::NoId));
+        issues.extend(stops.map(|issue| ItemIssue::AtRow(i + 1, Box::new(issue))));
+    }
     if issues.is_empty() {
         Ok(items)
     } else {
@@ -239,7 +268,7 @@ mod tests {
             draft("quotes", "", &["say \"hi\"", "a,b"]),
             draft("newline", "", &["line\none", "two"]),
             draft("edges", "", &[" pad ", "z"]),
-            draft("empty", "", &["", "z"]),
+            draft("empty", "", &["", "z", "w"]),
         ];
         assert_eq!(csv_round_trip(&drafts), drafts);
     }
@@ -267,9 +296,10 @@ mod tests {
 
     #[test]
     fn short_rows_are_accepted_and_missing_columns_named() {
-        let items = parse_synonyms("id,synonyms,root\na\nb,x;y\n", SetFormat::Csv).unwrap();
-        assert_eq!(items[0]["synonyms"], json!([]));
-        assert_eq!(items[1]["synonyms"], json!(["x", "y"]));
+        let items = parse_synonyms("id,root,synonyms\na,r\nb,,x;y\n", SetFormat::Csv);
+        assert!(matches!(items, Err(SetFileError::Items(_))));
+        let items = parse_synonyms("id,synonyms,root\nb,x;y\n", SetFormat::Csv).unwrap();
+        assert_eq!(items[0]["synonyms"], json!(["x", "y"]));
         let error = parse_synonyms("id,words\na,b\n", SetFormat::Csv).unwrap_err();
         assert!(matches!(error, SetFileError::Csv { row: 0, .. }));
     }
@@ -297,7 +327,9 @@ mod tests {
 
     #[test]
     fn a_duplicate_id_reports_both_rows() {
-        let json = r#"[{"id":"a","synonyms":["x","y"]},{"id":"b"},{"id":"a"}]"#;
+        let two = r#""synonyms":["x","y"]"#;
+        let json = format!(r#"[{{"id":"a",{two}}},{{"id":"b",{two}}},{{"id":"a",{two}}}]"#);
+        let json = json.as_str();
         let expected = Err(SetFileError::Items(vec![ItemIssue::DuplicateId {
             id: "a".into(),
             rows: (1, 3),
@@ -305,6 +337,55 @@ mod tests {
         assert_eq!(parse_synonyms(json, SetFormat::Json), expected);
         let csv = "id,synonyms\na,x;y\nb,x;y\na,z;w\n";
         assert_eq!(parse_synonyms(csv, SetFormat::Csv), expected);
+    }
+
+    #[test]
+    fn the_delimiter_comes_from_the_header() {
+        let tsv = "id\troot\tsynonyms\na\t\tx;y\n";
+        assert_eq!(
+            parse_synonyms(tsv, SetFormat::Csv).unwrap()[0]["synonyms"],
+            json!(["x", "y"])
+        );
+        // A German Excel: `;` between columns, so a list splits at commas.
+        let excel = "id;root;synonyms\na;;sofa, couch\n";
+        assert_eq!(
+            parse_synonyms(excel, SetFormat::Csv).unwrap()[0]["synonyms"],
+            json!(["sofa", "couch"])
+        );
+    }
+
+    #[test]
+    fn rows_that_do_nothing_are_reported_with_their_row() {
+        let one_word = "id,synonyms\na,x;y\nb,\"sofa, couch\"\n";
+        assert_eq!(
+            parse_synonyms(one_word, SetFormat::Csv),
+            Err(SetFileError::Items(vec![ItemIssue::AtRow(
+                2,
+                Box::new(ItemIssue::TooFewSynonyms)
+            )]))
+        );
+        let trailing = "id,root,synonyms,locale,symbols_to_index\na,,x;y,,\n,,,,\n";
+        assert_eq!(
+            parse_synonyms(trailing, SetFormat::Csv),
+            Err(SetFileError::Items(vec![ItemIssue::AtRow(
+                2,
+                Box::new(ItemIssue::TooFewSynonyms)
+            )]))
+        );
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_skipped() {
+        let json = "\u{feff}[{\"id\":\"a\",\"synonyms\":[\"x\",\"y\"]}]";
+        assert_eq!(parse_synonyms(json, SetFormat::Json).unwrap().len(), 1);
+        let csv = "\u{feff}id,synonyms\na,x;y\n";
+        assert_eq!(parse_synonyms(csv, SetFormat::Csv).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_csv_id_is_trimmed() {
+        let items = parse_synonyms("id,synonyms\n a ,x;y\n", SetFormat::Csv).unwrap();
+        assert_eq!(items[0]["id"], "a");
     }
 
     #[test]

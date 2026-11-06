@@ -40,6 +40,8 @@ pub enum TestBlocked {
     NotAttached,
     /// An unattached synonym set whose name a `synonym_sets=` list cannot carry.
     NameNotSendable,
+    /// A tag that a `curation_tags=` list cannot carry.
+    BadTag,
 }
 
 fn param(key: &str, value: &str) -> Vec<(String, String)> {
@@ -71,15 +73,19 @@ pub fn test_sides(
         ),
         (SetKind::Curation, false) => return Err(TestBlocked::NotAttached),
         (SetKind::Curation, true) => {
-            let tags = tags.trim();
+            let tags: Vec<&str> = tags.split(',').map(str::trim).collect();
+            let none = tags == [""];
+            if !none && !tags.iter().all(|t| param_safe(t)) {
+                return Err(TestBlocked::BadTag);
+            }
             (
                 (SideMeaning::NoCurations, param("enable_curations", "false")),
                 (
                     SideMeaning::AsConfigured,
-                    if tags.is_empty() {
+                    if none {
                         Vec::new()
                     } else {
-                        param("curation_tags", tags)
+                        param("curation_tags", &tags.join(","))
                     },
                 ),
             )
@@ -150,6 +156,20 @@ mod tests {
         let none = test_sides(SetKind::Curation, "c", &names(&["c", "d"]), "  ").unwrap();
         assert_eq!(none.right, (SideMeaning::AsConfigured, vec![]));
         assert!(none.broad);
+    }
+
+    #[test]
+    fn each_tag_must_fit_the_list() {
+        let attached = names(&["c"]);
+        let sides = test_sides(SetKind::Curation, "c", &attached, " vip , new ").unwrap();
+        assert_eq!(sides.right.1, pairs(&[("curation_tags", "vip,new")]));
+        for bad in ["a,,b", "a,", "a\nb"] {
+            assert_eq!(
+                test_sides(SetKind::Curation, "c", &attached, bad),
+                Err(TestBlocked::BadTag),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

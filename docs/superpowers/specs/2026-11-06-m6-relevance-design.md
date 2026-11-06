@@ -202,7 +202,7 @@ pub struct SynonymDraft { pub id: String, pub root: String, pub synonyms: Vec<St
     pub locale: String, pub symbols_to_index: Vec<String>, pub extra: Map<String, Value> }
 impl SynonymDraft { pub fn from_value(&Value) -> Result<Self, ModelError>; pub fn to_value(&self) -> Value; }
 
-pub struct CurationDraft { pub id: String, pub rule: RuleDraft, pub includes: Vec<(String, i64)>, pub excludes: Vec<String>,
+pub struct CurationDraft { pub id: String, pub rule: RuleDraft, pub includes: Vec<Include>, pub excludes: Vec<Exclude>,
     pub filter_by: String, pub sort_by: String, pub replace_query: String, pub remove_matched_tokens: bool,
     pub filter_curated_hits: bool, pub stop_processing: bool, pub effective_from_ts: Option<i64>,
     pub effective_to_ts: Option<i64>, pub metadata: Option<Map<String, Value>>, pub extra: Map<String, Value> }
@@ -214,7 +214,7 @@ pub fn check_synonym(draft: &SynonymDraft) -> Vec<ItemIssue>;
 pub fn check_curation(draft: &CurationDraft) -> Vec<ItemIssue>;
 pub fn check_items(items: &[Value]) -> Vec<ItemIssue>;            // duplicates, no id
 pub struct Changes { pub added: Vec<String>, pub changed: Vec<String>, pub removed: Vec<String> }
-pub fn changes(old: &[Value], new: &[Value]) -> Changes;          // by `id`
+pub fn changes(kind: SetKind, old: &[Value], new: &[Value]) -> Changes; // by `id`, both sides through the draft
 pub fn sort_fields(sort_by: &str) -> Vec<String>;
 ```
 
@@ -244,8 +244,8 @@ pub fn users<'a>(collections: &'a [Collection], kind: SetKind, name: &str) -> Ve
 pub struct Missing { pub set: String, pub collections: Vec<String> }
 pub fn missing(collections: &[Collection], kind: SetKind, known: &[String]) -> Vec<Missing>;
 pub struct NewList { pub list: Vec<String>, pub dropped: Vec<String> }
-pub fn with_set(current: &[String], known: &[String], name: &str) -> NewList;
-pub fn without_set(current: &[String], known: &[String], name: &str) -> NewList;
+pub fn with_set(current: &[String], known: &[String], name: &str) -> Result<NewList, NoKnownSets>;
+pub fn without_set(current: &[String], known: &[String], name: &str) -> Result<NewList, NoKnownSets>;
 pub fn attachment_patch(kind: SetKind, list: &[String]) -> Value; // {"synonym_sets":[…]}
 ```
 
@@ -262,7 +262,7 @@ pub fn merged(current: &[Value], incoming: &[Value]) -> Vec<Value>; // by id, in
 
 D67. The CSV has the header `id,root,synonyms,locale,symbols_to_index`, written with the `csv` crate. List cells join with `;`, the separator business tools use after `,`. A value that holds a `;`, or a list that starts with `[`, is written as a JSON array in the cell, the way M5 treats list cells (D51), and the reader takes such a cell as JSON, so the round trip is lossless. A blank `id` becomes `row_{n}`. JSON accepts `{"items":[…]}` or a bare array. Cells stay verbatim, with the existing hint of D55. Files are limited to `CLIPBOARD_LIMIT` (16 MiB).
 
-`parse_synonyms` runs `check_items`, so a file with duplicate ids is refused with both row numbers.
+`parse_synonyms` runs `check_items`, so a file with duplicate ids is refused with both row numbers, and `check_synonym` on every row, so a cell that holds one word and a row of empty cells are reported with their row. The CSV delimiter comes from the header line: comma, tab, or `;`, and with `;` between columns a list cell splits at `,`. A UTF-8 byte order mark is skipped.
 
 ### 5.5 Test sides (`test.rs`)
 

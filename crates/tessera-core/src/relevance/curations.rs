@@ -26,6 +26,26 @@ pub struct RuleDraft {
     pub extra: Map<String, Value>,
 }
 
+/// A pinned document. `extra` keeps keys without a field.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Include {
+    /// Document id.
+    pub id: String,
+    /// Its position.
+    pub position: i64,
+    /// Keys without a field.
+    pub extra: Map<String, Value>,
+}
+
+/// A hidden document. `extra` keeps keys without a field.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Exclude {
+    /// Document id.
+    pub id: String,
+    /// Keys without a field.
+    pub extra: Map<String, Value>,
+}
+
 /// A curation item. `extra` keeps every key the form has no control for, `diversity` included.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CurationDraft {
@@ -34,9 +54,9 @@ pub struct CurationDraft {
     /// When it fires.
     pub rule: RuleDraft,
     /// Pinned documents and their positions.
-    pub includes: Vec<(String, i64)>,
+    pub includes: Vec<Include>,
     /// Hidden documents.
-    pub excludes: Vec<String>,
+    pub excludes: Vec<Exclude>,
     /// Filter added to the search.
     pub filter_by: String,
     /// Sort replacing the search's.
@@ -89,6 +109,13 @@ fn objects(
             .collect(),
         Some(_) => Err(ModelError::BadField(key)),
     }
+}
+
+fn with_extra(mut value: Value, extra: &Map<String, Value>) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.extend(extra.clone());
+    }
+    value
 }
 
 impl RuleDraft {
@@ -158,15 +185,22 @@ impl CurationDraft {
         let includes = objects(&mut map, "includes")?
             .into_iter()
             .map(|mut o| {
-                let id = text(&mut o, "id")?;
-                let position = stamp(&mut o, "position")?.unwrap_or(0);
-                Ok((id, position))
+                Ok(Include {
+                    id: text(&mut o, "id")?,
+                    position: stamp(&mut o, "position")?.unwrap_or(0),
+                    extra: o,
+                })
             })
             .collect::<Result<Vec<_>, ModelError>>()?;
         let excludes = objects(&mut map, "excludes")?
             .into_iter()
-            .map(|mut o| text(&mut o, "id"))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|mut o| {
+                Ok(Exclude {
+                    id: text(&mut o, "id")?,
+                    extra: o,
+                })
+            })
+            .collect::<Result<Vec<_>, ModelError>>()?;
         let metadata = match map.remove("metadata") {
             None | Some(Value::Null) => None,
             Some(Value::Object(o)) => Some(o),
@@ -203,12 +237,16 @@ impl CurationDraft {
             let list: Vec<Value> = self
                 .includes
                 .iter()
-                .map(|(id, position)| json!({"id": id, "position": position}))
+                .map(|i| with_extra(json!({"id": i.id, "position": i.position}), &i.extra))
                 .collect();
             map.insert("includes".into(), Value::Array(list));
         }
         if !self.excludes.is_empty() {
-            let list: Vec<Value> = self.excludes.iter().map(|id| json!({"id": id})).collect();
+            let list: Vec<Value> = self
+                .excludes
+                .iter()
+                .map(|e| with_extra(json!({"id": e.id}), &e.extra))
+                .collect();
             map.insert("excludes".into(), Value::Array(list));
         }
         for (key, value) in [
@@ -268,14 +306,14 @@ pub fn check_curation(draft: &CurationDraft) -> Vec<ItemIssue> {
     if !has_action {
         issues.push(ItemIssue::NoAction);
     }
-    for (id, position) in &draft.includes {
+    for Include { id, position, .. } in &draft.includes {
         if id.is_empty() {
             issues.push(ItemIssue::BadInclude(id.clone()));
         }
         if *position < 1 {
             issues.push(ItemIssue::BadPosition(*position));
         }
-        if !id.is_empty() && draft.excludes.contains(id) {
+        if !id.is_empty() && draft.excludes.iter().any(|e| &e.id == id) {
             issues.push(ItemIssue::IncludedAndExcluded(id.clone()));
         }
     }
@@ -291,6 +329,21 @@ pub fn check_curation(draft: &CurationDraft) -> Vec<ItemIssue> {
 mod tests {
     use super::*;
 
+    fn include(id: &str, position: i64) -> Include {
+        Include {
+            id: id.into(),
+            position,
+            ..Include::default()
+        }
+    }
+
+    fn exclude(id: &str) -> Exclude {
+        Exclude {
+            id: id.into(),
+            ..Exclude::default()
+        }
+    }
+
     /// A draft that passes every check.
     fn good() -> CurationDraft {
         CurationDraft {
@@ -300,7 +353,7 @@ mod tests {
                 r#match: "exact".into(),
                 ..RuleDraft::default()
             },
-            includes: vec![("1".into(), 1)],
+            includes: vec![include("1", 1)],
             stop_processing: true,
             ..CurationDraft::default()
         }
@@ -374,15 +427,15 @@ mod tests {
             .is_empty()
         );
         assert_eq!(
-            with(|d| d.includes = vec![(String::new(), 1)]),
+            with(|d| d.includes = vec![include("", 1)]),
             [ItemIssue::BadInclude(String::new())]
         );
         assert_eq!(
-            with(|d| d.includes = vec![("1".into(), 0)]),
+            with(|d| d.includes = vec![include("1", 0)]),
             [ItemIssue::BadPosition(0)]
         );
         assert_eq!(
-            with(|d| d.excludes = vec!["1".into()]),
+            with(|d| d.excludes = vec![exclude("1")]),
             [ItemIssue::IncludedAndExcluded("1".into())]
         );
         assert_eq!(
@@ -416,10 +469,10 @@ mod tests {
         let mut d = CurationDraft::new_default();
         assert!(d.stop_processing);
         assert!(d.default_remove_tokens() && d.remove_matched_tokens);
-        d.includes.push(("1".into(), 1));
+        d.includes.push(include("1", 1));
         assert!(!d.default_remove_tokens());
         d.includes.clear();
-        d.excludes.push("1".into());
+        d.excludes.push(exclude("1"));
         assert!(!d.default_remove_tokens());
     }
 
@@ -441,7 +494,7 @@ mod tests {
         let draft = CurationDraft::from_value(&stored).unwrap();
         assert!(draft.rule.stem && !draft.rule.synonyms);
         assert_eq!(draft.rule.extra["tessera_new"], json!([1]));
-        assert_eq!(draft.includes, [("1".to_string(), 2)]);
+        assert_eq!(draft.includes, [include("1", 2)]);
         assert_eq!(draft.extra["diversity"], stored["diversity"]);
         assert_eq!(draft.extra["tessera_top"], json!({"x": 1}));
         let back = draft.to_value();
@@ -450,6 +503,23 @@ mod tests {
         expected["rule"].as_object_mut().unwrap().remove("synonyms");
         assert_eq!(back, expected);
         assert_eq!(CurationDraft::from_value(&back).unwrap(), draft);
+    }
+
+    #[test]
+    fn unknown_keys_of_includes_and_excludes_stay() {
+        let stored = json!({
+            "id": "r",
+            "rule": {"tags": ["t"]},
+            "includes": [{"id": "1", "position": 2, "tessera_new": 1}],
+            "excludes": [{"id": "9", "tessera_new": 2}],
+            "remove_matched_tokens": false,
+            "filter_curated_hits": false,
+            "stop_processing": true
+        });
+        assert_eq!(
+            CurationDraft::from_value(&stored).unwrap().to_value(),
+            stored
+        );
     }
 
     #[test]
@@ -465,7 +535,7 @@ mod tests {
         assert_eq!(value["includes"], json!([{"id": "1", "position": 1}]));
         let mut d = good();
         d.rule.stem = true;
-        d.excludes = vec!["2".into()];
+        d.excludes = vec![exclude("2")];
         let value = d.to_value();
         assert_eq!(value["rule"]["stem"], json!(true));
         assert_eq!(value["excludes"], json!([{"id": "2"}]));

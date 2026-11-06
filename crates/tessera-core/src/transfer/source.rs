@@ -174,7 +174,7 @@ pub fn sniff(path: Option<&Path>, head: &[u8]) -> (Format, CsvOptions) {
     (format, CsvOptions::default())
 }
 
-const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+pub(crate) const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 
 /// The bytes the CSV reader has been given and not yet finished with, to number lines:
 /// `csv` reports the line before it skips blank lines, and half a CRLF behind.

@@ -70,10 +70,24 @@ fn keep_known(current: &[String], known: &[String], skip: &str) -> NewList {
     NewList { list, dropped }
 }
 
+/// No set is known while a collection names others: this looks like a failed list, and going
+/// on would detach them all. A caller treats a failed list as an error, never as empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("no sets are known, yet the collection names some")]
+pub struct NoKnownSets;
+
+fn refuse_empty(current: &[String], known: &[String], name: &str) -> Result<(), NoKnownSets> {
+    if known.is_empty() && current.iter().any(|n| n != name) {
+        return Err(NoKnownSets);
+    }
+    Ok(())
+}
+
 /// `current` plus `name`, in order. `known` and `current` must have been read right before:
 /// a stale `known` would detach someone else's new set, a stale `current` undo their attach.
 /// A `name` that is not known is dropped, never listed.
-pub fn with_set(current: &[String], known: &[String], name: &str) -> NewList {
+pub fn with_set(current: &[String], known: &[String], name: &str) -> Result<NewList, NoKnownSets> {
+    refuse_empty(current, known, name)?;
     let mut new = keep_known(current, known, "");
     if !new.list.iter().any(|n| n == name) && !new.dropped.iter().any(|n| n == name) {
         if known.iter().any(|n| n == name) {
@@ -82,12 +96,17 @@ pub fn with_set(current: &[String], known: &[String], name: &str) -> NewList {
             new.dropped.push(name.to_string());
         }
     }
-    new
+    Ok(new)
 }
 
 /// `current` without `name`, in order. Other names that are not known are dropped.
-pub fn without_set(current: &[String], known: &[String], name: &str) -> NewList {
-    keep_known(current, known, name)
+pub fn without_set(
+    current: &[String],
+    known: &[String],
+    name: &str,
+) -> Result<NewList, NoKnownSets> {
+    refuse_empty(current, known, name)?;
+    Ok(keep_known(current, known, name))
 }
 
 /// The body of the `PATCH` that replaces the whole list.
@@ -149,21 +168,21 @@ mod tests {
 
     #[test]
     fn with_set_keeps_order_and_never_lists_a_missing_name() {
-        let got = with_set(&names(&["b", "gone", "a"]), &names(&["a", "b", "c"]), "c");
+        let got = with_set(&names(&["b", "gone", "a"]), &names(&["a", "b", "c"]), "c").unwrap();
         assert_eq!(got.list, ["b", "a", "c"]);
         assert_eq!(got.dropped, ["gone"]);
     }
 
     #[test]
     fn with_set_does_not_list_a_name_twice() {
-        let got = with_set(&names(&["b", "a"]), &names(&["a", "b"]), "b");
+        let got = with_set(&names(&["b", "a"]), &names(&["a", "b"]), "b").unwrap();
         assert_eq!(got.list, ["b", "a"]);
         assert!(got.dropped.is_empty());
     }
 
     #[test]
     fn with_set_refuses_a_name_the_server_does_not_have() {
-        let got = with_set(&names(&["a"]), &names(&["a"]), "new");
+        let got = with_set(&names(&["a"]), &names(&["a"]), "new").unwrap();
         assert_eq!(got.list, ["a"]);
         assert_eq!(got.dropped, ["new"]);
     }
@@ -174,12 +193,30 @@ mod tests {
             &names(&["b", "gone", "a", "c"]),
             &names(&["a", "b", "c"]),
             "a",
-        );
+        )
+        .unwrap();
         assert_eq!(got.list, ["b", "c"]);
         assert_eq!(got.dropped, ["gone"]);
         // Detaching a set that no longer exists is not reported as a drop of its own.
-        let got = without_set(&names(&["gone"]), &[], "gone");
+        let got = without_set(&names(&["gone"]), &[], "gone").unwrap();
         assert!(got.list.is_empty() && got.dropped.is_empty());
+    }
+
+    #[test]
+    fn a_name_in_the_list_that_the_server_lost_is_dropped_not_listed() {
+        let got = with_set(&names(&["a", "gone"]), &names(&["a"]), "gone").unwrap();
+        assert_eq!(got.list, ["a"]);
+        assert_eq!(got.dropped, ["gone"]);
+    }
+
+    #[test]
+    fn no_known_sets_never_empties_a_list() {
+        let current = names(&["a", "b"]);
+        assert_eq!(with_set(&current, &[], "c"), Err(NoKnownSets));
+        assert_eq!(with_set(&current, &[], "a"), Err(NoKnownSets));
+        assert_eq!(without_set(&current, &[], "a"), Err(NoKnownSets));
+        // Nothing attached: there is nothing a failed list could take away.
+        assert_eq!(with_set(&[], &[], "c").unwrap().dropped, ["c"]);
     }
 
     #[test]

@@ -78,7 +78,7 @@ impl SynonymDraft {
         let mut map = Map::new();
         map.insert("id".into(), json!(self.id));
         map.insert("synonyms".into(), json!(self.synonyms));
-        if !self.root.is_empty() {
+        if !self.root.trim().is_empty() {
             map.insert("root".into(), json!(self.root));
         }
         if !self.locale.is_empty() {
@@ -137,6 +137,11 @@ mod tests {
             draft.to_value(),
             json!({"id": "x", "synonyms": ["a", "b"], "tessera_future": {"k": 1}})
         );
+    }
+
+    #[test]
+    fn a_blank_root_is_not_written() {
+        assert!(draft("  ", &["a", "b"]).to_value().get("root").is_none());
     }
 
     #[test]
