@@ -787,6 +787,12 @@ pub struct FakeSearch {
     pub presets: Mutex<Vec<tessera_client::Preset>>,
     /// Every preset saved, in order.
     pub saved_presets: Mutex<Vec<(String, serde_json::Value)>>,
+    /// Every raw request, in order.
+    pub raw_calls: Mutex<Vec<tessera_client::RawRequest>>,
+    /// The status and body of each raw answer.
+    pub raw_answer: Mutex<(u16, String)>,
+    /// Raw requests that ran to their end.
+    pub raw_done: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeSearch {
@@ -902,6 +908,34 @@ impl SearchBackend for FakeSearchBackend {
         let fail = fake.fail.lock().unwrap().clone();
         Box::pin(async move { fail.map_or(Ok(()), |e| Err(http_error(e))) })
     }
+
+    fn raw(
+        &self,
+        _: Client,
+        request: tessera_client::RawRequest,
+    ) -> tessera_app::collections::BoxFuture<Result<tessera_client::RawResponse, Error>> {
+        let fake = self.0.clone();
+        fake.raw_calls.lock().unwrap().push(request);
+        let (status, body) = fake.raw_answer.lock().unwrap().clone();
+        let fail = fake.fail.lock().unwrap().clone();
+        let hold = fake.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            fake.raw_done
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(e) = fail {
+                return Err(http_error(e));
+            }
+            Ok(tessera_client::RawResponse {
+                status,
+                headers: vec![("x-demo".into(), "yes".into())],
+                body,
+                duration: Duration::from_millis(12),
+            })
+        })
+    }
 }
 
 /// Installs a search backend answering with [`search_body`] of 12 documents.
@@ -915,6 +949,9 @@ pub fn install_search_fake(cx: &mut TestAppContext) -> Arc<FakeSearch> {
         multi_body: Mutex::default(),
         presets: Mutex::default(),
         saved_presets: Mutex::default(),
+        raw_calls: Mutex::default(),
+        raw_answer: Mutex::new((200, "{}".to_string())),
+        raw_done: Default::default(),
     });
     let installed = FakeSearchBackend(fake.clone());
     cx.update(|cx| cx.set_global(SearchBackendGlobal(Arc::new(installed))));

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui_kit::Global;
 use serde_json::Value;
-use tessera_client::{Client, Error, MultiSearch, Preset};
+use tessera_client::{Client, Error, MultiSearch, Preset, RawRequest, RawResponse};
 use tessera_core::search::results::{MultiResult, SearchResult, parse_multi, parse_result};
 use tokio::runtime::Handle;
 
@@ -62,6 +62,9 @@ pub trait SearchBackend: Send + Sync {
         name: String,
         value: Value,
     ) -> BoxFuture<Result<(), Error>>;
+
+    /// Sends `request`. A write: run it detached, so closing the tab cannot abort it.
+    fn raw(&self, client: Client, request: RawRequest) -> BoxFuture<Result<RawResponse, Error>>;
 }
 
 /// The backend the views use.
@@ -116,6 +119,10 @@ impl SearchBackend for TokioBackend {
         value: Value,
     ) -> BoxFuture<Result<(), Error>> {
         self.run(async move { client.upsert_preset(&name, &value).await })
+    }
+
+    fn raw(&self, client: Client, request: RawRequest) -> BoxFuture<Result<RawResponse, Error>> {
+        self.run(async move { client.raw(request).await })
     }
 }
 

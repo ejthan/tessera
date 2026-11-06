@@ -9,6 +9,9 @@ use tessera_client::{Method, READ_METHODS, encode_query};
 
 use crate::redact;
 
+/// Largest console body read from a file, which is held in memory.
+pub const RAW_FILE_MAX: u64 = 64 << 20;
+
 /// Why a console path is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathError {
@@ -100,6 +103,18 @@ pub fn raw_query(pairs: &[(String, String)]) -> Result<Option<String>, String> {
     Ok((!pairs.is_empty()).then(|| encode_query(&pairs)))
 }
 
+/// What a query string reads as in the table: the reverse of [`raw_query`].
+pub fn query_rows(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (decode(key), decode(value))
+        })
+        .collect()
+}
+
 /// How much a request must be confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawDanger {
@@ -181,6 +196,8 @@ pub fn outcome_note(path: &str, status: u16, body: &str) -> Option<OutcomeNote> 
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]
@@ -390,6 +407,17 @@ mod tests {
         ] {
             assert!(!param_key_ok(key), "{key:?}");
         }
+    }
+
+    #[test]
+    fn query_rows_read_what_raw_query_wrote() {
+        let pairs = vec![
+            ("q".to_string(), "a&b c".to_string()),
+            ("flag".to_string(), String::new()),
+        ];
+        let query = raw_query(&pairs).unwrap().unwrap();
+        assert_eq!(query_rows(&query), pairs);
+        assert!(query_rows("").is_empty());
     }
 
     #[test]

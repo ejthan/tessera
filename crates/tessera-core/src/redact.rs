@@ -4,7 +4,8 @@
 
 use serde_json::Value;
 
-const MASK: &str = "••••";
+/// What a masked secret reads as.
+pub const MASK: &str = "••••";
 const SECRET_KEYS: [&str; 5] = [
     "api_key",
     "value",
@@ -21,6 +22,12 @@ pub fn is_secret_param(name: &str) -> bool {
         .iter()
         .any(|part| name.contains(part))
         || SECRET_KEYS.contains(&name.as_str())
+}
+
+/// Whether `text` holds a mask and so must not be sent: at a value of JSON, or anywhere in text
+/// that is not JSON, such as JSONL.
+pub fn text_has_mask(text: &str) -> bool {
+    serde_json::from_str(text).map_or_else(|_| text.contains(MASK), |v| contains_mask(&v))
 }
 
 /// Masks the string values of the keys [`is_secret_param`] names (`api_key`, `value`, the
@@ -179,6 +186,14 @@ mod tests {
         let out = json(r#"{"a":{"api_key":"sk"},"keys":[{"value":"abc"}]}"#);
         assert!(!out.contains("sk\"") && !out.contains("abc"));
         assert_eq!(out.matches(MASK).count(), 2);
+    }
+
+    #[test]
+    fn text_has_mask_reads_json_and_jsonl() {
+        assert!(text_has_mask(r#"{"a":{"api_key":"••••"}}"#));
+        assert!(text_has_mask("{\"api_key\":\"••••\"}\n{\"n\":1}"));
+        assert!(!text_has_mask(r#"{"q":"a"}"#));
+        assert!(!text_has_mask("{\"n\":1}\n{\"n\":2}"));
     }
 
     #[test]

@@ -16,14 +16,16 @@ use rust_i18n::t;
 
 use super::connect_dialog::ConnectDialog;
 use super::dock::{
-    CollectionPanel, CollectionsPanel, OverviewPanel, SearchPanel, SidebarPanel, WelcomePanel,
+    CollectionPanel, CollectionsPanel, ConsolePanel, OverviewPanel, SearchPanel, SidebarPanel,
+    WelcomePanel,
 };
 use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
-use crate::actions::{CopyAsCurl, NewConnection, OpenSearchTab, ToggleRequestLog};
+use crate::actions::{CopyAsCurl, NewConnection, OpenConsoleTab, OpenSearchTab, ToggleRequestLog};
 use crate::connection::ConnectionState;
 use crate::state::{
-    AppState, CloseCollection, OpenCollection, OpenCollections, OpenOverview, OpenSearch,
+    AppState, CloseCollection, OpenCollection, OpenCollections, OpenConsole, OpenOverview,
+    OpenSearch,
 };
 
 /// Width of the left sidebar.
@@ -113,6 +115,13 @@ impl RootView {
                     workbench.update(cx, |w, cx| w.load(vec![draft], false, window, cx));
                 }
             }),
+            cx.subscribe_in(
+                &state,
+                window,
+                |this, _, event: &OpenConsole, window, cx| {
+                    this.open_tab(event.0, Kind::Console, window, cx);
+                },
+            ),
             cx.subscribe_in(
                 &state,
                 window,
@@ -252,6 +261,10 @@ impl RootView {
                             let panel = cx.new(|cx| SearchPanel::new(conn, state, window, cx));
                             (PanelId::from(panel.entity_id()), panel_handle(panel))
                         }
+                        Kind::Console => {
+                            let panel = cx.new(|cx| ConsolePanel::new(conn, state, window, cx));
+                            (PanelId::from(panel.entity_id()), panel_handle(panel))
+                        }
                     };
                     (id, Some(handle))
                 }
@@ -272,6 +285,7 @@ impl RootView {
             Some(ConnectionTab::Collections(tab)) => tab.focus_handle(cx).focus(window, cx),
             Some(ConnectionTab::Collection(tab)) => tab.focus_handle(cx).focus(window, cx),
             Some(ConnectionTab::Search(tab)) => tab.focus_handle(cx).focus(window, cx),
+            Some(ConnectionTab::Console(tab)) => tab.focus_handle(cx).focus(window, cx),
             _ => {}
         }
     }
@@ -319,6 +333,7 @@ impl RootView {
                     ConnectionTab::Collections(panel) => area.remove_panel(panel, window, cx),
                     ConnectionTab::Collection(panel) => area.remove_panel(panel, window, cx),
                     ConnectionTab::Search(panel) => area.remove_panel(panel, window, cx),
+                    ConnectionTab::Console(panel) => area.remove_panel(panel, window, cx),
                 }
             }
         });
@@ -367,6 +382,7 @@ enum Kind {
     /// The schema tab of the named collection.
     Collection(String),
     Search,
+    Console,
 }
 
 /// A tab of one connection.
@@ -375,6 +391,7 @@ enum ConnectionTab {
     Collections(Entity<CollectionsPanel>),
     Collection(Entity<CollectionPanel>),
     Search(Entity<SearchPanel>),
+    Console(Entity<ConsolePanel>),
 }
 
 impl ConnectionTab {
@@ -384,6 +401,7 @@ impl ConnectionTab {
             Self::Collections(_) => Kind::Collections,
             Self::Collection(panel) => Kind::Collection(panel.read(cx).name().to_owned()),
             Self::Search(_) => Kind::Search,
+            Self::Console(_) => Kind::Console,
         }
     }
 
@@ -393,6 +411,7 @@ impl ConnectionTab {
             Self::Collections(panel) => panel.entity_id(),
             Self::Collection(panel) => panel.entity_id(),
             Self::Search(panel) => panel.entity_id(),
+            Self::Console(panel) => panel.entity_id(),
         })
     }
 
@@ -402,6 +421,7 @@ impl ConnectionTab {
             Self::Collections(panel) => panel.read(cx).connection().clone(),
             Self::Collection(panel) => panel.read(cx).connection().clone(),
             Self::Search(panel) => panel.read(cx).connection().clone(),
+            Self::Console(panel) => panel.read(cx).connection().clone(),
         }
     }
 }
@@ -417,12 +437,16 @@ fn connection_tab(area: &DockArea, id: PanelId) -> Option<ConnectionTab> {
         Ok(panel) => return Some(ConnectionTab::Collections(panel)),
         Err(view) => view,
     };
-    match view.downcast::<CollectionPanel>() {
-        Ok(panel) => Some(ConnectionTab::Collection(panel)),
+    let view = match view.downcast::<CollectionPanel>() {
+        Ok(panel) => return Some(ConnectionTab::Collection(panel)),
+        Err(view) => view,
+    };
+    match view.downcast::<SearchPanel>() {
+        Ok(panel) => Some(ConnectionTab::Search(panel)),
         Err(view) => view
-            .downcast::<SearchPanel>()
+            .downcast::<ConsolePanel>()
             .ok()
-            .map(ConnectionTab::Search),
+            .map(ConnectionTab::Console),
     }
 }
 
@@ -503,6 +527,11 @@ impl Render for RootView {
                 el.on_action(cx.listener(move |this, _: &OpenSearchTab, _, cx| {
                     this.state.update(cx, |s, cx| s.open_search(id, None, cx));
                 }))
+                .on_action(cx.listener(
+                    move |this, _: &OpenConsoleTab, _, cx| {
+                        this.state.update(cx, |s, cx| s.open_console(id, cx));
+                    },
+                ))
             })
             .bg(theme.background)
             .text_color(theme.foreground)

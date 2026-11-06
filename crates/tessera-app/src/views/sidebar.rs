@@ -25,8 +25,8 @@ use super::env_badge;
 use super::import_dialog::ImportDialog;
 use crate::actions::{
     ConnectSelected, DeleteConnection, DisconnectSelected, EditConnection, ExportProfiles,
-    ImportProfiles, NewConnection, OpenLink, OpenSearchTab, SIDEBAR_ENTRY, SIDEBAR_ENTRY_BUTTON,
-    SIDEBAR_LINK, ToggleReopenLast,
+    ImportProfiles, NewConnection, OpenConsoleTab, OpenLink, OpenSearchTab, SIDEBAR_ENTRY,
+    SIDEBAR_ENTRY_BUTTON, SIDEBAR_LINK, ToggleReopenLast,
 };
 use crate::state::AppState;
 use tessera_widgets::confirm;
@@ -45,6 +45,8 @@ pub struct Sidebar {
     favorite_focus: HashMap<(Uuid, String), FocusHandle>,
     /// Focus handles of the "Search" rows.
     search_focus: HashMap<Uuid, FocusHandle>,
+    /// Focus handles of the "Console" rows.
+    console_focus: HashMap<Uuid, FocusHandle>,
     /// Why the last header action (export, reopen toggle, delete) failed, shown under the header.
     header_error: Option<SharedString>,
     export_task: Option<Task<()>>,
@@ -76,6 +78,7 @@ impl Sidebar {
             collections_focus: HashMap::new(),
             favorite_focus: HashMap::new(),
             search_focus: HashMap::new(),
+            console_focus: HashMap::new(),
             header_error: None,
             export_task: None,
             _subscription: subscription,
@@ -526,6 +529,29 @@ impl Sidebar {
                     open,
                     cx,
                 ))
+            })
+            .when(entry.connected, |el| {
+                let state = self.state.clone();
+                let focus = self
+                    .console_focus
+                    .entry(id)
+                    .or_insert_with(|| cx.focus_handle().tab_stop(true))
+                    .clone();
+                let open = Rc::new(move |cx: &mut gpui_kit::App| {
+                    state.update(cx, |s, cx| s.open_console(id, cx))
+                });
+                el.child(Self::link_row(
+                    format!("sidebar.{id}.console"),
+                    (
+                        SharedString::from(t!("sidebar.console").to_string()),
+                        Kbd::global_binding_for_action(&OpenConsoleTab, window),
+                    ),
+                    &focus,
+                    false,
+                    entry.selected,
+                    open,
+                    cx,
+                ))
             });
         v_flex()
             .child(entry_el)
@@ -544,6 +570,8 @@ impl Render for Sidebar {
         self.collections_focus
             .retain(|id, _| entries.iter().any(|e| e.profile.id == *id && e.connected));
         self.search_focus
+            .retain(|id, _| entries.iter().any(|e| e.profile.id == *id && e.connected));
+        self.console_focus
             .retain(|id, _| entries.iter().any(|e| e.profile.id == *id && e.connected));
         self.favorite_focus.retain(|(id, name), _| {
             entries.iter().any(|e| {
