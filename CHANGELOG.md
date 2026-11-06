@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Resource tabs: a connected entry in the sidebar gets rows for Aliases, Stopwords and Presets, each with its shortcut, ⌥⌘1, ⌥⌘4 and ⌥⌘5 (Ctrl+Alt+1, 4 and 5), and one tab per connection that shows its environment. The palette lists them for the selected connection.
 - Relevance groundwork: the client reads, saves and deletes aliases and stopword sets and deletes presets. A name stays one path segment whatever it holds, a write on a read-only connection is refused before it leaves, and the stopwords a save answers with are not taken for stored, because the server rewrites them.
 - NF3 measured: the headless import of 1,000,000 documents of about 1 KB in JSONL, JSON array and CSV adds 20 to 25 MB to the process and totals 113 to 118 MB with the app's own baseline, against the limit of 300 MB, in 34 to 40 s on a macOS release build; stopping took 13 to 17 ms. The record is in `docs/building.md`, together with the checks on screen that are still open.
 - Infer a schema from a file: Infer from file (⌘O / Ctrl+O) in the schema dialog of a new or cloned collection, and in the one the import opens, proposes the fields from the first 1,000 rows of a chosen file, keeps the name, and asks before it replaces fields already in the draft. The form and the JSON tab both follow, the notes of the inference show above the tabs with Use geopoint where a pair of numbers may be one, and a file that cannot be read says why next to the button.

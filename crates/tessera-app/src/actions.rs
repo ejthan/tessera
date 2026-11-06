@@ -121,7 +121,17 @@ gpui_kit::actions!(
         PasteImport,
         StartTransfer,
         ExportDocuments,
-        InferFromFile
+        InferFromFile,
+        OpenAliases,
+        OpenSynonyms,
+        OpenCurations,
+        OpenStopwords,
+        OpenPresetsTab,
+        NewResource,
+        EditResource,
+        DeleteResource,
+        ReloadResource,
+        FocusResourceFilter
     ]
 );
 
@@ -189,6 +199,8 @@ const EXPORT_INPUT: &str = "DocumentExport > Input";
 pub const CONSOLE: &str = "Console";
 /// Key context of an input in the console, where ⌘↩ / Ctrl+↩ still sends.
 const CONSOLE_INPUT: &str = "Console > Input";
+/// Key context of a resource tab.
+pub const RESOURCES: &str = "Resources";
 /// Key context of a list in a toolbar.
 pub const QUERY_LIST: &str = "QueryList";
 /// The filter of that list, which keeps the focus while the arrows move the selection.
@@ -377,6 +389,22 @@ const OPEN_CONSOLE: &str = "cmd-shift-y";
 #[cfg(not(target_os = "macos"))]
 const OPEN_CONSOLE: &str = "ctrl-shift-y";
 #[cfg(target_os = "macos")]
+const OPEN_RESOURCES: [&str; 5] = [
+    "alt-cmd-1",
+    "alt-cmd-2",
+    "alt-cmd-3",
+    "alt-cmd-4",
+    "alt-cmd-5",
+];
+#[cfg(not(target_os = "macos"))]
+const OPEN_RESOURCES: [&str; 5] = [
+    "ctrl-alt-1",
+    "ctrl-alt-2",
+    "ctrl-alt-3",
+    "ctrl-alt-4",
+    "ctrl-alt-5",
+];
+#[cfg(target_os = "macos")]
 const ADD_QUERY_ROW: &str = "cmd-shift-a";
 #[cfg(not(target_os = "macos"))]
 const ADD_QUERY_ROW: &str = "ctrl-shift-a";
@@ -532,6 +560,16 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     UpdateByQuery,
     OpenSearchTab,
     OpenConsoleTab,
+    OpenAliases,
+    OpenSynonyms,
+    OpenCurations,
+    OpenStopwords,
+    OpenPresetsTab,
+    NewResource,
+    EditResource,
+    DeleteResource,
+    ReloadResource,
+    FocusResourceFilter,
     StopWaiting,
     RemoveBodyFile,
     ShowResponseBody,
@@ -772,6 +810,17 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SAVE, AddField, Some(SCHEMA_LAST_FIELD)),
         KeyBinding::new(OPEN_SEARCH, OpenSearchTab, None),
         KeyBinding::new(OPEN_CONSOLE, OpenConsoleTab, None),
+        KeyBinding::new(OPEN_RESOURCES[0], OpenAliases, None),
+        KeyBinding::new(OPEN_RESOURCES[1], OpenSynonyms, None),
+        KeyBinding::new(OPEN_RESOURCES[2], OpenCurations, None),
+        KeyBinding::new(OPEN_RESOURCES[3], OpenStopwords, None),
+        KeyBinding::new(OPEN_RESOURCES[4], OpenPresetsTab, None),
+        KeyBinding::new(LOCK_AGAIN, LockAgain, Some(RESOURCES)),
+        KeyBinding::new(NEW_COLLECTION, NewResource, Some(RESOURCES)),
+        KeyBinding::new(EDIT, EditResource, Some(RESOURCES)),
+        KeyBinding::new(DELETE, DeleteResource, Some(RESOURCES)),
+        KeyBinding::new(REFRESH, ReloadResource, Some(RESOURCES)),
+        KeyBinding::new(FIND, FocusResourceFilter, Some(RESOURCES)),
         KeyBinding::new(SHOW_FULL_BODY, ShowFullBody, Some(REQUEST_LOG)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(CONSOLE)),
         KeyBinding::new(SAVE, SendRequest, Some(CONSOLE)),

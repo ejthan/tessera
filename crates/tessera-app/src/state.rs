@@ -97,6 +97,58 @@ pub struct OpenSearch(pub Uuid, pub Option<(Vec<SearchDraft>, bool)>);
 /// Asks the window to show the console tab of a profile.
 pub struct OpenConsole(pub Uuid);
 
+/// The relevance resources, each a tab of a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResourceKind {
+    /// Aliases.
+    Aliases,
+    /// Synonym sets.
+    Synonyms,
+    /// Curation sets.
+    Curations,
+    /// Stopword sets.
+    Stopwords,
+    /// Presets.
+    Presets,
+}
+
+impl ResourceKind {
+    /// Every kind, in sidebar order.
+    pub const ALL: [Self; 5] = [
+        Self::Aliases,
+        Self::Synonyms,
+        Self::Curations,
+        Self::Stopwords,
+        Self::Presets,
+    ];
+
+    /// The part of the ids of its row and tab.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Aliases => "aliases",
+            Self::Synonyms => "synonyms",
+            Self::Curations => "curations",
+            Self::Stopwords => "stopwords",
+            Self::Presets => "presets",
+        }
+    }
+
+    /// The locale key of its name.
+    pub fn title_key(self) -> String {
+        format!("sidebar.{}", self.key())
+    }
+
+    /// Whether a server of that support gets a row: a kind appears with its view (UX rule 4),
+    /// and synonym and curation sets do not exist below v30.
+    pub fn shown(self, supported: bool) -> bool {
+        let arrived = matches!(self, Self::Aliases | Self::Stopwords | Self::Presets);
+        arrived && (supported || !matches!(self, Self::Synonyms | Self::Curations))
+    }
+}
+
+/// Asks the window to show a resource tab of a profile.
+pub struct OpenResource(pub Uuid, pub ResourceKind);
+
 /// Asks the window to close the tab of one collection of a profile, which no longer exists.
 pub struct CloseCollection(pub Uuid, pub String);
 
@@ -839,6 +891,13 @@ impl AppState {
         cx.notify();
     }
 
+    /// Asks for the `kind` tab of profile `id`.
+    pub fn open_resource(&mut self, id: Uuid, kind: ResourceKind, cx: &mut Context<Self>) {
+        self.selected = Some(id);
+        cx.emit(OpenResource(id, kind));
+        cx.notify();
+    }
+
     /// Asks for the tab of collection `name` of profile `id` to close.
     pub fn close_collection(&mut self, id: Uuid, name: String, cx: &mut Context<Self>) {
         cx.emit(CloseCollection(id, name));
@@ -886,6 +945,7 @@ impl EventEmitter<OpenCollections> for AppState {}
 impl EventEmitter<OpenCollection> for AppState {}
 impl EventEmitter<OpenSearch> for AppState {}
 impl EventEmitter<OpenConsole> for AppState {}
+impl EventEmitter<OpenResource> for AppState {}
 impl EventEmitter<CloseCollection> for AppState {}
 
 /// Runs a blocking secret-store or file call on tokio's blocking pool.

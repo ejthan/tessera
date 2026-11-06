@@ -9,6 +9,7 @@ pub mod documents;
 pub mod i18n;
 pub mod jobs;
 pub mod poller;
+pub mod relevance;
 pub mod runtime;
 pub mod search;
 pub mod state;
@@ -122,6 +123,9 @@ pub fn run(launch: Launch) -> Result<(), String> {
             handle.clone(),
         )));
         cx.set_global(transfer::TransferBackendGlobal(transfer::tokio_backend(
+            handle.clone(),
+        )));
+        cx.set_global(relevance::RelevanceBackendGlobal(relevance::tokio_backend(
             handle.clone(),
         )));
         cx.set_global(runtime::Tokio(handle));

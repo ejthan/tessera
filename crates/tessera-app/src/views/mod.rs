@@ -17,6 +17,7 @@ pub mod overview;
 pub mod palette;
 pub mod request_detail;
 pub mod request_log;
+pub mod resources;
 pub mod root;
 pub mod schema_dialog;
 pub mod schema_view;

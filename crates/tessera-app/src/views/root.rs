@@ -16,22 +16,23 @@ use rust_i18n::t;
 
 use super::connect_dialog::ConnectDialog;
 use super::dock::{
-    CollectionPanel, CollectionsPanel, ConsolePanel, OverviewPanel, SearchPanel, SidebarPanel,
-    WelcomePanel,
+    CollectionPanel, CollectionsPanel, ConsolePanel, OverviewPanel, ResourcePanel, SearchPanel,
+    SidebarPanel, WelcomePanel,
 };
 use super::jobs::panel::JobsPanel;
 use super::palette::{self, PaletteMode};
 use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
 use crate::actions::{
-    CopyAsCurl, NewConnection, OpenConsoleTab, OpenPalette, OpenSearchTab, QuickSwitch, ToggleJobs,
+    CopyAsCurl, NewConnection, OpenAliases, OpenConsoleTab, OpenCurations, OpenPalette,
+    OpenPresetsTab, OpenSearchTab, OpenStopwords, OpenSynonyms, QuickSwitch, ToggleJobs,
     ToggleRequestLog,
 };
 use crate::connection::ConnectionState;
 use crate::jobs::{JobFinished, JobId, JobKind, Jobs, JobsGlobal, RunningChanged};
 use crate::state::{
     AppState, CloseCollection, OpenCollection, OpenCollections, OpenConsole, OpenOverview,
-    OpenSearch,
+    OpenResource, OpenSearch, ResourceKind,
 };
 
 /// Width of the left sidebar.
@@ -153,6 +154,13 @@ impl RootView {
                 window,
                 |this, _, event: &OpenConsole, window, cx| {
                     this.open_tab(event.0, Kind::Console, window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &state,
+                window,
+                |this, _, event: &OpenResource, window, cx| {
+                    this.open_tab(event.0, Kind::Resource(event.1), window, cx);
                 },
             ),
             cx.subscribe_in(
@@ -413,6 +421,11 @@ impl RootView {
                             let panel = cx.new(|cx| ConsolePanel::new(conn, state, window, cx));
                             (PanelId::from(panel.entity_id()), panel_handle(panel))
                         }
+                        Kind::Resource(kind) => {
+                            let panel =
+                                cx.new(|cx| ResourcePanel::new(conn, state, kind, window, cx));
+                            (PanelId::from(panel.entity_id()), panel_handle(panel))
+                        }
                     };
                     (id, Some(handle))
                 }
@@ -434,6 +447,7 @@ impl RootView {
             Some(ConnectionTab::Collection(tab)) => tab.focus_handle(cx).focus(window, cx),
             Some(ConnectionTab::Search(tab)) => tab.focus_handle(cx).focus(window, cx),
             Some(ConnectionTab::Console(tab)) => tab.focus_handle(cx).focus(window, cx),
+            Some(ConnectionTab::Resource(tab)) => tab.focus_handle(cx).focus(window, cx),
             _ => {}
         }
     }
@@ -482,6 +496,7 @@ impl RootView {
                     ConnectionTab::Collection(panel) => area.remove_panel(panel, window, cx),
                     ConnectionTab::Search(panel) => area.remove_panel(panel, window, cx),
                     ConnectionTab::Console(panel) => area.remove_panel(panel, window, cx),
+                    ConnectionTab::Resource(panel) => area.remove_panel(panel, window, cx),
                 }
             }
         });
@@ -531,6 +546,7 @@ enum Kind {
     Collection(String),
     Search,
     Console,
+    Resource(ResourceKind),
 }
 
 /// A tab of one connection.
@@ -540,6 +556,7 @@ enum ConnectionTab {
     Collection(Entity<CollectionPanel>),
     Search(Entity<SearchPanel>),
     Console(Entity<ConsolePanel>),
+    Resource(Entity<ResourcePanel>),
 }
 
 impl ConnectionTab {
@@ -550,6 +567,7 @@ impl ConnectionTab {
             Self::Collection(panel) => Kind::Collection(panel.read(cx).name().to_owned()),
             Self::Search(_) => Kind::Search,
             Self::Console(_) => Kind::Console,
+            Self::Resource(panel) => Kind::Resource(panel.read(cx).kind()),
         }
     }
 
@@ -560,6 +578,7 @@ impl ConnectionTab {
             Self::Collection(panel) => panel.entity_id(),
             Self::Search(panel) => panel.entity_id(),
             Self::Console(panel) => panel.entity_id(),
+            Self::Resource(panel) => panel.entity_id(),
         })
     }
 
@@ -570,6 +589,7 @@ impl ConnectionTab {
             Self::Collection(panel) => panel.read(cx).connection().clone(),
             Self::Search(panel) => panel.read(cx).connection().clone(),
             Self::Console(panel) => panel.read(cx).connection().clone(),
+            Self::Resource(panel) => panel.read(cx).connection().clone(),
         }
     }
 }
@@ -589,12 +609,16 @@ fn connection_tab(area: &DockArea, id: PanelId) -> Option<ConnectionTab> {
         Ok(panel) => return Some(ConnectionTab::Collection(panel)),
         Err(view) => view,
     };
-    match view.downcast::<SearchPanel>() {
-        Ok(panel) => Some(ConnectionTab::Search(panel)),
+    let view = match view.downcast::<SearchPanel>() {
+        Ok(panel) => return Some(ConnectionTab::Search(panel)),
+        Err(view) => view,
+    };
+    match view.downcast::<ConsolePanel>() {
+        Ok(panel) => Some(ConnectionTab::Console(panel)),
         Err(view) => view
-            .downcast::<ConsolePanel>()
+            .downcast::<ResourcePanel>()
             .ok()
-            .map(ConnectionTab::Console),
+            .map(ConnectionTab::Resource),
     }
 }
 
@@ -648,6 +672,14 @@ impl Render for RootView {
             .and_then(|id| state.connection(id, cx))
             .filter(|c| c.read(cx).connected.is_some())
             .map(|c| c.read(cx).profile.id);
+        let supported = can_search
+            .and_then(|id| state.connection(id, cx))
+            .and_then(|c| c.read(cx).connected.as_ref())
+            .is_some_and(|c| c.info.capabilities.supported);
+        let shown = |kind: ResourceKind| can_search.filter(|_| kind.shown(supported));
+        let open = |this: &mut Self, id, kind, cx: &mut Context<Self>| {
+            this.state.update(cx, |s, cx| s.open_resource(id, kind, cx));
+        };
         let root = v_flex();
         #[cfg(feature = "frame-overlay")]
         let root = root.on_action(|_: &crate::actions::ToggleFrameOverlay, window, _| {
@@ -686,6 +718,31 @@ impl Render for RootView {
                         this.state.update(cx, |s, cx| s.open_console(id, cx));
                     },
                 ))
+            })
+            .when_some(shown(ResourceKind::Aliases), |el, id| {
+                el.on_action(cx.listener(move |this, _: &OpenAliases, _, cx| {
+                    open(this, id, ResourceKind::Aliases, cx);
+                }))
+            })
+            .when_some(shown(ResourceKind::Synonyms), |el, id| {
+                el.on_action(cx.listener(move |this, _: &OpenSynonyms, _, cx| {
+                    open(this, id, ResourceKind::Synonyms, cx);
+                }))
+            })
+            .when_some(shown(ResourceKind::Curations), |el, id| {
+                el.on_action(cx.listener(move |this, _: &OpenCurations, _, cx| {
+                    open(this, id, ResourceKind::Curations, cx);
+                }))
+            })
+            .when_some(shown(ResourceKind::Stopwords), |el, id| {
+                el.on_action(cx.listener(move |this, _: &OpenStopwords, _, cx| {
+                    open(this, id, ResourceKind::Stopwords, cx);
+                }))
+            })
+            .when_some(shown(ResourceKind::Presets), |el, id| {
+                el.on_action(cx.listener(move |this, _: &OpenPresetsTab, _, cx| {
+                    open(this, id, ResourceKind::Presets, cx);
+                }))
             })
             .bg(theme.background)
             .text_color(theme.foreground)
