@@ -55,7 +55,11 @@ gpui_kit::actions!(
         ReviewDocument,
         ToggleSaveMode,
         RevertDocument,
-        ApplyDocument
+        ApplyDocument,
+        ToggleRow,
+        ExtendRows,
+        SelectLoaded,
+        DeleteDocuments
     ]
 );
 
@@ -226,6 +230,10 @@ const SAVE_MODE: &str = "ctrl-shift-m";
 const REVERT: &str = "cmd-shift-r";
 #[cfg(not(target_os = "macos"))]
 const REVERT: &str = "ctrl-shift-r";
+#[cfg(target_os = "macos")]
+const SELECT_ALL: &str = "cmd-a";
+#[cfg(not(target_os = "macos"))]
+const SELECT_ALL: &str = "ctrl-a";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -302,11 +310,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", OpenDocument, Some(DOCUMENTS_TABLE)),
         // Only on the table: elsewhere ⌘C copies the selected text.
         KeyBinding::new(COPY_CELL, CopyCell, Some(DOCUMENTS_TABLE)),
+        // Only on the table: in an input these are text and select all.
+        KeyBinding::new("space", ToggleRow, Some(DOCUMENTS_TABLE)),
+        KeyBinding::new("shift-space", ExtendRows, Some(DOCUMENTS_TABLE)),
+        KeyBinding::new(SELECT_ALL, SelectLoaded, Some(DOCUMENTS_TABLE)),
         // Schema actions must not fire from the documents view, where they are not shown.
         KeyBinding::new(EDIT, NoAction, Some(DOCUMENTS)),
         KeyBinding::new(CLONE, NoAction, Some(DOCUMENTS)),
         KeyBinding::new(TRUNCATE, NoAction, Some(DOCUMENTS)),
-        KeyBinding::new(DELETE, NoAction, Some(DOCUMENTS)),
+        // Deeper than COLLECTION, so here ⌘⌫ never reaches the collection's delete.
+        KeyBinding::new(DELETE, DeleteDocuments, Some(DOCUMENTS)),
         KeyBinding::new(SHOW_FORM, ShowForm, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SHOW_JSON, ShowJson, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SAVE, SubmitSchema, Some(SCHEMA_DIALOG)),

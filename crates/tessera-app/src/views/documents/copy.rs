@@ -31,7 +31,7 @@ pub fn copy_cell(view: &mut DocumentsView, cx: &mut Context<DocumentsView>) {
         return;
     };
     let rows = table.delegate();
-    let (Some(row), Some(column)) = (rows.row(row), rows.columns.get(col)) else {
+    let (Some(row), Some(column)) = (rows.row(row), rows.column_at(col)) else {
         return;
     };
     let text = row.doc.get(&column.key).map(cell_full).unwrap_or_default();

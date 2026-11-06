@@ -78,6 +78,22 @@ pub trait DocumentsBackend: Send + Sync {
         id: String,
         patch: Value,
     ) -> BoxFuture<Result<Value, Error>>;
+
+    /// Deletes document `id`.
+    fn delete(
+        &self,
+        client: Client,
+        collection: String,
+        id: String,
+    ) -> BoxFuture<Result<(), Error>>;
+
+    /// Deletes the documents matching `filter` and answers how many went.
+    fn delete_by_filter(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+    ) -> BoxFuture<Result<u64, Error>>;
 }
 
 /// The backend the views use.
@@ -155,6 +171,24 @@ impl DocumentsBackend for TokioBackend {
         patch: Value,
     ) -> BoxFuture<Result<Value, Error>> {
         self.run(async move { client.patch_document(&collection, &id, &patch).await })
+    }
+
+    fn delete(
+        &self,
+        client: Client,
+        collection: String,
+        id: String,
+    ) -> BoxFuture<Result<(), Error>> {
+        self.run(async move { client.delete_document(&collection, &id).await })
+    }
+
+    fn delete_by_filter(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+    ) -> BoxFuture<Result<u64, Error>> {
+        self.run(async move { client.delete_by_filter(&collection, &filter).await })
     }
 }
 

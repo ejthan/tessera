@@ -423,6 +423,10 @@ pub struct FakeDocs {
     pub writes: Mutex<Vec<(String, String, serde_json::Value)>>,
     /// Writes fail with this status and Typesense message.
     pub write_fail: Mutex<Option<(u16, String)>>,
+    /// Deletes that still pass before `write_fail` applies to them.
+    pub pass_deletes: Mutex<usize>,
+    /// Ids of the first rows, in place of their numbers.
+    pub ids: Mutex<Vec<String>>,
 }
 
 impl FakeDocs {
@@ -455,6 +459,36 @@ impl FakeDocs {
         })
     }
 
+    /// Records a delete of `removed` documents and answers with `value`, or with the failure
+    /// the test set once `pass_deletes` ran out.
+    fn remove<T: Send + 'static>(
+        &self,
+        kind: &str,
+        id: String,
+        body: serde_json::Value,
+        removed: u64,
+        value: T,
+    ) -> tessera_app::collections::BoxFuture<Result<T, Error>> {
+        self.writes.lock().unwrap().push((kind.into(), id, body));
+        let mut pass = self.pass_deletes.lock().unwrap();
+        let answer = match self.write_fail.lock().unwrap().clone() {
+            Some(e) if *pass == 0 => Err(http_error(e)),
+            _ => {
+                *pass = pass.saturating_sub(1);
+                let mut found = self.found.lock().unwrap();
+                *found = found.saturating_sub(removed);
+                Ok(value)
+            }
+        };
+        let hold = self.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
+    }
+
     /// Page numbers asked, in order.
     pub fn page_numbers(&self) -> Vec<u32> {
         self.pages.lock().unwrap().iter().map(|q| q.page).collect()
@@ -470,6 +504,7 @@ impl FakeDocs {
         let found = *self.found.lock().unwrap();
         let extra = self.extra_key.lock().unwrap().clone();
         let value = self.extra_value.lock().unwrap().clone();
+        let ids = self.ids.lock().unwrap().clone();
         let start = u64::from(query.page - 1) * u64::from(query.per_page);
         let end = (start + u64::from(query.per_page)).min(found);
         let descending = query.sort_by.as_ref().is_some_and(|s| s.ends_with(":desc"));
@@ -477,8 +512,11 @@ impl FakeDocs {
         let docs = (start..end)
             .map(|row| {
                 let n = if descending { found - 1 - row } else { row };
+                let id = ids.get(n as usize).cloned();
                 let mut doc = serde_json::json!({
-                    "id": n.to_string(), "title": format!("t{n}"), "price": n,
+                    "id": id.unwrap_or_else(|| n.to_string()),
+                    "title": format!("t{n}"),
+                    "price": n,
                 });
                 if let Some(key) = extra.as_ref().filter(|k| !excluded(k)) {
                     doc[key] = if value.is_null() {
@@ -603,6 +641,32 @@ impl DocumentsBackend for FakeDocsBackend {
             stored[key] = value.clone();
         }
         self.0.write("patch", id, patch, stored)
+    }
+
+    fn delete(
+        &self,
+        _: Client,
+        _: String,
+        id: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0.remove("delete", id, serde_json::Value::Null, 1, ())
+    }
+
+    fn delete_by_filter(
+        &self,
+        _: Client,
+        _: String,
+        filter: String,
+    ) -> tessera_app::collections::BoxFuture<Result<u64, Error>> {
+        // Two backticks per id.
+        let removed = filter.matches('`').count() as u64 / 2;
+        self.0.remove(
+            "delete_by_filter",
+            filter.clone(),
+            filter.into(),
+            removed,
+            removed,
+        )
     }
 }
 
