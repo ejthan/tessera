@@ -48,6 +48,14 @@ impl ServerCapabilities {
             .is_none_or(|v| (v.major, v.minor) >= MIN_SUPPORTED);
         Self { version, supported }
     }
+
+    /// Whether curation rules take `rule.stem` and `rule.synonyms`: from 30.2 on, while 30.0
+    /// drops them silently. An unknown version counts as yes.
+    pub fn rule_flags(&self) -> bool {
+        self.version
+            .as_ref()
+            .is_none_or(|v| (v.major, v.minor) >= (30, 2))
+    }
 }
 
 fn parse_lenient(raw: &str) -> Option<Version> {
@@ -107,6 +115,24 @@ mod tests {
     #[test]
     fn old_version_is_unsupported() {
         assert!(!ServerCapabilities::from_version("29.0").supported);
+    }
+
+    #[test]
+    fn rule_flags_need_30_2() {
+        for (version, flags) in [
+            ("29.0", false),
+            ("30.0", false),
+            ("30.1", false),
+            ("30.2", true),
+            ("31.0", true),
+            ("nightly", true),
+        ] {
+            assert_eq!(
+                ServerCapabilities::from_version(version).rule_flags(),
+                flags,
+                "{version}"
+            );
+        }
     }
 
     #[test]

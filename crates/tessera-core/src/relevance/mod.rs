@@ -2,6 +2,13 @@
 
 //! Aliases, sets and the other resources that shape search results.
 
+pub mod attachment;
+pub mod changes;
+pub mod curations;
+pub mod synonym_file;
+pub mod synonyms;
+pub mod test;
+
 use tessera_client::{Alias, Collection};
 
 /// The longest name Tessera creates. The server has no limit; a URL and a tab should.
