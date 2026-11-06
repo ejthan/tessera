@@ -44,9 +44,10 @@ use super::env_badge;
 use super::overview::grouped;
 use super::schema_view::COPIED_FOR;
 use crate::actions::{
-    ClearFilter, CopyCell, CopyRowJson, DOCUMENTS, DeleteByQuery, DeleteDocuments, ExtendRows,
-    FocusSearch, GoToId, NarrowerColumn, NewDocument, OpenDocument, SelectLoaded, SortByColumn,
-    ToggleColumns, ToggleInspector, TogglePinColumn, ToggleRow, UpdateByQuery, WiderColumn,
+    ClearFilter, CopyCell, CopyCsv, CopyCurl, CopyJsonl, CopyRowJson, DOCUMENTS, DeleteByQuery,
+    DeleteDocuments, ExtendRows, FocusSearch, GoToId, NarrowerColumn, NewDocument, OpenDocument,
+    SelectLoaded, SortByColumn, ToggleColumns, ToggleInspector, TogglePinColumn, ToggleRow,
+    UpdateByQuery, WiderColumn,
 };
 use crate::connection::{CollectionChanged, ConnectionState};
 use crate::documents::DocumentsBackendGlobal;
@@ -810,7 +811,7 @@ impl DocumentsView {
         }
         let target = self.table.read(cx).focus_handle(cx);
         let menu = PopupMenu::build(window, cx, move |menu, _, _| {
-            copy::entries(menu.action_context(target))
+            copy::entries(menu.action_context(target), true)
         });
         menu.focus_handle(cx).focus(window, cx);
         let closed = cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
@@ -963,6 +964,7 @@ impl DocumentsView {
             && !self.table.read(cx).delegate().query_pending()
             && (!self.table.read(cx).delegate().selection.is_empty()
                 || self.selected_id(cx).is_some());
+        let has_rows = copy::has_rows(self, cx);
         let locked = self.connection.read(cx).writes_locked();
         h_flex()
             .gap_2()
@@ -976,7 +978,7 @@ impl DocumentsView {
                     .dropdown_caret(true)
                     .label(label.to_string())
                     .dropdown_menu(move |menu, _, _| {
-                        copy::entries(menu.action_context(target.clone()))
+                        copy::entries(menu.action_context(target.clone()), has_rows)
                     }),
             )
             .child(
@@ -1101,7 +1103,8 @@ impl Render for DocumentsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.table.read(cx).delegate();
         let query_error = rows.query_error.clone();
-        let error = rows.error.clone().or_else(|| self.copy_error.clone());
+        let error = rows.error.clone();
+        let copy_error = self.copy_error.clone();
         let delete_error = rows.delete_error.clone();
         let bulk_result = rows.bulk_result.clone();
         let selection_note = selection_note(rows);
@@ -1160,6 +1163,13 @@ impl Render for DocumentsView {
             .on_action(
                 cx.listener(|this, _: &CopyRowJson, window, cx| copy::copy_row(this, window, cx)),
             )
+            .on_action(cx.listener(|this, _: &CopyJsonl, window, cx| {
+                copy::copy_selection(this, copy::CopyFormat::Jsonl, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyCsv, window, cx| {
+                copy::copy_selection(this, copy::CopyFormat::Csv, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyCurl, _, cx| copy::copy_curl(this, cx)))
             .on_action(cx.listener(|this, _: &ToggleRow, _, cx| this.check_selected(false, cx)))
             .on_action(cx.listener(|this, _: &ExtendRows, _, cx| this.check_selected(true, cx)))
             .on_action(cx.listener(|this, _: &SelectLoaded, _, cx| this.check_loaded(cx)))
@@ -1249,6 +1259,15 @@ impl Render for DocumentsView {
             .children(error.map(|e| {
                 div()
                     .id("documents.error")
+                    .test_support()
+                    .aria_label(e.clone())
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(e)
+            }))
+            .children(copy_error.map(|e| {
+                div()
+                    .id("documents.copy.error")
                     .test_support()
                     .aria_label(e.clone())
                     .text_sm()

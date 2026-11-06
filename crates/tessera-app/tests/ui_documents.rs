@@ -1350,14 +1350,14 @@ async fn failed_copy_row_shows_above_the_table(cx: &mut TestAppContext) {
     f.act(cx, |window, cx| window.press(COPY_ROW, cx));
     f.settle(cx);
     f.act(cx, |window, _| {
-        assert!(label(window, "documents.error").contains("boom"));
+        assert!(label(window, "documents.copy.error").contains("boom"));
     });
     assert_eq!(f.clipboard(cx), None);
     *f.docs.document_fail.lock().unwrap() = None;
     f.act(cx, |window, cx| window.press(COPY_ROW, cx));
     f.settle(cx);
     f.act(cx, |window, _| {
-        assert!(window.try_find("documents.error").is_none());
+        assert!(window.try_find("documents.copy.error").is_none());
     });
 }
 
@@ -1370,7 +1370,7 @@ async fn moving_the_selection_clears_a_failed_copy(cx: &mut TestAppContext) {
     f.settle(cx);
     f.select_row(cx, 5);
     f.act(cx, |window, _| {
-        assert!(window.try_find("documents.error").is_none());
+        assert!(window.try_find("documents.copy.error").is_none());
     });
 }
 
@@ -3297,4 +3297,224 @@ async fn command_enter_continues_from_the_filter(cx: &mut TestAppContext) {
     f.bulk(cx, DELETE_QUERY, "price:>1");
     f.press(cx, SAVE);
     assert!(f.has(cx, "confirm.ok"));
+}
+
+fn lines(text: &str) -> Vec<serde_json::Value> {
+    text.lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[gpui_kit::test]
+async fn jsonl_copies_the_selection(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.tick(cx, "1");
+    f.tick(cx, "3");
+    f.press(cx, COPY_JSONL);
+    let text = f.clipboard(cx).unwrap();
+    let docs = lines(&text);
+    assert_eq!(
+        docs.iter()
+            .map(|d| d["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["1", "3"]
+    );
+    assert_eq!(*f.docs.export_calls.lock().unwrap(), ["id:[`1`,`3`]"]);
+    assert!(f.docs.document_calls.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn jsonl_of_the_selected_row_when_nothing_is_ticked(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 4);
+    f.press(cx, COPY_JSONL);
+    let docs = lines(&f.clipboard(cx).unwrap());
+    assert_eq!(docs[0]["id"], "4");
+    // One id takes the document endpoint, which also carries the vector fields.
+    assert!(docs[0].get("embedding").is_some());
+    assert!(f.docs.export_calls.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn csv_uses_the_visible_columns_in_order(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.tick(cx, "1");
+    f.tick(cx, "2");
+    f.press(cx, COPY_CSV);
+    let keys = f.column_keys(cx);
+    let text = f.clipboard(cx).unwrap();
+    let rows: Vec<&str> = text.lines().collect();
+    assert_eq!(rows[0], keys.join(","));
+    assert!(!rows[0].contains("__select"));
+    assert_eq!(rows.len(), 3);
+    let cell = |row: &str, key: &str| {
+        row.split(',')
+            .nth(keys.iter().position(|k| k == key).unwrap())
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(cell(rows[1], "title"), "t1");
+    assert_eq!(cell(rows[2], "id"), "2");
+}
+
+#[gpui_kit::test]
+async fn csv_quotes_values(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.stored.lock().unwrap() =
+        Some(json!({"id": "7", "title": "say \"hi\", ok", "price": 1.5}));
+    f.select_row(cx, 7);
+    f.press(cx, COPY_CSV);
+    let text = f.clipboard(cx).unwrap();
+    assert!(text.contains("\"say \"\"hi\"\", ok\""), "{text}");
+    assert!(text.contains("1.5"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn selection_is_batched_for_export(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 250).await;
+    // Long ids, so one filter cannot hold them all.
+    *f.docs.ids.lock().unwrap() = (0..250).map(|i| format!("doc-{i:0>40}")).collect();
+    f.change_schema(cx, plain_schema());
+    f.select_row(cx, 0);
+    f.press(cx, SELECT_ALL);
+    f.press(cx, COPY_JSONL);
+    let calls = f.docs.export_calls.lock().unwrap().clone();
+    assert!(calls.len() >= 2, "{}", calls.len());
+    assert!(calls.iter().all(|c| c.len() < 7_500 * 2));
+    assert_eq!(lines(&f.clipboard(cx).unwrap()).len(), 250);
+}
+
+#[gpui_kit::test]
+async fn backtick_id_uses_the_document_endpoint(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.ids.lock().unwrap() = vec!["a`b".into(), "1".into(), "x*".into()];
+    f.change_schema(cx, plain_schema());
+    f.tick(cx, "a`b");
+    f.tick(cx, "x*");
+    f.tick(cx, "1");
+    f.press(cx, COPY_JSONL);
+    assert_eq!(*f.docs.export_calls.lock().unwrap(), ["id:[`1`]"]);
+    assert_eq!(*f.docs.document_calls.lock().unwrap(), ["a`b", "x*"]);
+    assert_eq!(lines(&f.clipboard(cx).unwrap()).len(), 3);
+}
+
+#[gpui_kit::test]
+async fn dot_ids_are_exported_by_their_own_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.ids.lock().unwrap() = vec![".".into(), "..".into()];
+    f.change_schema(cx, plain_schema());
+    f.tick(cx, ".");
+    f.press(cx, COPY_JSONL);
+    assert_eq!(*f.docs.export_calls.lock().unwrap(), ["id:[`.`]"]);
+    assert!(f.docs.document_calls.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn copy_error_shows_inline(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.export_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.tick(cx, "1");
+    f.tick(cx, "2");
+    f.press(cx, COPY_JSONL);
+    f.act(cx, |window, _| {
+        assert!(label(window, "documents.copy.error").contains("boom"));
+    });
+    assert_eq!(f.clipboard(cx), None);
+    *f.docs.export_fail.lock().unwrap() = None;
+    f.press(cx, COPY_JSONL);
+    f.act(cx, |window, _| {
+        assert!(window.try_find("documents.copy.error").is_none());
+    });
+}
+
+#[gpui_kit::test]
+async fn curl_for_a_row_has_the_placeholder_key(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 2);
+    f.press(cx, COPY_DOC_CURL);
+    let text = f.clipboard(cx).unwrap();
+    assert!(text.starts_with("curl "), "{text}");
+    assert!(
+        text.contains("/collections/products/documents/2'"),
+        "{text}"
+    );
+    assert!(
+        text.contains("X-TYPESENSE-API-KEY: $TYPESENSE_API_KEY"),
+        "{text}"
+    );
+    assert!(!text.contains("-X"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn curl_for_a_dot_id_is_refused_inline(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.ids.lock().unwrap() = vec!["..".into()];
+    f.change_schema(cx, plain_schema());
+    f.select_row(cx, 0);
+    f.press(cx, COPY_DOC_CURL);
+    assert_eq!(f.clipboard(cx), None);
+    f.act(cx, |window, _| {
+        assert!(!label(window, "documents.copy.error").is_empty());
+    });
+}
+
+#[gpui_kit::test]
+async fn curl_without_a_row_repeats_the_search(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.submit_filter(cx, "price:>1 && title:=a");
+    f.press(cx, COPY_DOC_CURL);
+    let text = f.clipboard(cx).unwrap();
+    assert!(
+        text.contains("/collections/products/documents/search?"),
+        "{text}"
+    );
+    for part in [
+        "q=%2A",
+        "per_page=250",
+        "enable_curations=false",
+        "filter_by=price%3A%3E1%20%26%26%20title%3A%3Da",
+    ] {
+        assert!(text.contains(part), "{part} in {text}");
+    }
+    assert!(!text.contains("sort_by"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn selection_entries_are_disabled_without_rows(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.click(cx, "documents.copy");
+    f.wait_for_menu(cx).await;
+    f.act(cx, |window, cx| {
+        let mut menu = window.within("popup-menu");
+        assert_eq!(menu.find(2).label(), Some("Copy selection as JSONL"));
+        assert_eq!(menu.find(4).label(), Some("Copy as curl"));
+        // A disabled entry does not dismiss the menu.
+        menu.click(2, cx);
+    });
+    f.act(cx, |window, _| {
+        assert!(window.try_find("popup-menu").is_some())
+    });
+    f.act(cx, |window, cx| window.within("popup-menu").click(4, cx));
+    f.act(cx, |window, _| {
+        assert!(window.try_find("popup-menu").is_none())
+    });
+    assert!(f.clipboard(cx).unwrap().contains("documents/search"));
+}
+
+#[gpui_kit::test]
+async fn copy_menu_lists_the_new_shortcuts(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 1);
+    f.click(cx, "documents.copy");
+    f.wait_for_menu(cx).await;
+    f.act(cx, |_, _| {});
+    for chord in [
+        key("kbd:alt-cmd-j", "kbd:ctrl-alt-j"),
+        key("kbd:alt-cmd-s", "kbd:ctrl-alt-s"),
+        key("kbd:alt-cmd-u", "kbd:ctrl-alt-u"),
+    ] {
+        gpui_kit::VisualTestContext::from_window(f.handle.into(), cx)
+            .debug_bounds(chord)
+            .unwrap_or_else(|| panic!("no Kbd for {chord}"));
+    }
 }

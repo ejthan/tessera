@@ -111,6 +111,14 @@ pub trait DocumentsBackend: Send + Sync {
         filter: String,
         partial: Value,
     ) -> BoxFuture<Result<u64, Error>>;
+
+    /// The documents matching `filter` as JSONL, as the server exports them.
+    fn export(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+    ) -> BoxFuture<Result<String, Error>>;
 }
 
 /// The backend the views use.
@@ -229,6 +237,15 @@ impl DocumentsBackend for TokioBackend {
                 .update_by_filter(&collection, &filter, &partial)
                 .await
         })
+    }
+
+    fn export(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+    ) -> BoxFuture<Result<String, Error>> {
+        self.run(async move { client.export_documents(&collection, &filter).await })
     }
 }
 

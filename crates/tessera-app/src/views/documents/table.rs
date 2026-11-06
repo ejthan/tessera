@@ -559,7 +559,7 @@ impl TableDelegate for DocRows {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
-        copy::entries(menu)
+        copy::entries(menu, true)
     }
 
     fn loading(&self, _: &App) -> bool {

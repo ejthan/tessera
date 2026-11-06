@@ -433,6 +433,10 @@ pub struct FakeDocs {
     pub count_calls: Mutex<Vec<Option<String>>>,
     /// What `update_by_filter` answers instead of the documents matching.
     pub num_updated: Mutex<Option<u64>>,
+    /// The filter of every `export`, in order.
+    pub export_calls: Mutex<Vec<String>>,
+    /// `export` fails with this status and Typesense message.
+    pub export_fail: Mutex<Option<(u16, String)>>,
 }
 
 impl FakeDocs {
@@ -711,6 +715,31 @@ impl DocumentsBackend for FakeDocsBackend {
         self.0
             .remove("update_by_filter", filter, partial, 0, updated)
     }
+
+    fn export(
+        &self,
+        _: Client,
+        _: String,
+        filter: String,
+    ) -> tessera_app::collections::BoxFuture<Result<String, Error>> {
+        self.0.export_calls.lock().unwrap().push(filter.clone());
+        let answer = match self.0.export_fail.lock().unwrap().clone() {
+            Some(e) => Err(http_error(e)),
+            // The ids between backticks, each as the page shows it.
+            None => Ok(filter
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .map(|id| {
+                    let n: u64 = id.parse().unwrap_or(0);
+                    serde_json::json!({"id": id, "title": format!("t{id}"), "price": n}).to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"),
+        };
+        Box::pin(async move { answer })
+    }
 }
 
 /// Installs a documents backend with no documents; the test sets what it answers.
@@ -810,6 +839,9 @@ pub const INSPECTOR: &str = key("cmd-i", "ctrl-i");
 pub const GO_TO: &str = key("cmd-g", "ctrl-g");
 pub const COPY_CELL: &str = key("cmd-c", "ctrl-c");
 pub const COPY_ROW: &str = key("cmd-alt-c", "ctrl-alt-c");
+pub const COPY_JSONL: &str = key("cmd-alt-j", "ctrl-alt-j");
+pub const COPY_CSV: &str = key("cmd-alt-s", "ctrl-alt-s");
+pub const COPY_DOC_CURL: &str = key("cmd-alt-u", "ctrl-alt-u");
 pub const NEW_DOCUMENT: &str = key("cmd-shift-n", "ctrl-shift-n");
 pub const SAVE_MODE: &str = key("cmd-shift-m", "ctrl-shift-m");
 pub const REVERT: &str = key("cmd-shift-r", "ctrl-shift-r");

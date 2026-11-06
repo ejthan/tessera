@@ -87,6 +87,28 @@ The cluster uses the fixed subnet 172.30.111.0/24 (static peering IPs); if Docke
 
 Run them single-threaded: two tests stop and restart ts3. `TESSERA_CLUSTER_URLS` (comma separated, in the order ts1, ts2, ts3) overrides the URLs. With the override set, the two stop/start tests skip (they print why), because they stop the local compose ts3, not a node of the other cluster. CI runs them nightly (`.github/workflows/nightly.yml`).
 
+## Manual checks of the document browser (M3)
+
+Nothing here runs in CI or from a script: it needs a person at the machine, because the numbers come from the frame overlay on screen. NF2 is **not measured** until someone records the results below in PR C's description.
+
+### NF2: 200k rows at 60 fps
+
+Hardware: an Apple M1 or comparable machine, a release build, no other heavy load.
+
+1. `TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d`, then `cargo xtask seed --url http://localhost:18108 --reset` (about 10 s for `products`).
+2. `cargo run --release -p tessera-app --features frame-overlay`, connect to `localhost:18108` with key `xyz`, open `products`.
+3. Press ⌥⌘F (Ctrl+Alt+F) twice to show the detailed overlay.
+4. With the default columns: wheel-scroll for 30 s, then drag the scrollbar from end to end for 30 s. Read the draw time p95 from the overlay. Repeat with all columns shown (Columns popover).
+5. In a terminal run `ps -o rss= -p <pid>` every 10 s during a 5-minute scroll. Pass: flat after the first pass over the data.
+6. Pass: p95 draw time at most 16.6 ms. Record p95 for both column sets, the RSS at the start and the end, and the machine in the PR description. If p95 is higher, profile before merging; the first suspects are the allocations in `render_td` and the number of visible columns.
+
+### Other checks to do on screen
+
+- `products`: scroll to the middle and the end, sort by `price`, filter `price:>100`, and check that the status line and the rows agree.
+- Tick rows with the mouse, Shift+click and Space; delete two, then delete by query with a filter that matches more than 1,000 documents and check that it asks for the collection name.
+- Update by query with a value of the wrong type shows the warning, not a success.
+- Copy a selection as JSONL, CSV and curl and paste each into a terminal or editor.
+
 ## Smoke start
 
 ```bash

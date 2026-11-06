@@ -25,7 +25,7 @@ pub(crate) fn addressable(segment: &str) -> Result<(), Error> {
 }
 
 /// `collections/{name}{rest}` with `name` encoded as one path segment.
-pub(crate) fn collection_path(name: &str, rest: &str) -> Result<String, Error> {
+pub fn collection_path(name: &str, rest: &str) -> Result<String, Error> {
     addressable(name)?;
     Ok(format!(
         "collections/{}{rest}",

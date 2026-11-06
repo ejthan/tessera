@@ -38,6 +38,7 @@ async fn search_builds_the_query_and_decodes_hits() {
         .and(query_param("filter_by", "year:>2000 && a:=b"))
         .and(query_param("sort_by", "price:desc"))
         .and(query_param("exclude_fields", "embedding"))
+        .and(query_param("enable_curations", "false"))
         .respond_with(ResponseTemplate::new(200).set_body_string(SEARCH))
         .expect(1)
         .mount(&server)

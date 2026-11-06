@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-pub use collections::{Alias, Collection, Field, SchemaChange};
-pub use documents::{DocumentQuery, SearchPage};
+pub use collections::{Alias, Collection, Field, SchemaChange, collection_path};
+pub use documents::{DocumentQuery, SearchPage, document_path, encode_query};
 pub use error::Error;
 pub use event::{BODY_LIMIT, Body, Origin, RequestEvent, RequestHook};
 pub use models::{CollectionSummary, Debug, Health, KeyAccess, Metrics, RaftState, Stats};

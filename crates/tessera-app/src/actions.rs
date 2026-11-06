@@ -51,6 +51,9 @@ gpui_kit::actions!(
         GoToId,
         CopyCell,
         CopyRowJson,
+        CopyJsonl,
+        CopyCsv,
+        CopyCurl,
         NewDocument,
         ReviewDocument,
         ToggleSaveMode,
@@ -230,6 +233,18 @@ const COPY_ROW: &str = "cmd-alt-c";
 #[cfg(not(target_os = "macos"))]
 const COPY_ROW: &str = "ctrl-alt-c";
 #[cfg(target_os = "macos")]
+const COPY_JSONL: &str = "cmd-alt-j";
+#[cfg(not(target_os = "macos"))]
+const COPY_JSONL: &str = "ctrl-alt-j";
+#[cfg(target_os = "macos")]
+const COPY_CSV: &str = "cmd-alt-s";
+#[cfg(not(target_os = "macos"))]
+const COPY_CSV: &str = "ctrl-alt-s";
+#[cfg(target_os = "macos")]
+const COPY_DOC_CURL: &str = "cmd-alt-u";
+#[cfg(not(target_os = "macos"))]
+const COPY_DOC_CURL: &str = "ctrl-alt-u";
+#[cfg(target_os = "macos")]
 const SAVE_MODE: &str = "cmd-shift-m";
 #[cfg(not(target_os = "macos"))]
 const SAVE_MODE: &str = "ctrl-shift-m";
@@ -315,6 +330,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(TOGGLE_INSPECTOR, ToggleInspector, Some(DOCUMENTS)),
         KeyBinding::new(GO_TO_ID, GoToId, Some(DOCUMENTS)),
         KeyBinding::new(COPY_ROW, CopyRowJson, Some(DOCUMENTS)),
+        KeyBinding::new(COPY_JSONL, CopyJsonl, Some(DOCUMENTS)),
+        KeyBinding::new(COPY_CSV, CopyCsv, Some(DOCUMENTS)),
+        KeyBinding::new(COPY_DOC_CURL, CopyCurl, Some(DOCUMENTS)),
         // The same chord as New collection, which is bound only in COLLECTIONS.
         KeyBinding::new(NEW_COLLECTION, NewDocument, Some(DOCUMENTS)),
         KeyBinding::new(SAVE, ReviewDocument, Some(INSPECTOR)),

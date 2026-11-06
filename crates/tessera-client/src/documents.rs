@@ -72,7 +72,7 @@ struct RawCount {
 }
 
 /// `k=v&k=v` with every value percent-encoded as one segment, so `&&` in a filter survives.
-pub(crate) fn encode_query(pairs: &[(&str, &str)]) -> String {
+pub fn encode_query(pairs: &[(&str, &str)]) -> String {
     pairs
         .iter()
         .map(|(k, v)| format!("{k}={}", utf8_percent_encode(v, SEGMENT)))
@@ -85,9 +85,9 @@ pub(crate) fn segment(s: &str) -> String {
     utf8_percent_encode(s, SEGMENT).to_string()
 }
 
-/// `collections/{c}/documents/{id}`. `..` would address the collection itself, and a DELETE
+/// `collections/{c}/documents/{id}`, each encoded as one segment. `..` would address the collection itself, and a DELETE
 /// would remove it.
-fn document_path(collection: &str, id: &str) -> Result<String, Error> {
+pub fn document_path(collection: &str, id: &str) -> Result<String, Error> {
     addressable(id)?;
     collection_path(collection, &format!("/documents/{}", segment(id)))
 }
@@ -99,14 +99,20 @@ impl Client {
         serde_json::from_str(&body).map_err(Error::Decode)
     }
 
-    /// `GET /collections/{c}/documents/search?q=*`: one page of documents.
+    /// `GET /collections/{c}/documents/search?q=*`: one page of documents. Curation sets are
+    /// off, so a rule cannot hide rows and `found` agrees with [`Self::count_documents`].
     pub async fn search_documents(
         &self,
         collection: &str,
         query: &DocumentQuery,
     ) -> Result<SearchPage, Error> {
         let (page, per_page) = (query.page.to_string(), query.per_page.to_string());
-        let mut pairs = vec![("q", "*"), ("per_page", &per_page), ("page", &page)];
+        let mut pairs = vec![
+            ("q", "*"),
+            ("per_page", &per_page),
+            ("page", &page),
+            ("enable_curations", "false"),
+        ];
         for (key, value) in [
             ("filter_by", &query.filter_by),
             ("sort_by", &query.sort_by),

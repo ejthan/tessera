@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use secrecy::SecretString;
-use tessera_client::{Client, ClientOptions, Error, KeyAccess, RaftState};
+use tessera_client::{Client, ClientOptions, DocumentQuery, Error, KeyAccess, RaftState};
 
 fn url() -> String {
     std::env::var("TESSERA_IT_URL").unwrap_or_else(|_| "http://localhost:18108".into())
@@ -573,6 +573,42 @@ async fn live_odd_ids_delete_only_themselves() {
     assert_eq!(after.unwrap(), 2);
 }
 
+/// What "Copy selection" exports for the ids it puts in a filter, `.` and `..` included.
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_export_by_id_filter_returns_only_those() {
+    use serde_json::json;
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_export_ids";
+    let _ = client.delete_collection(name).await;
+    client
+        .create_collection(&json!({"name":name,"fields":[{"name":"t","type":"string"}]}))
+        .await
+        .unwrap();
+    for id in [".", "..", "a", "b"] {
+        client
+            .create_document(name, &json!({"id":id,"t":"x"}))
+            .await
+            .unwrap();
+    }
+    let dot = client.export_documents(name, "id:[`.`]").await;
+    let dots = client.export_documents(name, "id:[`..`]").await;
+    let some = client.export_documents(name, "id:[`a`,`b`]").await;
+    let _ = client.delete_collection(name).await;
+    let ids = |text: String| -> Vec<String> {
+        let mut ids: Vec<String> = text
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["id"].to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(ids(dot.unwrap()), ["\".\""]);
+    assert_eq!(ids(dots.unwrap()), ["\"..\""]);
+    assert_eq!(ids(some.unwrap()), ["\"a\"", "\"b\""]);
+}
+
 /// What the bulk dialog refuses and why: the count and the write disagree on these filters.
 #[tokio::test]
 #[ignore = "needs a Typesense server"]
@@ -662,9 +698,20 @@ async fn live_count_is_what_a_delete_removes_under_a_curation_set() {
         .expect("import");
         assert!(imported.status().is_success());
         let counted = client.count_documents(name, Some("n:>5")).await;
+        // The table's page must show the same figure.
+        let query = DocumentQuery {
+            page: 1,
+            per_page: 250,
+            filter_by: Some("n:>5".into()),
+            sort_by: None,
+            exclude_fields: None,
+        };
+        let paged = client.search_documents(name, &query).await;
         let deleted = client.delete_by_filter(name, "n:>5").await;
         let _ = client.delete_collection(name).await;
-        seen.push((counted.unwrap(), deleted.unwrap()));
+        let paged = paged.unwrap();
+        assert_eq!(paged.documents.len() as u64, paged.found);
+        seen.push((counted.unwrap(), paged.found, deleted.unwrap()));
     }
     admin(
         reqwest::Method::DELETE,
@@ -672,5 +719,5 @@ async fn live_count_is_what_a_delete_removes_under_a_curation_set() {
         None,
     )
     .await;
-    assert_eq!(seen, [(7, 7), (7, 7), (7, 7)]);
+    assert_eq!(seen, [(7, 7, 7), (7, 7, 7), (7, 7, 7)]);
 }
