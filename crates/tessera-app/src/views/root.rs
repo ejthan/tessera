@@ -24,9 +24,9 @@ use super::palette::{self, PaletteMode};
 use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
 use crate::actions::{
-    CopyAsCurl, NewConnection, OpenAliases, OpenAnalytics, OpenConsoleTab, OpenCurations, OpenKeys,
-    OpenPalette, OpenPresetsTab, OpenSearchTab, OpenStemming, OpenStopwords, OpenSynonyms,
-    QuickSwitch, ToggleJobs, ToggleRequestLog,
+    CopyAsCurl, NewConnection, OpenAi, OpenAliases, OpenAnalytics, OpenConsoleTab, OpenCurations,
+    OpenKeys, OpenPalette, OpenPresetsTab, OpenSearchTab, OpenStemming, OpenStopwords,
+    OpenSynonyms, QuickSwitch, ToggleJobs, ToggleRequestLog,
 };
 use crate::connection::ConnectionState;
 use crate::jobs::{JobFinished, JobId, JobKind, Jobs, JobsGlobal, RunningChanged};
@@ -780,6 +780,11 @@ impl Render for RootView {
             .when_some(shown(ResourceKind::Presets), |el, id| {
                 el.on_action(cx.listener(move |this, _: &OpenPresetsTab, _, cx| {
                     open(this, id, ResourceKind::Presets, cx);
+                }))
+            })
+            .when_some(shown(ResourceKind::Ai), |el, id| {
+                el.on_action(cx.listener(move |this, _: &OpenAi, _, cx| {
+                    open(this, id, ResourceKind::Ai, cx);
                 }))
             })
             .when_some(shown(ResourceKind::Stemming), |el, id| {

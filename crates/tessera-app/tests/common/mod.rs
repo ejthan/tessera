@@ -7,7 +7,7 @@
 // Helpers unwrap; a panic is the test failure we want.
 #![allow(clippy::unwrap_used)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -37,8 +37,8 @@ use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::root::RootView;
 use tessera_client::{
     Alias, ApiKey, Client, ClientOptions, Collection, CollectionSummary, CreatedKey, Debug,
-    DocumentQuery, Error, Health, ItemSet, KeyAccess, Metrics, NewKey, NodeClient, Origin,
-    SchemaChange, SetKind, Stats, StopwordSet,
+    DocumentQuery, Error, Health, ItemSet, KeyAccess, Metrics, ModelKind, NewKey, NodeClient,
+    Origin, SchemaChange, SetKind, Stats, StopwordSet,
 };
 use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
@@ -1672,6 +1672,9 @@ pub fn fake_relevance(cx: &mut TestAppContext) -> Arc<FakeRelevance> {
 /// The value every key [`FakeAdmin`] creates has.
 pub const VALUE: &str = "fakeKeyValueThatMustStaySecret";
 
+/// The collection and parameters of an `ai_search`.
+pub type AiSearch = (String, Vec<(String, String)>);
+
 /// The key, collection and parameters of a `scoped_search`.
 pub type ScopedSearch = (String, String, Vec<(String, String)>);
 
@@ -1708,6 +1711,18 @@ pub struct FakeAdmin {
     pub file: Mutex<Option<Result<Vec<tessera_client::StemmingWord>, DictionaryFileError>>>,
     /// What `import_dictionary` answers, instead of nothing wrong.
     pub check: Mutex<Option<tessera_core::stemming::ImportCheck>>,
+    /// The conversation models on the server.
+    pub conversation_models: Mutex<Vec<serde_json::Map<String, Value>>>,
+    /// The NL search models on the server.
+    pub nl_models: Mutex<Vec<serde_json::Map<String, Value>>>,
+    /// Every create (`None`) and update of a model: its id, and the body.
+    pub ai_saved: Mutex<Vec<(Option<String>, Value)>>,
+    /// Model calls and AI searches fail with this status and Typesense message.
+    pub fail_ai: Mutex<Option<(u16, String)>>,
+    /// What each `ai_search` answers, in turn.
+    pub ai_answers: Mutex<VecDeque<String>>,
+    /// Every `ai_search`: the collection and the parameters.
+    pub ai_searches: Mutex<Vec<AiSearch>>,
 }
 
 pub struct FakeAdminBackend(pub Arc<FakeAdmin>);
@@ -1947,6 +1962,120 @@ impl AdminBackend for FakeAdminBackend {
             .push(format!("delete_dictionary {id}"));
         self.0.dictionaries.lock().unwrap().retain(|d| d.id != id);
         Box::pin(async move { Ok(()) })
+    }
+
+    fn ai_models(
+        &self,
+        _: Client,
+        kind: ModelKind,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<serde_json::Map<String, Value>>, Error>>
+    {
+        self.0
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("ai_models {kind:?}"));
+        let answer = match self.0.fail_ai.lock().unwrap().clone() {
+            Some(fail) => Err(http_error(fail)),
+            None => Ok(self.0.models_of(kind).lock().unwrap().clone()),
+        };
+        Box::pin(async move { answer })
+    }
+
+    fn create_ai_model(
+        &self,
+        _: Client,
+        kind: ModelKind,
+        body: Value,
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Map<String, Value>, Error>> {
+        self.0.ai_saved.lock().unwrap().push((None, body.clone()));
+        let answer = match self.0.fail_ai.lock().unwrap().clone() {
+            Some(fail) => Err(http_error(fail)),
+            None => {
+                let mut model = body.as_object().unwrap().clone();
+                model.insert("api_key".into(), "sk-st*********".into());
+                self.0.models_of(kind).lock().unwrap().push(model.clone());
+                Ok(model)
+            }
+        };
+        Box::pin(async move { answer })
+    }
+
+    fn update_ai_model(
+        &self,
+        _: Client,
+        kind: ModelKind,
+        id: String,
+        body: Value,
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Map<String, Value>, Error>> {
+        self.0
+            .ai_saved
+            .lock()
+            .unwrap()
+            .push((Some(id.clone()), body.clone()));
+        let answer = match self.0.fail_ai.lock().unwrap().clone() {
+            Some(fail) => Err(http_error(fail)),
+            None => {
+                let mut models = self.0.models_of(kind).lock().unwrap();
+                let model = models.iter_mut().find(|m| m["id"] == id.as_str()).unwrap();
+                model.extend(body.as_object().unwrap().clone());
+                model.insert("api_key".into(), "sk-st*********".into());
+                Ok(model.clone())
+            }
+        };
+        Box::pin(async move { answer })
+    }
+
+    fn delete_ai_model(
+        &self,
+        _: Client,
+        kind: ModelKind,
+        id: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("delete_ai_model {kind:?} {id}"));
+        self.0
+            .models_of(kind)
+            .lock()
+            .unwrap()
+            .retain(|m| m["id"] != id.as_str());
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn ai_search(
+        &self,
+        _: Client,
+        collection: String,
+        params: Vec<(String, String)>,
+    ) -> tessera_app::collections::BoxFuture<Result<String, Error>> {
+        self.0
+            .ai_searches
+            .lock()
+            .unwrap()
+            .push((collection, params));
+        let answer = match self.0.fail_ai.lock().unwrap().clone() {
+            Some(fail) => Err(http_error(fail)),
+            None => Ok(self
+                .0
+                .ai_answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| "{}".into())),
+        };
+        Box::pin(async move { answer })
+    }
+}
+
+impl FakeAdmin {
+    fn models_of(&self, kind: ModelKind) -> &Mutex<Vec<serde_json::Map<String, Value>>> {
+        match kind {
+            ModelKind::Conversation => &self.conversation_models,
+            ModelKind::NlSearch => &self.nl_models,
+        }
     }
 }
 

@@ -209,6 +209,8 @@ async fn provider_key_stays_out_of_the_request_log() {
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 3);
     for event in events.iter() {
+        assert!(event.request_body.is_none(), "{}", event.path);
+        assert!(event.response_body.is_none(), "{}", event.path);
         assert!(!format!("{event:?}").contains(KEY), "{}", event.path);
     }
 }
