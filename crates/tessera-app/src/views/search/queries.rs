@@ -28,7 +28,7 @@ use tessera_client::{MULTI_SEARCH_LIMIT, Preset};
 use tessera_core::search::HISTORY_SETTLE_MS;
 use tessera_core::search::history::{HistoryEntry, HistoryItem, search_entry, without_secrets};
 use tessera_core::search::params::{ParamError, SearchDraft, parse_params, to_search};
-use tessera_core::search::saved::SavedQuery;
+use tessera_core::search::saved::{SavedQuery, savable};
 use tessera_widgets::confirm;
 use uuid::Uuid;
 
@@ -620,16 +620,17 @@ impl SearchWorkbench {
             .iter()
             .find(|q| q.profile == profile && q.name == name);
         let replaces = same.map(|q| q.id);
+        let (searches, dropped) = savable(&self.drafts);
         let query = SavedQuery {
             id: replaces.unwrap_or_else(Uuid::new_v4),
             profile,
             name,
             tags,
             union: self.union,
-            searches: without_secrets(&self.drafts),
+            searches,
         };
         if replaces.is_none() {
-            return self.store_query(query, cx);
+            return self.store_query(query, dropped, cx);
         }
         let this = cx.entity().downgrade();
         let body = t!("search.save.replace_body", name = query.name).to_string();
@@ -638,7 +639,7 @@ impl SearchWorkbench {
             body,
             t!("search.save.replace").to_string(),
             move |_, cx| {
-                this.update(cx, |this, cx| this.store_query(query.clone(), cx))
+                this.update(cx, |this, cx| this.store_query(query.clone(), dropped, cx))
                     .ok();
             },
             window,
@@ -646,9 +647,12 @@ impl SearchWorkbench {
         );
     }
 
-    fn store_query(&mut self, query: SavedQuery, cx: &mut Context<Self>) {
+    fn store_query(&mut self, query: SavedQuery, dropped: bool, cx: &mut Context<Self>) {
         let save = self.state.update(cx, |s, cx| s.save_query(query, cx));
         self.report_write(save, cx);
+        if dropped {
+            self.queries.write_error = Some(t!("search.save.secrets_dropped").to_string().into());
+        }
     }
 
     /// Unlocks if needed, then asks for the preset's name.

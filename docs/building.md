@@ -108,6 +108,7 @@ context = "Workbench"
 - `key` is one chord, or several separated by spaces, with the modifiers `cmd`, `ctrl`, `alt`, `shift`.
 - `action` is an action name such as `tessera::Refresh`, the names in `crates/tessera-app/src/actions.rs`. Leave it out to unbind the chord.
 - `context` limits the binding to a key context such as `Workbench`, `Console` or `Documents`. Leave it out for everywhere.
+- A binding without a modifier (`cmd`, `ctrl` or `alt`) also fires while typing in a field, so bind a chord.
 
 A control shows the chord that is bound now. A bad entry is skipped and named above the tabs, and the others apply. A file that does not parse, or has a field the format does not know, changes nothing: the default shortcuts stay, and the line above the tabs names the place. `escape` cannot be bound, because it closes every dialog. An unbound action stays reachable from its control and the palette.
 

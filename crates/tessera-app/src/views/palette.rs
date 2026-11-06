@@ -324,6 +324,15 @@ impl Render for CommandPalette {
             .filterable(false)
             .bordered(false)
             .placeholder(t!("palette.placeholder").to_string())
+            .empty(|_, _, cx| {
+                div()
+                    .py_6()
+                    .w_full()
+                    .text_center()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(t!("palette.empty").to_string())
+            })
             .on_query(move |query, _, cx| {
                 view.update(cx, |this, cx| this.query_changed(query, cx));
             })
