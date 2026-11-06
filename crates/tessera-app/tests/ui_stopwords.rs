@@ -211,6 +211,12 @@ async fn words_can_be_typed(cx: &mut TestAppContext) {
     .unwrap();
     f.press(cx, "a");
     assert_eq!(f.editor_text(cx), "a");
+    f.press(cx, "tab");
+    assert_eq!(f.editor_text(cx), "a", "Tab moves on");
+    let locale = cx.update_window(f.handle.into(), |_, window, _| {
+        window.find("stopwords.locale".to_string()).focused()
+    });
+    assert_eq!(locale.unwrap(), Some(true));
 }
 
 #[gpui_kit::test]
@@ -395,7 +401,8 @@ async fn a_saved_new_set_becomes_the_selected_row(cx: &mut TestAppContext) {
     f.click(cx, "resources.name.ok");
     f.set_editor(cx, "word");
     f.press(cx, SAVE);
-    f.press(cx, DELETE);
+    // The focus is in the editor, whose ⌘⌫ edits the text.
+    f.click(cx, "stopwords.delete");
     assert!(f.has(cx, "confirm.body"));
     f.click(cx, "confirm.ok");
     assert_eq!(

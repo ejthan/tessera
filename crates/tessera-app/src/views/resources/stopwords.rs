@@ -25,7 +25,8 @@ use super::{
     empty_state, list_error_text, notice, report_to, row_button, toolbar,
 };
 use crate::actions::{
-    DeleteResource, FocusResourceFilter, NewResource, RESOURCES, ReloadResource, SaveResource,
+    DeleteResource, FocusResourceFilter, NewResource, NextControl, PreviousControl, RAW_BLOCK,
+    RESOURCES, ReloadResource, SaveResource,
 };
 use crate::connection::{ConnectionState, error_text};
 use crate::relevance::RelevanceBackendGlobal;
@@ -370,7 +371,13 @@ impl StopwordsView {
                     .aria_label(SharedString::from(id.clone()))
                     .child(id),
             )
-            .child(div().flex_1().min_h_0().child(self.editor.clone()))
+            .child(
+                div()
+                    .key_context(RAW_BLOCK)
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.editor.clone()),
+            )
             .child(
                 h_flex()
                     .gap_2()
@@ -472,6 +479,8 @@ impl Render for StopwordsView {
                 this.ask_delete(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ReloadResource, _, cx| this.reload(cx)))
+            .on_action(|_: &NextControl, window, cx| window.focus_next(cx))
+            .on_action(|_: &PreviousControl, window, cx| window.focus_prev(cx))
             .on_action(cx.listener(|this, _: &FocusResourceFilter, window, cx| {
                 ResourceList::focus_filter(&this.list, window, cx);
             }))

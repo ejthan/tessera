@@ -442,10 +442,10 @@ mod tests {
         assert_eq!(
             dropped_keys(&sent, &stored),
             [
-                "diversity.future",
-                "excludes.3.note",
                 "includes.1.note",
-                "includes.2"
+                "includes.2",
+                "excludes.3.note",
+                "diversity.future"
             ]
         );
         assert!(dropped_keys(&sent, &sent).is_empty());
