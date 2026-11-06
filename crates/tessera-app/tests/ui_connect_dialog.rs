@@ -403,6 +403,25 @@ async fn changed_values_mark_the_result_stale(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn a_limited_key_is_explained_and_can_be_saved(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| {
+        Err(Error::LimitedKey {
+            status: 401,
+            message: "Forbidden".into(),
+        })
+    });
+    let handle = open(cx);
+    open_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "connect.key", "k", cx);
+        window.press(TEST, cx);
+    })
+    .unwrap();
+    let result = "connect.result".to_string();
+    wait_for_label(cx, handle, result, "search-only key").await;
+}
+
+#[gpui_kit::test]
 async fn failed_test_offers_save_anyway(cx: &mut TestAppContext) {
     let calls = Arc::new(Mutex::new(0));
     let count = calls.clone();

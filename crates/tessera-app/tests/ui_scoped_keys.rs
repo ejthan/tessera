@@ -193,6 +193,20 @@ async fn typing_generates_a_key_locally(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn the_chord_of_copy_copies(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    f.fill(cx, "scoped.parent", PARENT);
+    f.set_params(cx, FILTER);
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        window.press(key("cmd-shift-c", "ctrl-shift-c"), cx);
+    })
+    .unwrap();
+    f.settle(cx);
+    let copied = cx.update(|cx| cx.read_from_clipboard()).unwrap();
+    assert_eq!(copied.text(), Some(scoped()));
+}
+
+#[gpui_kit::test]
 async fn bad_json_shows_inline(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![]).await;
     f.fill(cx, "scoped.parent", PARENT);
@@ -243,6 +257,14 @@ async fn a_key_without_expiry_says_so(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![]).await;
     f.fill(cx, "scoped.decode", &generate(PARENT, &json!({})).unwrap());
     assert_eq!(f.label(cx, "scoped.decoded.expires"), "No expiry");
+}
+
+#[gpui_kit::test]
+async fn a_bad_expiry_is_unreadable_not_absent(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    let far = generate(PARENT, &json!({"expires_at": 99_999_999_999_999_i64})).unwrap();
+    f.fill(cx, "scoped.decode", &far);
+    assert_eq!(f.label(cx, "scoped.decoded.expires"), "Expiry unreadable");
 }
 
 #[gpui_kit::test]

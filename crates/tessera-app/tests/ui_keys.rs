@@ -38,6 +38,9 @@ struct Fixture {
     _rt: tokio::runtime::Runtime,
 }
 
+/// The key of the fake connection.
+const CLIENT_KEY: &str = "k";
+
 fn api_key(id: u64, description: &str, expires_at: i64) -> ApiKey {
     ApiKey {
         id,
@@ -234,6 +237,20 @@ async fn delete_asks_and_cancel_sends_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn delete_of_the_own_key_says_the_connection_ends(cx: &mut TestAppContext) {
+    let mut own = api_key(2, "own", LATER);
+    own.value_prefix = Some(CLIENT_KEY.into());
+    let f = Fixture::new(cx, vec![api_key(1, "other", LATER), own]).await;
+    f.click(cx, "keys.row.1");
+    f.click(cx, "keys.delete");
+    assert!(!f.label(cx, "confirm.body").contains("401"));
+    f.click(cx, "confirm.cancel");
+    f.click(cx, "keys.row.2");
+    f.click(cx, "keys.delete");
+    assert!(f.label(cx, "confirm.body").contains("401"));
+}
+
+#[gpui_kit::test]
 async fn delete_on_prod_is_typed(cx: &mut TestAppContext) {
     let mut profile = Profile::new("test", vec![node()]);
     profile.environment = Environment::Prod;
@@ -408,6 +425,25 @@ async fn reveal_shows_masked_and_copy_gives_the_value(cx: &mut TestAppContext) {
     f.click(cx, "keys.reveal_copy");
     let copied = cx.update(|cx| cx.read_from_clipboard()).unwrap();
     assert_eq!(copied.text().as_deref(), Some(VALUE));
+}
+
+#[gpui_kit::test]
+async fn reveal_works_from_the_keyboard(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    create(&f, cx);
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        window.press(key("cmd-shift-c", "ctrl-shift-c"), cx);
+    })
+    .unwrap();
+    f.settle(cx);
+    let copied = cx.update(|cx| cx.read_from_clipboard()).unwrap();
+    assert_eq!(copied.text().as_deref(), Some(VALUE));
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        window.press(key("cmd-enter", "ctrl-enter"), cx);
+    })
+    .unwrap();
+    f.settle(cx);
+    assert!(!f.has(cx, "keys.reveal_copy"));
 }
 
 #[gpui_kit::test]

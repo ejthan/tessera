@@ -776,6 +776,7 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D80 | Where do the new resources go? | Rows after Presets: API keys, Analytics, Stemming, AI, ⌥⌘6–9. One AI tab with two views, ⌘1 and ⌘2, as a collection tab has. Keys show on every server, the other three on v30 and later |
 | D81 | Confirmations in M7 | Key delete, rule delete, model delete: a plain confirmation, typed on prod. Dictionary delete: the same, also typed when a collection uses it. Import into an existing dictionary: a plain confirmation, typed on prod. New, save, flush: none. A test event: a plain confirmation on prod |
 | D82 | What is tested without a provider? | Keys, analytics and stemming need none. AI CRUD, chat, NL and remote embedding run against a local stub reached through `openai_url`, `api_url` and `url`, on both versions. Real provider answers stay a manual check in `docs/building.md`. Built-in models need Hugging Face, so that test runs nightly |
+| D83 | What does the connection test say about a search-only key? | Such a key is 401 on `/debug`, `/collections` and `/keys`, exactly as a wrong key is (measured on 30.2). So a 401 or 403 after `/health` answered is reported as a warning: the server answers, a restricted key keeps working for its own actions, Tessera cannot browse with it, and a wrong key looks the same. The test stays failed and offers Save anyway, because every view needs `/debug`. A delete of the key the connection uses is compared by its first four characters and adds a consequence line; a shared prefix only warns once too often |
 
 ---
 

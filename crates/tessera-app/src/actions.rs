@@ -28,6 +28,8 @@ gpui_kit::actions!(
         ToggleKeyMask,
         ToggleRequestLog,
         CopyAsCurl,
+        CopyKey,
+        FinishReveal,
         TogglePolling,
         Refresh,
         NewCollection,
@@ -224,6 +226,10 @@ const CONSOLE_INPUT: &str = "Console > Input";
 pub const RESOURCES: &str = "Resources";
 /// An input in a resource tab, which has its own ⌘↩.
 const RESOURCES_INPUT: &str = "Resources > Input";
+/// Key context of the scoped key panel.
+pub const SCOPED_KEYS: &str = "ScopedKeys";
+/// Key context of the dialog that shows a new key.
+pub const KEY_REVEAL: &str = "KeyReveal";
 /// Key context of the alias dialog.
 pub const ALIAS_DIALOG: &str = "AliasDialog";
 /// An input in that dialog, which has its own ⌘↩.
@@ -588,6 +594,8 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     ToggleReopenLast,
     ToggleRequestLog,
     CopyAsCurl,
+    CopyKey,
+    FinishReveal,
     TogglePolling,
     Refresh,
     NewCollection,
@@ -940,6 +948,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(DELETE, DeleteSetItem, Some(SET_ITEMS)),
         KeyBinding::new(SHOW_FORM, ShowItems, Some(RESOURCES)),
         KeyBinding::new(SHOW_JSON, ShowSetJson, Some(RESOURCES)),
+        KeyBinding::new(COPY_CURL, CopyKey, Some(SCOPED_KEYS)),
+        KeyBinding::new(COPY_CURL, CopyKey, Some(KEY_REVEAL)),
+        KeyBinding::new(SAVE, FinishReveal, Some(KEY_REVEAL)),
         KeyBinding::new(SHOW_FORM, ShowDocuments, Some(RESOURCES)),
         KeyBinding::new(SHOW_JSON, ShowSchema, Some(RESOURCES)),
         KeyBinding::new(SHOW_HITS, ShowAttachment, Some(RESOURCES)),

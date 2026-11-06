@@ -374,6 +374,13 @@ impl Client {
         self.schema_changes_on(None).await
     }
 
+    /// Whether this client's key begins with `prefix`, the four characters the server keeps of
+    /// a key's value. Answers without giving the key out.
+    pub fn key_starts_with(&self, prefix: &str) -> bool {
+        use secrecy::ExposeSecret as _;
+        !prefix.is_empty() && self.key.expose_secret().starts_with(prefix)
+    }
+
     /// `GET /keys`, to learn whether the key is an admin key. Only the status counts:
     /// `200` is [`KeyAccess::Admin`], `401` or `403` is [`KeyAccess::Restricted`].
     ///

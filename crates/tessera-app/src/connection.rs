@@ -101,6 +101,18 @@ pub fn client_options(profile: &Profile) -> Result<(Vec<String>, ClientOptions),
     Ok((nodes, options))
 }
 
+/// A refused read after `/health` answered: the key is what stops this connection.
+fn limited(error: Error) -> Error {
+    match error {
+        Error::Http {
+            status: status @ (401 | 403),
+            message,
+            ..
+        } => Error::LimitedKey { status, message },
+        other => other,
+    }
+}
+
 /// The real connector, on the tokio runtime: `GET /health`, `GET /debug` (which also proves
 /// the key is valid), `GET /collections?limit=1&exclude_fields=fields` and the `GET /keys`
 /// probe. `AppState::connect` checks the nodes first, so `InvalidUrl` here is a fallback.
@@ -113,9 +125,9 @@ pub fn tokio_connector(handle: Handle) -> Connector {
             let client = Client::new(&nodes, key, options)?.with_hook(hook);
             let health = client.health().await?;
             let start = Instant::now();
-            let debug = client.debug().await?;
+            let debug = client.debug().await.map_err(limited)?;
             let latency = start.elapsed();
-            client.collections_probe().await?;
+            client.collections_probe().await.map_err(limited)?;
             // Only after `debug` succeeded: a wrong key would also read as restricted.
             let access = client.keys_probe().await?;
             Ok(Connected {
@@ -432,6 +444,12 @@ pub fn node_error_text(err: &Error, host: &str, profile: &Profile) -> String {
             seconds = profile.timeout_secs.clamp(1, MAX_TIMEOUT_SECS)
         )
         .to_string(),
+        Error::LimitedKey { status, message } => t!(
+            "connect.error.limited_key",
+            status = status,
+            message = message
+        )
+        .to_string(),
         Error::Http { status, .. } => match err.typesense_message() {
             Some(message) => {
                 t!("connect.error.http", status = status, message = message).to_string()
@@ -500,6 +518,42 @@ mod tests {
         assert!(c.info.capabilities.supported);
         assert_eq!(c.info.url.as_str(), format!("{}/", server.uri()));
         assert_eq!(c.access, KeyAccess::Restricted);
+    }
+
+    #[tokio::test]
+    async fn a_refused_read_after_health_is_a_limited_key() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        for (route, status, body) in [
+            ("/health", 200, r#"{"ok":true}"#),
+            ("/debug", 401, r#"{"message":"Forbidden"}"#),
+        ] {
+            Mock::given(path(route))
+                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .mount(&server)
+                .await;
+        }
+        let addr = server.address();
+        let profile = Profile::new("t", vec![node(&addr.ip().to_string(), addr.port())]);
+        let connect = tokio_connector(Handle::current());
+        let result = connect(profile, SecretString::from("k"), Arc::new(|_| {})).await;
+        assert!(matches!(
+            result.err(),
+            Some(Error::LimitedKey { status: 401, .. })
+        ));
+    }
+
+    #[test]
+    fn only_a_refusal_is_a_limited_key() {
+        let error = limited(Error::Timeout);
+        assert!(matches!(error, Error::Timeout));
+        let error = limited(Error::Http {
+            status: 500,
+            message: String::new(),
+            body: String::new(),
+        });
+        assert!(matches!(error, Error::Http { status: 500, .. }));
     }
 
     #[tokio::test]

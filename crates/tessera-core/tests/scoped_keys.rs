@@ -68,13 +68,22 @@ fn decode_round_trips_every_vector() {
 #[test]
 fn decode_reads_the_expiry() {
     let key = decode(&generate(PARENT, &json!({"expires_at": 1906054106})).unwrap()).unwrap();
-    assert_eq!(key.expires_at, Some(1906054106));
+    assert_eq!(key.expires_at(), Some(Some(1906054106)));
     assert_eq!(
         decode(&generate(PARENT, &json!({})).unwrap())
             .unwrap()
-            .expires_at,
+            .expires_at(),
         None
     );
+}
+
+#[test]
+fn a_bad_expiry_differs_from_none() {
+    for bad in [r#""soon""#, "1.5", "18446744073709551615"] {
+        let raw = format!("{}abcd{{\"expires_at\":{bad}}}", "A".repeat(44));
+        let key = decode(&STANDARD.encode(raw)).unwrap();
+        assert_eq!(key.expires_at(), Some(None), "{bad}");
+    }
 }
 
 #[test]

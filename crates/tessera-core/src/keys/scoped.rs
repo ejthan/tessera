@@ -86,8 +86,6 @@ pub struct DecodedKey {
     pub text: String,
     /// The parameters.
     pub params: Value,
-    /// The embedded `expires_at`.
-    pub expires_at: Option<i64>,
 }
 
 // No digest: with the parameters it makes the key again.
@@ -238,17 +236,21 @@ pub fn decode(scoped: &str) -> Result<DecodedKey, DecodeError> {
     let prefix = part(&bytes[DIGEST_LEN..TEXT_AT])?;
     let text = part(&bytes[TEXT_AT..])?;
     let params: Value = serde_json::from_str(&text).map_err(|_| DecodeError::NotJson)?;
-    let expires_at = params.get("expires_at").and_then(Value::as_i64);
     Ok(DecodedKey {
         digest,
         prefix,
         text,
         params,
-        expires_at,
     })
 }
 
 impl DecodedKey {
+    /// The embedded `expires_at`: `None` without one, `Some(None)` when it is no whole number
+    /// a server could hold.
+    pub fn expires_at(&self) -> Option<Option<i64>> {
+        self.params.get("expires_at").map(Value::as_i64)
+    }
+
     /// Whether `parent` signed this key: over the stored text, so a key of any library holds.
     pub fn verify(&self, parent: &str) -> bool {
         let Ok(digest) = STANDARD.decode(&self.digest) else {

@@ -33,7 +33,7 @@ use tessera_widgets::json_editor::{JsonEditor, JsonEditorEvent};
 
 use super::super::search::hits::HitsView;
 use super::{client_of, notice};
-use crate::actions::{RunTest, TEST_PANEL};
+use crate::actions::{CopyKey, RunTest, SCOPED_KEYS, TEST_PANEL};
 use crate::admin::AdminBackendGlobal;
 use crate::connection::{ConnectionState, error_text};
 
@@ -356,7 +356,11 @@ impl ScopedKeysView {
         .map(|text| text.to_string())
     }
 
-    fn generate_section(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn generate_section(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (danger, warning) = (theme.danger, theme.warning);
         let show = if self.masked {
@@ -421,6 +425,7 @@ impl ScopedKeysView {
                         Button::new("scoped.copy")
                             .small()
                             .label(copy.to_string())
+                            .children(Kbd::binding_for_action(&CopyKey, Some(SCOPED_KEYS), window))
                             .disabled(empty)
                             .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),
                     ),
@@ -433,7 +438,10 @@ impl ScopedKeysView {
         let lines: Vec<(&'static str, String)> = match &self.decoded {
             Some(Ok(key)) => {
                 let parent = self.parent.read(cx).value();
-                let expires = key.expires_at.and_then(date);
+                let expires = key.expires_at().map(|at| {
+                    at.and_then(date)
+                        .unwrap_or_else(|| t!("scoped.expiry_unreadable").to_string())
+                });
                 let signature = if parent.is_empty() {
                     t!("scoped.not_verified")
                 } else if key.verify(&parent) {
@@ -542,23 +550,33 @@ impl ScopedKeysView {
 
 impl Render for ScopedKeysView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let generate = self.generate_section(cx);
+        let generate = self.generate_section(window, cx);
         let decode = self.decode_section(cx);
         let test = self.test_section(window, cx);
         div()
-            .id("scoped.panel")
-            .key_context(TEST_PANEL)
-            .track_focus(&self.focus_handle)
+            .key_context(SCOPED_KEYS)
             .size_full()
-            .overflow_y_scroll()
-            .on_action(cx.listener(|this, _: &RunTest, _, cx| this.run(cx)))
+            .on_action(cx.listener(|this, _: &CopyKey, _, cx| {
+                if !this.generated(cx).is_empty() {
+                    this.copy(cx);
+                }
+            }))
             .child(
-                v_flex()
-                    .gap_4()
-                    .p_2()
-                    .child(generate)
-                    .child(decode)
-                    .child(test),
+                div()
+                    .id("scoped.panel")
+                    .key_context(TEST_PANEL)
+                    .track_focus(&self.focus_handle)
+                    .size_full()
+                    .overflow_y_scroll()
+                    .on_action(cx.listener(|this, _: &RunTest, _, cx| this.run(cx)))
+                    .child(
+                        v_flex()
+                            .gap_4()
+                            .p_2()
+                            .child(generate)
+                            .child(decode)
+                            .child(test),
+                    ),
             )
     }
 }

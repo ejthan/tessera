@@ -22,6 +22,8 @@ pub struct Outcome {
     /// The tested profile and typed key.
     pub profile: Profile,
     pub typed: Option<SecretString>,
+    /// The server answers and only the key stops the connection.
+    pub limited: bool,
     pub result: Result<(ServerInfo, KeyAccess), SharedString>,
 }
 
@@ -67,6 +69,7 @@ pub fn render(outcome: &Outcome, stale: bool, cx: &App) -> impl IntoElement {
             };
             (vec![health.to_string(), access.to_string()], color)
         }
+        Err(e) if outcome.limited => (vec![e.to_string()], theme.warning),
         Err(e) => (vec![e.to_string()], theme.danger),
     };
     let secs = outcome.at.elapsed().as_secs();

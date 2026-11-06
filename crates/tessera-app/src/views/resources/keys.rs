@@ -230,6 +230,12 @@ impl KeysView {
         let Some(key) = self.selected(cx).cloned() else {
             return;
         };
+        // A prefix shared with another key only warns once too often.
+        let own = client_of(&self.connection, cx).is_some_and(|client| {
+            key.value_prefix
+                .as_deref()
+                .is_some_and(|prefix| client.key_starts_with(prefix))
+        });
         let this = cx.entity().downgrade();
         let connection = self.connection.clone();
         self.connection.update(cx, |c, cx| {
@@ -240,9 +246,13 @@ impl KeysView {
                 } else {
                     key.description.clone()
                 };
+                let mut lines = vec![t!("keys.delete_consequence").to_string()];
+                if own {
+                    lines.push(t!("keys.delete_own").to_string());
+                }
                 let danger = Danger {
                     title: t!("keys.delete_title", name = name).to_string(),
-                    lines: vec![t!("keys.delete_consequence").to_string()],
+                    lines,
                     expected: name,
                     action: t!("keys.delete").to_string(),
                     typed: prod,
