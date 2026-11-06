@@ -15,23 +15,22 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, WeakEntity, Window,
-    div, prelude::*, px,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
+    prelude::*, px,
 };
 use rust_i18n::t;
 use serde_json::{Map, Value};
 use tessera_client::SetKind;
-use tessera_core::relevance::changes::{ItemIssue, Level, dropped_keys};
+use tessera_core::relevance::changes::{ItemIssue, Level};
 use tessera_core::relevance::synonyms::{SynonymDraft, check_synonym};
-use tessera_widgets::confirm;
 use tessera_widgets::json_editor::{JsonEditor, JsonEditorEvent};
 
+use super::item_save::{ItemDialog, ItemSave, submit_item};
 use super::sets::{SetsView, issue_text};
 use super::stopwords::words_of;
-use super::{ListRow, ResourceColumn, client_of, dialog_title, titled};
+use super::{ListRow, ResourceColumn, dialog_title};
 use crate::actions::{SET_ITEM_DIALOG, SaveResource};
-use crate::connection::{ConnectionState, error_text};
-use crate::relevance::RelevanceBackendGlobal;
+use crate::connection::ConnectionState;
 
 /// Width of the dialog.
 const WIDTH: f32 = 480.;
@@ -63,14 +62,9 @@ pub(super) fn item_row(item: &Value) -> ListRow {
     }
 }
 
-/// Adds or edits one item, through the item endpoint: a row is one change and must not overwrite
-/// a colleague's other rows (D60).
+/// Adds or edits one item.
 pub struct SynonymItemDialog {
-    view: WeakEntity<SetsView>,
-    connection: Entity<ConnectionState>,
-    set: String,
-    /// The id of the item being edited.
-    original: Option<String>,
+    save: ItemSave,
     id: Entity<InputState>,
     one_way: bool,
     root: Entity<InputState>,
@@ -79,11 +73,14 @@ pub struct SynonymItemDialog {
     symbols: Entity<InputState>,
     /// The keys the form has no control for, shown only when there are any.
     raw: Option<Entity<JsonEditor>>,
-    error: Option<SharedString>,
-    busy: bool,
-    check: Option<Task<()>>,
     cancel_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
+}
+
+impl ItemDialog for SynonymItemDialog {
+    fn save_state(&mut self) -> &mut ItemSave {
+        &mut self.save
+    }
 }
 
 impl SynonymItemDialog {
@@ -149,10 +146,7 @@ impl SynonymItemDialog {
             editors.map(|editor| cx.subscribe(editor, |_, _, _: &JsonEditorEvent, cx| cx.notify())),
         );
         Self {
-            view,
-            connection,
-            set,
-            original,
+            save: ItemSave::new(view, connection, SetKind::Synonym, set, original),
             id,
             one_way: !draft.root.trim().is_empty(),
             root,
@@ -160,9 +154,6 @@ impl SynonymItemDialog {
             locale,
             symbols,
             raw,
-            error: None,
-            busy: false,
-            check: None,
             cancel_focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
@@ -206,7 +197,7 @@ impl SynonymItemDialog {
     }
 
     fn blocked(&self, cx: &App) -> bool {
-        self.busy || self.issues(cx).iter().any(|i| i.level() == Level::Error)
+        self.save.busy || self.issues(cx).iter().any(|i| i.level() == Level::Error)
     }
 
     fn set_one_way(&mut self, one_way: bool, cx: &mut Context<Self>) {
@@ -214,125 +205,14 @@ impl SynonymItemDialog {
         cx.notify();
     }
 
-    fn refuse(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.error = Some(text.into());
-        self.busy = false;
-        cx.notify();
-    }
-
-    /// Checks the id against a fresh read, because a `PUT` overwrites silently, then saves,
-    /// after a confirmation on prod.
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.blocked(cx) {
             return;
         }
-        let draft = match self.draft(cx) {
-            Ok(draft) => draft,
-            Err(error) => return self.refuse(error, cx),
-        };
-        let Some(client) = client_of(&self.connection, cx) else {
-            return self.refuse(t!("status.not_connected").to_string(), cx);
-        };
-        self.busy = true;
-        self.error = None;
-        let fresh =
-            cx.global::<RelevanceBackendGlobal>()
-                .0
-                .set(client, SetKind::Synonym, self.set.clone());
-        self.check = Some(cx.spawn_in(window, async move |this, cx| {
-            let fresh = fresh.await;
-            this.update_in(cx, |this, window, cx| {
-                let profile = this.connection.read(cx).profile.clone();
-                let fresh = match fresh {
-                    Ok(fresh) => fresh,
-                    Err(e) => return this.refuse(error_text(&e, &profile), cx),
-                };
-                let moved = this.original.as_ref() != Some(&draft.id);
-                let taken = fresh
-                    .items
-                    .iter()
-                    .any(|i| i.get("id").and_then(Value::as_str) == Some(&draft.id));
-                if moved && taken {
-                    let text = t!("sets.item.exists", id = draft.id).to_string();
-                    return this.refuse(text, cx);
-                }
-                this.confirm_save(draft, window, cx);
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    fn confirm_save(&mut self, draft: SynonymDraft, window: &mut Window, cx: &mut Context<Self>) {
-        let profile = self.connection.read(cx).profile.clone();
-        if !profile.environment.is_prod() {
-            return self.send(draft, window, cx);
+        match self.draft(cx) {
+            Ok(draft) => submit_item(self, draft.id.clone(), draft.to_value(), window, cx),
+            Err(error) => self.save.refuse(error, cx),
         }
-        self.busy = false;
-        let this = cx.entity().downgrade();
-        let title = t!("sets.item.save_title", id = draft.id).to_string();
-        confirm::open(
-            titled(&title, &profile),
-            t!("sets.item.save_line", name = self.set).to_string(),
-            t!("sets.save").to_string(),
-            move |window, cx| {
-                this.update(cx, |this, cx| this.send(draft.clone(), window, cx))
-                    .ok();
-            },
-            window,
-            cx,
-        );
-        cx.notify();
-    }
-
-    /// `save_item` new, then `delete_item` old for a changed id. Detached: closing the tab must
-    /// not abort a write, and above all not between the two.
-    fn send(&mut self, draft: SynonymDraft, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = client_of(&self.connection, cx) else {
-            return self.refuse(t!("status.not_connected").to_string(), cx);
-        };
-        self.busy = true;
-        let backend = cx.global::<RelevanceBackendGlobal>().0.clone();
-        let (set, view) = (self.set.clone(), self.view.clone());
-        let old = self.original.clone().filter(|old| *old != draft.id);
-        let profile = self.connection.read(cx).profile.clone();
-        let sent = draft.to_value();
-        let id = draft.id;
-        let save = backend.save_item(
-            client.clone(),
-            SetKind::Synonym,
-            set.clone(),
-            id.clone(),
-            sent.clone(),
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            let stored = match save.await {
-                Ok(stored) => stored,
-                Err(e) => {
-                    this.update(cx, |this, cx| this.refuse(error_text(&e, &profile), cx))
-                        .ok();
-                    return;
-                }
-            };
-            let mut failed = None;
-            if let Some(old) = old {
-                let delete = backend.delete_item(client, SetKind::Synonym, set, old.clone());
-                if let Err(e) = delete.await {
-                    let detail = error_text(&e, &profile);
-                    let text = t!("sets.item.both_exist", old = old, new = id, detail = detail);
-                    failed = Some(SharedString::from(text.to_string()));
-                }
-            }
-            this.update_in(cx, |_, window, cx| window.close_dialog(cx))
-                .ok();
-            let dropped = dropped_keys(&sent, &stored);
-            view.update_in(cx, |view, window, cx| {
-                view.item_saved(&dropped, failed, window, cx);
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
     }
 }
 
@@ -411,7 +291,8 @@ impl Render for SynonymItemDialog {
                 )
             }))
             .children(
-                self.error
+                self.save
+                    .error
                     .clone()
                     .map(|error| line("sets.item.error".into(), error)),
             )
@@ -430,7 +311,7 @@ impl Render for SynonymItemDialog {
                         Button::new("sets.item.save")
                             .primary()
                             .label(t!("sets.save").to_string())
-                            .loading(self.busy)
+                            .loading(self.save.busy)
                             .disabled(blocked)
                             .children(Kbd::binding_for_action(
                                 &SaveResource,

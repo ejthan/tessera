@@ -4,6 +4,9 @@
 
 pub mod aliases;
 pub mod attachment;
+pub mod curation_dialog;
+pub mod curations;
+pub(crate) mod item_save;
 pub mod name_dialog;
 pub mod presets;
 pub mod set_file;

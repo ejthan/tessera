@@ -15,6 +15,7 @@ frame-overlay = ["gpui-kit/profiler"]
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 gpui-kit.workspace = true
 jiff.workspace = true
 rust-i18n.workspace = true

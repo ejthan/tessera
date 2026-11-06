@@ -33,7 +33,8 @@ fn collection((name, synonym_sets, curation_sets): Row) -> Collection {
         "fields": [
             {"name": "title", "type": "string"},
             {"name": "tags", "type": "string[]"},
-            {"name": "n", "type": "int32"}
+            {"name": "n", "type": "int32"},
+            {"name": "vec", "type": "float[]", "num_dim": 3}
         ],
         "synonym_sets": synonym_sets,
         "curation_sets": curation_sets,
@@ -80,7 +81,8 @@ impl Fixture {
         })
         .await;
         cx.update(|cx| state.update(cx, |s, cx| s.open_resource(id, kind, cx)));
-        wait_for_element(cx, handle, "synonyms.new".into(), true).await;
+        let prefix = kind.key();
+        wait_for_element(cx, handle, format!("{prefix}.new"), true).await;
         let f = Self {
             handle,
             data,
@@ -89,7 +91,7 @@ impl Fixture {
             _rt: rt,
         };
         f.settle(cx);
-        f.click(cx, &format!("synonyms.row.{set}"));
+        f.click(cx, &format!("{prefix}.row.{set}"));
         f.click(cx, "sets.tab.test");
         f
     }

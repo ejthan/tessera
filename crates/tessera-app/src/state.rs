@@ -152,11 +152,10 @@ impl ResourceKind {
         format!("sidebar.{}", self.key())
     }
 
-    /// Whether a server of that support gets a row: a kind appears with its view (UX rule 4),
-    /// and synonym and curation sets do not exist below v30.
+    /// Whether a server of that support gets a row: synonym and curation sets do not exist
+    /// below v30.
     pub fn shown(self, supported: bool) -> bool {
-        let arrived = !matches!(self, Self::Curations);
-        arrived && (supported || !matches!(self, Self::Synonyms | Self::Curations))
+        supported || !matches!(self, Self::Synonyms | Self::Curations)
     }
 }
 

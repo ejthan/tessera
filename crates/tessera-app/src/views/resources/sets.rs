@@ -22,8 +22,9 @@ use serde_json::Value;
 use tessera_client::{Collection, ItemSet, SetKind};
 use tessera_core::relevance::attachment::users;
 use tessera_core::relevance::changes::{ItemIssue, changes};
+use tessera_core::relevance::curations::CurationDraft;
 use tessera_core::relevance::synonym_file::{
-    SET_FILE_LIMIT, SetFileError, SetFormat, parse_synonyms, synonyms_to_json,
+    SET_FILE_LIMIT, SetFileError, SetFormat, parse_curations, parse_synonyms, synonyms_to_json,
 };
 use tessera_core::relevance::synonyms::SynonymDraft;
 use tessera_widgets::confirm;
@@ -31,8 +32,10 @@ use tessera_widgets::json_editor::JsonEditor;
 
 use super::super::dock::view_tab;
 use super::super::env_badge;
+use super::curation_dialog::CurationItemDialog;
+use super::curations;
 use super::name_dialog::NameDialog;
-use super::synonyms::{ITEM_COLUMNS, SynonymItemDialog, item_row};
+use super::synonyms::{self, SynonymItemDialog};
 use super::test_panel::TestPanel;
 use super::{
     Danger, ErrorSlot, ListRow, ResourceColumn, ResourceList, client_of, confirm_write,
@@ -47,7 +50,20 @@ use crate::connection::{ConnectionState, error_text};
 use crate::relevance::RelevanceBackendGlobal;
 
 /// Where the empty state points to.
-const DOCS_URL: &str = "https://typesense.org/docs/30.2/api/synonyms.html";
+const fn docs_url(kind: SetKind) -> &'static str {
+    match kind {
+        SetKind::Synonym => "https://typesense.org/docs/30.2/api/synonyms.html",
+        SetKind::Curation => "https://typesense.org/docs/30.2/api/curation.html",
+    }
+}
+
+/// The start of the locale keys and test ids of `kind`, and those of its items.
+const fn prefixes(kind: SetKind) -> (&'static str, &'static str) {
+    match kind {
+        SetKind::Synonym => ("synonyms", "synonyms.items"),
+        SetKind::Curation => ("curations", "curations.items"),
+    }
+}
 /// The columns of the set table.
 const COLUMNS: &[ResourceColumn] = &[
     ("name", 200., false),
@@ -146,6 +162,7 @@ pub struct SetsView {
     pub(super) error: Option<SharedString>,
     pub(super) note: Option<SharedString>,
     dialog: Option<Entity<SynonymItemDialog>>,
+    curation_dialog: Option<Entity<CurationItemDialog>>,
     test: Entity<TestPanel>,
     items_focus: FocusHandle,
     focus_handle: FocusHandle,
@@ -160,8 +177,13 @@ impl SetsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let list = cx.new(|cx| ResourceList::new("synonyms", COLUMNS, window, cx));
-        let items = cx.new(|cx| ResourceList::new("synonyms.items", ITEM_COLUMNS, window, cx));
+        let (prefix, items_prefix) = prefixes(kind);
+        let columns = match kind {
+            SetKind::Synonym => synonyms::ITEM_COLUMNS,
+            SetKind::Curation => curations::ITEM_COLUMNS,
+        };
+        let list = cx.new(|cx| ResourceList::new(prefix, COLUMNS, window, cx));
+        let items = cx.new(|cx| ResourceList::new(items_prefix, columns, window, cx));
         let attach_filter = cx.new(|cx| {
             InputState::new(window, cx).placeholder(t!("sets.attach.filter").to_string())
         });
@@ -201,6 +223,7 @@ impl SetsView {
             error: None,
             note: None,
             dialog: None,
+            curation_dialog: None,
             test,
             items_focus: cx.focus_handle(),
             focus_handle: cx.focus_handle(),
@@ -213,6 +236,11 @@ impl SetsView {
     /// The JSON tab's editor.
     pub fn json(&self) -> &Entity<JsonEditor> {
         &self.json
+    }
+
+    /// The curation item dialog opened last.
+    pub fn curation_dialog(&self) -> Option<&Entity<CurationItemDialog>> {
+        self.curation_dialog.as_ref()
     }
 
     /// The Test tab's panel.
@@ -296,7 +324,13 @@ impl SetsView {
             .current()
             .map(|s| s.items.as_slice())
             .unwrap_or_default();
-        let rows: Vec<ListRow> = items.iter().map(item_row).collect();
+        let rows: Vec<ListRow> = match self.kind {
+            SetKind::Synonym => items.iter().map(synonyms::item_row).collect(),
+            SetKind::Curation => {
+                let now = jiff::Timestamp::now().as_second();
+                items.iter().map(|i| curations::item_row(i, now)).collect()
+            }
+        };
         let text = synonyms_to_json(items);
         self.items.update(cx, |l, cx| l.set_rows(rows, cx));
         let set = self.current().map(|s| s.name.clone());
@@ -402,28 +436,47 @@ impl SetsView {
         let Some(set) = self.followed.clone() else {
             return;
         };
-        let draft = editing.then(|| self.selected_item(cx)).flatten();
-        if editing && draft.is_none() {
+        let item = editing.then(|| self.selected_item(cx)).flatten();
+        if editing && item.is_none() {
             return;
         }
         let this = cx.entity().downgrade();
         let connection = self.connection.clone();
+        let kind = self.kind;
         self.connection.update(cx, |c, cx| {
             c.ensure_writable(window, cx, move |window, cx| {
                 let view = this.clone();
-                let dialog = SynonymItemDialog::open(view, connection, set, draft, window, cx);
-                this.update(cx, |this, _| this.dialog = Some(dialog)).ok();
+                match kind {
+                    SetKind::Synonym => {
+                        let draft = item.and_then(|i| SynonymDraft::from_value(&i).ok());
+                        let dialog =
+                            SynonymItemDialog::open(view, connection, set, draft, window, cx);
+                        this.update(cx, |this, _| this.dialog = Some(dialog)).ok();
+                    }
+                    SetKind::Curation => {
+                        let draft = item.and_then(|i| CurationDraft::from_value(&i).ok());
+                        let dialog =
+                            CurationItemDialog::open(view, connection, set, draft, window, cx);
+                        this.update(cx, |this, _| this.curation_dialog = Some(dialog))
+                            .ok();
+                    }
+                }
             });
         });
     }
 
-    fn selected_item(&self, cx: &App) -> Option<SynonymDraft> {
+    /// The stored item of the selected row, when the form can read it.
+    fn selected_item(&self, cx: &App) -> Option<Value> {
         let id = self.items.read(cx).selected(cx)?;
         let items = &self.current()?.items;
         let item = items
             .iter()
             .find(|i| i.get("id").and_then(Value::as_str) == Some(&id))?;
-        SynonymDraft::from_value(item).ok()
+        let readable = match self.kind {
+            SetKind::Synonym => SynonymDraft::from_value(item).is_ok(),
+            SetKind::Curation => CurationDraft::from_value(item).is_ok(),
+        };
+        readable.then(|| item.clone())
     }
 
     /// After the dialog saved. `failed`: the old item of a changed id still exists.
@@ -477,7 +530,12 @@ impl SetsView {
             return;
         };
         self.note = None;
-        let items = match parse_synonyms(&self.json.read(cx).text(cx), SetFormat::Json) {
+        let text = self.json.read(cx).text(cx);
+        let parsed = match self.kind {
+            SetKind::Synonym => parse_synonyms(&text, SetFormat::Json),
+            SetKind::Curation => parse_curations(&text),
+        };
+        let items = match parsed {
             Ok(items) => items,
             Err(error) => {
                 self.error = Some(file_error_text(&error).into());
@@ -787,11 +845,12 @@ impl Render for SetsView {
         let no_row = self.list.read(cx).selected(cx).is_none();
         let no_set = self.current().is_none();
         let synonyms = self.kind == SetKind::Synonym;
+        let (prefix, _) = prefixes(self.kind);
         let missing = self.missing_rows(window, cx);
         let left = v_flex()
             .size_full()
             .child(toolbar(
-                "synonyms",
+                prefix,
                 &self.list,
                 &self.focus_handle,
                 locked,
@@ -805,7 +864,7 @@ impl Render for SetsView {
             )
             .children(missing)
             .child(if empty {
-                empty_state("synonyms", DOCS_URL).into_any_element()
+                empty_state(prefix, docs_url(self.kind)).into_any_element()
             } else {
                 div()
                     .flex_1()
@@ -820,7 +879,7 @@ impl Render for SetsView {
                     .gap_2()
                     .p_2()
                     .child(row_button(
-                        "synonyms.delete".into(),
+                        format!("{prefix}.delete"),
                         t!("sets.delete").to_string(),
                         &DeleteResource,
                         (no_row, locked),

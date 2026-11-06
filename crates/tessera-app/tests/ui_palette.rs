@@ -227,7 +227,7 @@ async fn resource_tabs_are_listed_for_the_selected_connection(cx: &mut TestAppCo
     let f = Fixture::on_search(cx).await;
     f.palette(cx);
     f.query(cx, "curations");
-    assert!(!f.has_action(cx, "OpenCurations"));
+    assert!(f.has_action(cx, "OpenCurations"));
     f.press(cx, SELECT_ALL);
     f.press(cx, "backspace");
     f.query(cx, "aliases");

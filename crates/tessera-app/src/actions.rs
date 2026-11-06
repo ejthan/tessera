@@ -144,7 +144,11 @@ gpui_kit::actions!(
         DetachMissing,
         CreateMissingSet,
         ShowTest,
-        RunTest
+        RunTest,
+        MoveRowUp,
+        MoveRowDown,
+        NextControl,
+        PreviousControl
     ]
 );
 
@@ -230,6 +234,14 @@ const SET_ITEM_INPUT: &str = "SetItemDialog > Input";
 pub const SET_IMPORT_DIALOG: &str = "SetImportDialog";
 /// An input in that dialog, which has its own ⌘↩.
 const SET_IMPORT_INPUT: &str = "SetImportDialog > Input";
+/// Key context of a raw JSON block in a form.
+pub const RAW_BLOCK: &str = "RawBlock";
+/// The editor of that block: its Tab moves on, or a form would end there.
+const RAW_BLOCK_INPUT: &str = "RawBlock > Input";
+/// Key context of a row of pinned documents.
+pub const INCLUDE_ROW: &str = "IncludeRow";
+/// An input in that row, which has its own ⌘↩.
+const INCLUDE_ROW_INPUT: &str = "IncludeRow > Input";
 /// Key context of the test panel of a set.
 pub const TEST_PANEL: &str = "TestPanel";
 /// An input in that panel, which has its own ⌘↩.
@@ -687,6 +699,10 @@ pub const PALETTE_HIDDEN: &[&str] = &[
     "tessera::PasteImport",
     "tessera::StartTransfer",
     "tessera::InferFromFile",
+    "tessera::MoveRowUp",
+    "tessera::MoveRowDown",
+    "tessera::NextControl",
+    "tessera::PreviousControl",
 ];
 
 /// The locale key of the label of action `name`, when the palette lists it.
@@ -877,6 +893,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SAVE, SaveResource, Some(ALIAS_INPUT)),
         KeyBinding::new(SAVE, SaveResource, Some(SET_ITEM_DIALOG)),
         KeyBinding::new(SAVE, SaveResource, Some(SET_ITEM_INPUT)),
+        KeyBinding::new(SAVE, SaveResource, Some(INCLUDE_ROW_INPUT)),
+        KeyBinding::new("alt-up", MoveRowUp, Some(INCLUDE_ROW)),
+        KeyBinding::new("alt-down", MoveRowDown, Some(INCLUDE_ROW)),
+        KeyBinding::new("tab", NextControl, Some(RAW_BLOCK_INPUT)),
+        KeyBinding::new("shift-tab", PreviousControl, Some(RAW_BLOCK_INPUT)),
+        KeyBinding::new(SAVE, SaveResource, Some(RAW_BLOCK_INPUT)),
+        KeyBinding::new(SHOW_FORM, ShowForm, Some(SET_ITEM_DIALOG)),
+        KeyBinding::new(SHOW_JSON, ShowJson, Some(SET_ITEM_DIALOG)),
+        KeyBinding::new(FIND, FocusQuery, Some(SET_ITEM_DIALOG)),
         KeyBinding::new(NEW_COLLECTION, NewSetItem, Some(SET_ITEMS)),
         KeyBinding::new(DELETE, DeleteSetItem, Some(SET_ITEMS)),
         KeyBinding::new(SHOW_FORM, ShowItems, Some(RESOURCES)),

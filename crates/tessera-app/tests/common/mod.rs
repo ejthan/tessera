@@ -1290,6 +1290,8 @@ pub struct FakeRelevance {
     pub stored_words: Mutex<Option<Vec<String>>>,
     /// The sets on the server.
     pub sets: Mutex<Vec<ItemSet>>,
+    /// Every item sent to `save_item`, in order.
+    pub sent_items: Mutex<Vec<serde_json::Value>>,
     /// `save_item` reads back this instead of the item sent.
     pub stored_item: Mutex<Option<serde_json::Value>>,
     /// `save_set` keeps only this many items.
@@ -1464,6 +1466,7 @@ impl RelevanceBackend for FakeRelevanceBackend {
         item: serde_json::Value,
     ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
         let answer = self.0.write(format!("save_item {name} {id}"));
+        self.0.sent_items.lock().unwrap().push(item.clone());
         let stored = self.0.stored_item.lock().unwrap().clone().unwrap_or(item);
         let answer = answer.map(|()| {
             let mut sets = self.0.sets.lock().unwrap();

@@ -7,6 +7,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use super::changes::{ItemIssue, Level, check_items};
+use super::curations::{CurationDraft, check_curation};
 use super::synonyms::{SynonymDraft, check_synonym};
 use crate::transfer::CLIPBOARD_LIMIT;
 use crate::transfer::source::BOM;
@@ -165,44 +166,28 @@ fn parse_csv(text: &str) -> Result<Vec<Value>, SetFileError> {
     Ok(items)
 }
 
-/// The items of a file or paste. Duplicate ids are refused with both rows, because the server
-/// keeps the last one without a word.
-pub fn parse_synonyms(text: &str, format: SetFormat) -> Result<Vec<Value>, SetFileError> {
-    if text.len() > SET_FILE_LIMIT {
-        return Err(SetFileError::TooLarge(text.len() as u64));
+fn json_items(text: &str) -> Result<Vec<Value>, SetFileError> {
+    let shape = || SetFileError::Json("expected {\"items\":[…]} or an array".into());
+    let value: Value = serde_json::from_str(text).map_err(|e| SetFileError::Json(e.to_string()))?;
+    match value {
+        Value::Array(list) => Ok(list),
+        Value::Object(mut map) => match map.remove("items") {
+            Some(Value::Array(list)) => Ok(list),
+            _ => Err(shape()),
+        },
+        _ => Err(shape()),
     }
-    let text = text
-        .as_bytes()
-        .strip_prefix(BOM)
-        .map_or(text, |_| &text[BOM.len()..]);
-    let items = match format {
-        SetFormat::Csv => parse_csv(text)?,
-        SetFormat::Json => {
-            let value: Value =
-                serde_json::from_str(text).map_err(|e| SetFileError::Json(e.to_string()))?;
-            match value {
-                Value::Array(list) => list,
-                Value::Object(mut map) => match map.remove("items") {
-                    Some(Value::Array(list)) => list,
-                    _ => {
-                        return Err(SetFileError::Json(
-                            "expected {\"items\":[…]} or an array".into(),
-                        ));
-                    }
-                },
-                _ => {
-                    return Err(SetFileError::Json(
-                        "expected {\"items\":[…]} or an array".into(),
-                    ));
-                }
-            }
-        }
-    };
+}
+
+/// Refuses `items` with what `check` finds per row, beside duplicate ids. An item the form
+/// cannot read goes to the server, which says what it thinks of it: `check` answers nothing.
+fn checked(
+    items: Vec<Value>,
+    check: impl Fn(&Value) -> Vec<ItemIssue>,
+) -> Result<Vec<Value>, SetFileError> {
     let mut issues = check_items(&items);
     for (i, item) in items.iter().enumerate() {
-        // An item the form cannot read goes to the server, which says what it thinks of it.
-        let found = SynonymDraft::from_value(item).map_or(Vec::new(), |d| check_synonym(&d));
-        let stops = found
+        let stops = check(item)
             .into_iter()
             .filter(|issue| issue.level() == Level::Error && !matches!(issue, ItemIssue::NoId));
         issues.extend(stops.map(|issue| ItemIssue::AtRow(i + 1, Box::new(issue))));
@@ -212,6 +197,36 @@ pub fn parse_synonyms(text: &str, format: SetFormat) -> Result<Vec<Value>, SetFi
     } else {
         Err(SetFileError::Items(issues))
     }
+}
+
+fn without_bom(text: &str) -> Result<&str, SetFileError> {
+    if text.len() > SET_FILE_LIMIT {
+        return Err(SetFileError::TooLarge(text.len() as u64));
+    }
+    Ok(text
+        .as_bytes()
+        .strip_prefix(BOM)
+        .map_or(text, |_| &text[BOM.len()..]))
+}
+
+/// The items of a file or paste. Duplicate ids are refused with both rows, because the server
+/// keeps the last one without a word.
+pub fn parse_synonyms(text: &str, format: SetFormat) -> Result<Vec<Value>, SetFileError> {
+    let text = without_bom(text)?;
+    let items = match format {
+        SetFormat::Csv => parse_csv(text)?,
+        SetFormat::Json => json_items(text)?,
+    };
+    checked(items, |item| {
+        SynonymDraft::from_value(item).map_or(Vec::new(), |d| check_synonym(&d))
+    })
+}
+
+/// The items of a curation set's JSON, checked like [`parse_synonyms`].
+pub fn parse_curations(text: &str) -> Result<Vec<Value>, SetFileError> {
+    checked(json_items(without_bom(text)?)?, |item| {
+        CurationDraft::from_value(item).map_or(Vec::new(), |d| check_curation(&d))
+    })
 }
 
 /// `current` with `incoming` laid over it by id: a match is replaced in place, the rest is
@@ -233,6 +248,23 @@ pub fn merged(current: &[Value], incoming: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_curations_refuses_duplicates_and_useless_rows() {
+        let ok = r#"[{"id":"a","rule":{"tags":["x"]},"excludes":[{"id":"1"}]}]"#;
+        assert_eq!(parse_curations(ok).unwrap().len(), 1);
+        let bad = r#"{"items":[{"id":"a","rule":{}}]}"#;
+        assert!(matches!(
+            parse_curations(bad),
+            Err(SetFileError::Items(issues)) if matches!(issues[0], ItemIssue::AtRow(1, _))
+        ));
+        let twice = format!("[{0},{0}]", r#"{"id":"a","rule":{"tags":["x"]}}"#);
+        assert!(matches!(
+            parse_curations(&twice),
+            Err(SetFileError::Items(issues))
+                if matches!(issues[0], ItemIssue::DuplicateId { .. })
+        ));
+    }
 
     fn draft(id: &str, root: &str, words: &[&str]) -> SynonymDraft {
         SynonymDraft {

@@ -46,6 +46,17 @@ pub struct Exclude {
     pub extra: Map<String, Value>,
 }
 
+/// When a rule applies, against a moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleTime {
+    /// Its start lies ahead.
+    Scheduled,
+    /// It applies now.
+    Active,
+    /// Its end has passed.
+    Expired,
+}
+
 /// A curation item. `extra` keeps every key the form has no control for, `diversity` included.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CurationDraft {
@@ -171,6 +182,17 @@ impl CurationDraft {
     /// includes and excludes, false with them.
     pub fn default_remove_tokens(&self) -> bool {
         self.includes.is_empty() && self.excludes.is_empty()
+    }
+
+    /// Where the rule stands at `now`, Unix seconds.
+    pub fn timing(&self, now: i64) -> RuleTime {
+        if self.effective_from_ts.is_some_and(|from| from > now) {
+            RuleTime::Scheduled
+        } else if self.effective_to_ts.is_some_and(|to| to < now) {
+            RuleTime::Expired
+        } else {
+            RuleTime::Active
+        }
     }
 
     /// Reads a stored item. A key that is absent takes the server's default.
@@ -328,6 +350,19 @@ pub fn check_curation(draft: &CurationDraft) -> Vec<ItemIssue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timing_compares_both_ends_with_now() {
+        let at = |from, to| CurationDraft {
+            effective_from_ts: from,
+            effective_to_ts: to,
+            ..CurationDraft::default()
+        };
+        assert_eq!(at(None, None).timing(10), RuleTime::Active);
+        assert_eq!(at(Some(10), Some(10)).timing(10), RuleTime::Active);
+        assert_eq!(at(Some(11), None).timing(10), RuleTime::Scheduled);
+        assert_eq!(at(None, Some(9)).timing(10), RuleTime::Expired);
+    }
 
     fn include(id: &str, position: i64) -> Include {
         Include {

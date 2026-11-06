@@ -18,7 +18,7 @@ use rust_i18n::t;
 use tessera_client::{Collection, SetKind};
 use tessera_core::relevance::attachment::attached;
 use tessera_core::relevance::test::{SideMeaning, TestBlocked, TestSides, test_sides};
-use tessera_core::search::params::query_fields;
+use tessera_core::search::params::text_query_fields;
 
 use super::super::search::hits::HitsView;
 use super::{client_of, notice};
@@ -204,7 +204,7 @@ impl TestPanel {
     /// A newly picked collection fills `query_by`; reading it again keeps what was typed.
     fn take_schema(&mut self, schema: Collection, window: &mut Window, cx: &mut Context<Self>) {
         if self.schema.is_none() {
-            let fields = query_fields(&schema).join(",");
+            let fields = text_query_fields(&schema).join(",");
             self.query_by
                 .update(cx, |i, cx| i.set_value(fields, window, cx));
         }
