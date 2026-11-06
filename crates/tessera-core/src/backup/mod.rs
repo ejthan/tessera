@@ -5,3 +5,5 @@
 
 pub mod archive;
 pub mod format;
+pub mod restore;
+pub mod run;
