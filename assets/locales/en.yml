@@ -181,6 +181,8 @@ connect.error.no_key: "No API key is stored for this connection. Edit it to add 
 connect.error.invalid_node: "This connection has an invalid node: %{reason}. Edit it to fix the node."
 connect.error.read_only: "This connection is read-only, so %{method} requests are blocked."
 connect.error.unaddressable_id: "The id %{id} cannot be used in a URL, so this request cannot be sent."
+connect.error.line_too_long: "A line of the answer is longer than %{limit} bytes, so the export stopped."
+connect.error.stream: "The answer broke off: %{detail}"
 connect.error.invalid_key: "The API key contains a character that cannot be sent, such as a line break. Enter the key again."
 overview.title: "Overview"
 poll.error.unhealthy: "%{host} answered, but reports that it is not ready to serve requests (/health: ok false)."

@@ -434,6 +434,10 @@ pub fn node_error_text(err: &Error, host: &str, profile: &Profile) -> String {
         Error::ReadOnly { method } => t!("connect.error.read_only", method = method).to_string(),
         Error::InvalidKey => t!("connect.error.invalid_key").to_string(),
         Error::UnaddressableId(id) => t!("connect.error.unaddressable_id", id = id).to_string(),
+        Error::LineTooLong { limit } => {
+            t!("connect.error.line_too_long", limit = limit).to_string()
+        }
+        Error::Stream(detail) => t!("connect.error.stream", detail = detail).to_string(),
     }
 }
 

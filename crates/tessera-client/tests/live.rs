@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 use tessera_client::{
-    Client, ClientOptions, DirtyValues, DocumentQuery, Error, ImportAction, ImportParams,
-    KeyAccess, RaftState,
+    Client, ClientOptions, DirtyValues, DocumentQuery, Error, ExportQuery, ImportAction,
+    ImportParams, KeyAccess, RaftState,
 };
 
 fn url() -> String {
@@ -930,4 +930,80 @@ async fn live_import_answers_per_line() {
     assert!(through_alias.unwrap()[0].success);
     // 1, 3 and 5 are stored.
     assert_eq!(count.unwrap(), 3);
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_export_stream() {
+    let client = client();
+    let (name, set) = ("tessera_it_export", "tessera_it_export_set");
+    let _ = client.delete_collection(name).await;
+    admin(
+        reqwest::Method::PUT,
+        &format!("/curation_sets/{set}"),
+        Some(r#"{"items":[{"id":"r","rule":{"query":"*","match":"exact"},"filter_by":"n:<3"}]}"#),
+    )
+    .await;
+    client
+        .create_collection(&serde_json::json!({
+            "name": name,
+            "fields": [{"name": "n", "type": "int32"}],
+            "curation_sets": [set],
+        }))
+        .await
+        .unwrap();
+    let docs: Vec<String> = (1..=12)
+        .map(|i| serde_json::json!({"id": i.to_string(), "n": i}).to_string())
+        .collect();
+    let imported = admin_request(
+        reqwest::Method::POST,
+        &format!("/collections/{name}/documents/import?action=create"),
+    )
+    .body(docs.join("\n"))
+    .send()
+    .await
+    .expect("import");
+    assert!(imported.status().is_success());
+    let read = |query: ExportQuery| {
+        let client = client.clone();
+        async move {
+            let mut stream = client.export_stream(name, &query).await?;
+            let mut lines = Vec::new();
+            while let Some(line) = stream.next_line().await? {
+                lines.push(line);
+            }
+            Ok::<_, Error>(lines)
+        }
+    };
+    let filtered = read(ExportQuery {
+        filter_by: Some("n:>5".into()),
+        ..ExportQuery::default()
+    })
+    .await;
+    let counted = client.count_documents(name, Some("n:>5")).await;
+    let all = read(ExportQuery::default()).await;
+    // Why the dialog offers only names from the schema: an unknown name is no error.
+    let nope = read(ExportQuery {
+        include_fields: Some("nope".into()),
+        ..ExportQuery::default()
+    })
+    .await;
+    let bad = read(ExportQuery {
+        filter_by: Some("nope:=1".into()),
+        ..ExportQuery::default()
+    })
+    .await;
+    let _ = client.delete_collection(name).await;
+    admin(
+        reqwest::Method::DELETE,
+        &format!("/curation_sets/{set}"),
+        None,
+    )
+    .await;
+    assert_eq!(filtered.unwrap().len() as u64, counted.unwrap());
+    assert_eq!(all.unwrap().len(), 12);
+    let nope = nope.unwrap();
+    assert_eq!(nope.len(), 12);
+    assert!(nope.iter().all(|l| l == "{}"), "{nope:?}");
+    assert!(matches!(bad, Err(Error::Http { status: 400, .. })));
 }

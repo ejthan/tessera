@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Export groundwork: the client streams `documents/export` line by line with no total deadline, only a 120 s limit on silence, and logs one request per stream with its size, `cancelled` when it was dropped early. A line over 256 MiB or a body that breaks off is an error.
 - Import groundwork: the client sends one batch of documents to `documents/import` with an explicit action and `dirty_values` and returns one result per line, a line it cannot decode kept as a failure. The request log keeps no bodies of such a batch, says so in its detail and offers no curl command for it.
 - Configurable shortcuts: `keymap.toml` in the config directory adds, replaces or, with no action, removes key bindings, and every control shows the chord in force. A bad entry is skipped and a file that does not parse changes nothing; both are named above the tabs. `escape` cannot be bound, so a dialog can always be left.
 - Command palette and quick switch: ⌘K / Ctrl+K lists what the focused view can do now, the collections of open connections, the saved queries of the selected connection and the connections, ranked by a fuzzy match, each with its shortcut and environment. ⌘P / Ctrl+P lists collections only. An action runs in the focus the palette opened from, with the same unlock and confirmation as its control, and a control that is disabled is not listed.
