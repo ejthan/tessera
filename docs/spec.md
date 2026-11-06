@@ -129,11 +129,12 @@ Everything in the repository is written in English: code, comments, docs, commit
 | Streaming | `tokio-util` (codec, io), `futures` | export lines, cancellation tokens (M5). Import sends one body per batch (D45) |
 | Serialization | `serde`, `serde_json` (feature `preserve_order`) | document field order is preserved |
 | CSV | `csv` | CSV import, on a blocking reader task like the JSON array reader (D51) |
-| Secrets | `keyring`, `secrecy` | macOS Keychain, Windows Credential Manager, Secret Service |
+| Secrets | `keyring`, `secrecy`, `zeroize` | macOS Keychain, Windows Credential Manager, Secret Service |
 | Paths | `directories` | config and data directories |
 | Config | `toml`, `serde` | settings |
 | Errors | `thiserror` (libraries), `anyhow` (app) | |
-| Logging | `tracing`, `tracing-subscriber`, `tracing-appender` | rotating log files, key redaction |
+| Logging | `tracing`, `tracing-subscriber`, `tracing-appender` | rotating log files, key redaction (D96) |
+| Backup archive | `tar`, `zstd`, `sha2` | `.tar.zst` backups, checksums (D89, D92) |
 | Versions | `semver` | feature gating by server version |
 | Scoped keys | `hmac`, `sha2`, `base64` | §7.14, `tessera-core` only |
 | Time | `jiff` | `expires_at`, timestamps. `chrono` only in the app, for the date picker |
@@ -227,12 +228,12 @@ GPUI has its own executor, integrated into the platform event loop. `reqwest` ne
 | Version / Raft state | `GET /debug` | §7.2 |
 | Metrics | `GET /metrics.json` | §7.2 |
 | API stats | `GET /stats.json` | §7.2 |
-| Snapshot | `POST /operations/snapshot?snapshot_path=…` | §7.18 |
+| Snapshot | `POST /operations/snapshot?snapshot_path=…` (without a path it only compacts the Raft log, D87) | §7.18 |
 | Compact DB | `POST /operations/db/compact` | §7.18 |
-| Leader election | `POST /operations/vote` | §7.18 |
+| Leader election | `POST /operations/vote`, on the follower that is to lead | §7.18 |
 | Clear cache | `POST /operations/cache/clear` | §7.18 |
-| Schema change status | `GET /operations/schema_changes` ⚠ verify | §7.18 |
-| Runtime config (e.g. slow request log) | `POST /config` | §7.18 |
+| Schema change status | `GET /operations/schema_changes` | §7.18 |
+| Runtime config (e.g. slow request log) | `POST /config`: eight keys, an unknown key answers success, no way to read back, one node only (D86) | §7.18 |
 | Collections | `GET/POST /collections`, `GET/PATCH/DELETE /collections/{name}` | §7.3 |
 | Document CRUD | `POST /collections/{c}/documents[?action=upsert]`, `GET/PATCH/DELETE …/documents/{id}` | §7.4 |
 | Update by query | `PATCH /collections/{c}/documents?filter_by=…` | §7.4 |
@@ -361,7 +362,8 @@ Each module lists acceptance criteria (AC).
 - Formats: JSONL (native, streamed) and JSON array. CSV (P1, in M5) with nested fields flattened (`a.b.c`), the header taken from the first 1,000 documents.
 - Progress with cancel; the target is chosen in a file dialog and replaced only after a complete export. A target that is a symbolic link is refused, and an export that finds no document keeps an existing target. Export ignores curations, so the count matches what is written, and a finished export says when it wrote fewer documents than counted. Reading needs no unlock, so the dialog works on a read-only connection.
 - CSV cells are written as they are (D55). A column that first appears after the first 1,000 documents is left out and counted in the job, not added to the header.
-- **Backup assistant** (P1, M8): exports schema, all documents, aliases, attached synonym and curation sets, and stopwords for one or more collections into a folder or a `.tar.zst` archive. The **restore assistant** loads it into any cluster.
+- **Backup assistant** (P1, M8): exports schema, all documents, aliases, attached synonym and curation sets, and stopwords for one or more collections into a folder or a `.tar.zst` archive, with a manifest and checksums (D89). Files are private to the user and hold no provider key. A backup is not a point-in-time copy of the cluster: collections export one after another. Presets, analytics rules, API keys, AI models and stemming dictionaries are not included, and the dialog says so.
+- The **restore assistant** loads it into any cluster, after checking the file whole and showing a plan. It never changes an existing collection, and it replaces a differing set, stopword set or alias only when asked (D91). Aliases come last.
 
 ### 7.8 Aliases (P0)
 
@@ -447,9 +449,11 @@ List, detail view, import (JSONL with `word`/`root`) via `POST /stemming/diction
 
 ### 7.18 Server operations (P1)
 
-- **Snapshot:** enter a server path (note: the path is **on the server**, not local), confirm, show the result. Type-to-confirm on prod profiles.
-- **Compact DB**, **clear cache**, **leader election (vote)**, each with an explanation and a confirmation.
-- **Runtime config** (`POST /config`): for example, set the slow request logging threshold.
+A center tab per connection. Each operation runs on the node picked in the tab, which starts as the active node, and never fails over (D85).
+
+- **Snapshot:** enter an absolute server path (note: the path is **on the server**, not local), confirm, show the result. Type-to-confirm on prod profiles.
+- **Compact DB**, **clear cache**, **leader election (vote)**, each with an explanation and a confirmation. Vote is typed on prod and runs on a follower (D88).
+- **Runtime config** (`POST /config`): the slow request and slow search thresholds, search logging, cache sizes and health lags, one key at a time. The server cannot show a value back and accepts unknown keys, so the list is closed and the form says so. `skip-writes` is not offered (D86).
 - **Running schema changes** with progress (polling).
 
 ### 7.19 Request log (P0)
@@ -467,11 +471,14 @@ List, detail view, import (JSONL with `word`/`root`) via `POST /stemming/diction
 
 ### 7.21 Settings (P0)
 
-- Theme: all GPUI Kit themes plus system light/dark. Font size, UI density (compact/comfortable).
+A dialog, ⌘, / Ctrl+, from the ⚙ in the title bar or the palette (D93).
+
+- Theme: all GPUI Kit themes plus system light/dark. Font size, UI density (compact/comfortable), which sets the size of data tables.
 - Language: English and German (English fallback).
 - Defaults: `per_page`, import `batch_size`, polling interval, confirmation thresholds.
 - **Update check** against GitHub Releases: opt-in, off by default. No telemetry, no crash upload.
-- Show storage locations (config, logs), open logs, clear cache.
+- Show storage locations (config, logs), open logs, clear cache: temp directories no job holds and the collection caches of open connections, never history, saved queries or profiles.
+- About: version, license, and the notice of §2.3.
 
 ### 7.22 Legacy servers < 30 (P2)
 
@@ -513,7 +520,7 @@ Mockups: [Tessera UX canvas](https://claude.ai/artifact/DucJnCzM4SMUhUo5UvVk1d).
 ```
 
 - Search and Raw console are center tabs of one connection (D33).
-- Panels can be moved, closed and zoomed. The layout is serialized per window and restored on the next start.
+- Panels can be moved, closed and zoomed. Dock sizes, the open bottom panel and its tab are saved and restored on the next start. Connection tabs are not (D94).
 - Several windows are possible (for example prod and staging side by side).
 
 ### 8.2 Safety UX
@@ -547,9 +554,11 @@ Mockups: [Tessera UX canvas](https://claude.ai/artifact/DucJnCzM4SMUhUo5UvVk1d).
 
 ## 9. Security and privacy
 
-- Keys only in the OS keychain. All secrets in memory as `secrecy::SecretString` (or equivalent), zeroized on drop.
-- **TLS by default** for remote hosts. Tessera allows `http://` without a warning only for `localhost`/`127.0.0.1`/`::1`; anything else shows a warning banner.
-- Logs: a redaction layer in `tracing` masks keys and known secret fields. Default log level `info`. Request bodies are never written to the log file, only to the in-memory request log.
+- Keys only in the OS keychain. All secrets in memory as `secrecy::SecretString` (or equivalent), zeroized on drop. Two copies are outside Tessera's reach, the text of a masked input in GPUI Kit and the clipboard after Copy (D97).
+- **TLS by default** for remote hosts. Tessera allows `http://` without a warning only for `localhost`/`127.0.0.1`/`::1`; anything else, and `allow insecure certificates`, shows a warning banner above every tab of that connection (D98).
+- Logs: a redacting writer under `tracing` masks keys and known secret fields, on stderr and in the file (D96). Default log level `info`. Request bodies are never written to the log file, only to the in-memory request log.
+- Backups hold documents in plain text, in files private to the user, and no provider key.
+- `docs/security-checklist.md` names the proof of each point.
 - No telemetry. Network connections go only to configured Typesense nodes and (opt-in) to GitHub for the update check.
 - `cargo deny` in CI (advisories, licenses, duplicates).
 - `SECURITY.md` with the reporting process; target: response within 7 days.
@@ -583,10 +592,10 @@ Location via `directories::ProjectDirs::from("org", "tessera", "Tessera")`:
 | `data/history.jsonl` | search and raw console history | JSONL, rotated |
 | `data/saved_queries.json` | saved queries and console favorites | JSON, versioned (`schema_version`) |
 | `data/document_views.json` | column choice, pins and widths per profile and collection (D25) | JSON |
-| `data/layout/*.json` | dock layouts | JSON (GPUI Kit format) |
-| `logs/tessera.log*` | logs | text, rotated (7 days) |
+| `data/layout/main.json` | dock sizes and the bottom panel (D94) | JSON, versioned (`schema_version`) |
+| `logs/tessera.log.YYYY-MM-DD` | logs | text, rotated daily, 7 files (D96) |
 
-- Migrations between `schema_version` levels run automatically; a `*.bak` backup is written first.
+- Migrations between `schema_version` levels run automatically; a `*.bak` backup is written first. A failed step leaves the file alone, and a file from a newer version is refused and not written (D95).
 - All writes are atomic (temporary file, then rename).
 
 ---
@@ -662,9 +671,9 @@ Each milestone ends with green CI, an updated CHANGELOG and a short demo (GIF in
 | **M5 Import/export** | §7.6, §7.7 including schema inference, error report, cancel. Jobs panel. The backup and restore assistant is M8. Details: `docs/superpowers/specs/2026-11-06-m5-import-export-design.md`, decisions D45–D54 | NF3 met headlessly: 1,000,000 documents in JSONL, JSON and CSV add at most 25 MB to the process and total at most 118 MB with the app's baseline, limit 300 MB (`cargo xtask nf3`, D53, record in `docs/building.md`); the run through the window and the Linux binary size (NF5) are still open |
 | **M6 Relevance resources** | §7.8 aliases including the reindex assistant, §7.9 synonym sets, §7.10 curation sets, §7.11 stopwords, §7.12 presets. Details: `docs/superpowers/specs/2026-11-06-m6-relevance-design.md`, decisions D56–D68 | CRUD and test panels work against 30.0 and 30.2: the live client and core tests pass on both, the views are covered by UI tests with fakes; the checks on screen are still open, steps in `docs/building.md` |
 | **M7 Keys, analytics, AI** | §7.14 including the scoped key generator and decoder, §7.15, §7.16, §7.13. Details: `docs/superpowers/specs/2026-11-06-m7-keys-analytics-ai-design.md`, decisions D69–D84 | Scoped key test vectors match typesense-js byte for byte. The live client and core tests pass on 30.0 and 30.2, with AI against a local stub, and the views are covered by UI tests with fakes; real providers and the checks on screen are still open, steps in `docs/building.md` |
-| **M8 Operations and hardening** | §7.18, safety UX §8.2 complete, backup/restore assistant, §9 audit (redaction tests) | Security checklist done |
-| **M9 Release 1.0** | i18n EN/DE complete, accessibility pass, onboarding, packaging for all platforms (`cargo-packager`, `xtask dist`), docs website (mdBook), QA checklist | v1.0.0 published |
-| **v1.x** | Legacy < 30 (§7.22), compare mode and ES translator (§7.5), JOIN graph (§7.3), key rotation, card view, Flatpak/winget, optional WASM build | – |
+| **M8 Operations and hardening** | §7.18, safety UX §8.2 complete, backup/restore assistant, §9 audit (redaction tests, TLS banner, log rotation and redaction, zeroization), §7.21 settings with About (D44), §11 migrations, §8.1 layout (D94), §8.3 empty states, and the M8 rows of the spec sweep (D99). Details: `docs/superpowers/specs/2026-11-06-m8-operations-design.md`, decisions D85–D99 | Security checklist done (`docs/security-checklist.md`) |
+| **M9 Release 1.0** | i18n EN/DE complete with the NF8 lint, accessibility pass, onboarding, packaging for all platforms (`cargo-packager`, `xtask dist`), docs website (mdBook), QA checklist with NF6, and from the spec sweep (D99): several windows (§8.1), breadcrumb and ⌘K field in the title bar, the link from an error to its request log entry (§5.5), the NF4 assertion, issue and PR templates and labels (§2.2) | v1.0.0 published |
+| **v1.x** | Legacy < 30 (§7.22), compare mode and ES translator (§7.5), JOIN graph (§7.3), memory estimate per collection (§7.2), key rotation, card view, Flatpak/winget, optional WASM build | – |
 
 ---
 
@@ -737,7 +746,7 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D41 | Secrets in console responses | Masked by default, with Reveal until the next Send, because `POST /keys` answers with the only copy of a key. Workbench results are never masked: `value` is an ordinary document field there |
 | D42 | Keeping full bodies for §7.19 | In memory, at most 32 MiB per body and 64 MiB in all, oldest evicted, released with their entry. The console holds at most 32 MiB of an answer and says when it cut one. Refetching would show a different answer and cannot repeat a write. Disk is ruled out by §9 |
 | D43 | `keymap.toml` shape | `[[binding]]` with `key`, `action` (`tessera::Name`), optional `context`. No action unbinds. Loaded once at start, on top of the defaults. A bad entry is skipped and named above the tabs, a file that does not parse changes nothing and says so there, and `escape` cannot be bound |
-| D44 | Settings in the palette, and §7.21's milestone | No entry until a settings view exists (UX rule 4). §14 names no milestone for §7.21. Recommendation: M8. Open for the maintainer |
+| D44 | Settings in the palette, and §7.21's milestone | No entry until a settings view exists (UX rule 4). §7.21 goes to M8, as a dialog (D93), which adds the palette entry |
 | D45 | One streamed `POST` or one `POST` per batch? | One per batch, in sequence. The cancel AC speaks of a batch round trip, an abort of a streamed body showed nothing stored after 20 MB of 64 MB, and the answer stays bound. A second press drops the request in flight, and its documents count as unconfirmed |
 | D46 | Import defaults | `dirty_values` is `coerce_or_reject`, always sent, because the server's own default rejects on 30.0 and 30.2. `return_id=true` always, so the report has ids. `return_doc` never: the client holds what it sent |
 | D47 | Where the error report lives | The first 1,000 rows in memory, all rows in an unnamed private temp file that disappears with the job or process. A million failures must not grow the app. §9 concerns keys and the log file; this holds the user's own documents for as long as the job row exists |
@@ -778,6 +787,21 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D82 | What is tested without a provider? | Keys, analytics and stemming need none. AI CRUD, chat, NL and remote embedding run against a local stub reached through `openai_url`, `api_url` and `url`, on both versions. Real provider answers stay a manual check in `docs/building.md`. Built-in models need Hugging Face, so that test runs nightly |
 | D83 | What does the connection test say about a search-only key? | Such a key is 401 on `/debug`, `/collections` and `/keys`, exactly as a wrong key is (measured on 30.2). So a 401 or 403 after `/health` answered is reported as a warning: the server answers, a restricted key keeps working for its own actions, Tessera cannot browse with it, and a wrong key looks the same. The test stays failed and offers Save anyway, because every view needs `/debug`. A delete of the key the connection uses is compared by its first four characters and adds a consequence line; a shared prefix only warns once too often |
 | D84 | Where does a key typed in the embedding block live? | In `FieldDraft.embed` only. The JSON tab reads `••••` for it, because the text is on screen and in the undo history, and sending takes the key back from the draft by field name. A rename in the JSON tab loses it, so the mask then stops the send instead of being stored as the key. The review shows the mask too and sends the key |
+| D85 | How do operations run and confirm? | In an Ops tab, on the node picked there, because none of them replicates and a retry on another node would act twice. Snapshot and vote: a plain confirmation, typed on prod with the profile name. Compact and clear cache: a plain confirmation. Runtime config: none, a plain confirmation on prod. A `POST /config` from the console rates like an operation, because it reaches `skip-writes` |
+| D86 | What can `POST /config` set? | Seven of the eight keys in `Config::update_config`, one per Apply, because keys apply in order and a later bad one leaves the earlier ones set. An unknown key answers success and no read exists, so a closed list is the only check, and the form says the value cannot be shown back. `skip-writes` is left out: it stops a node's writes without any way to see that it is on |
+| D87 | Is an empty snapshot path allowed? | No. The docs say it then compacts the Raft log and exports nothing, which is not what the button says. The path is absolute, not `/`, without `..` or control characters. Tessera cannot see the server's disk, so the dialog warns instead of checking |
+| D88 | Where does a vote go? | To the picked node, and the button needs a follower in a profile of several nodes: the docs say the node asked becomes leader. A `success: false` is a result to show, not an error. The rule is to be confirmed by probe P4 |
+| D89 | Backup format | A folder of `manifest.json`, four JSON files and numbered `collections/NNNN.schema.json` and `.jsonl`, or the same as `.tar.zst` with the manifest first. Numbers, because a collection name can hold anything. Each file has its size and SHA-256. A manifest is untrusted input: `unpack` reads entries itself, allows exact paths, regular files and the declared size only, and never calls `Entry::unpack` |
+| D90 | One job per run or per collection? | One. The engine runs in `tessera-core` on tokio, so a closed tab cannot lose a chain of jobs, unlike the reindex wizard's two jobs |
+| D91 | What may a restore change? | It creates what is missing. An existing collection blocks its row and is never written. A set, stopword set or alias that differs stays unless Replace is on, which is typed. Order: stopwords, sets, collections with referenced ones first, documents, aliases last. The plan is recomputed before the first write. A failure stops the run, nothing is deleted, and the tab names what to delete before a retry. A blanked provider key or a required unstored field blocks that collection |
+| D92 | New dependencies | `tar`, `zstd` (with C through `zstd-sys`, because a pure Rust encoder is less proven), `tracing-appender`, and `zeroize` directly, all exact. `zstd` 0.14.3 rather than 0.13.4, which is less than two weeks old |
+| D93 | Settings: where, and what does clear cache clear? | A dialog, because tabs belong to connections and settings do not. A file that does not parse stays untouched and defaults run. Density sets data table size only: the kit has no global density. `confirm_above` moves the 1,000 of D28, and prod stays typed. Tessera keeps no cache file, so clear cache means leftover temp directories and the in-memory collection caches. The update check sends a plain `GET` to GitHub, reads `tag_name` only and links a fixed URL |
+| D94 | What does "layout" restore? | Dock sizes, the open bottom panel and its tab, in a small JSON file instead of GPUI Kit's format. `DockArea::dump` holds connection tabs, which need a live connection and a key, so restoring them would connect by itself or show dead tabs. `reopen_last` already covers the wish to come back to a connection |
+| D95 | How do migrations run? | One list of steps per file, empty today. The file is copied to `<name>.bak`, stepped, then written atomically. A failed step changes nothing. `document_views.json` gains the newer-version refusal the others have |
+| D96 | Logs | A daily `tracing-appender` roller keeps 7 files of `tessera.log.YYYY-MM-DD`, non-blocking because a log call can run on the GPUI thread. Redaction sits in a `MakeWriter` under both layers, so it covers every event without a filter per field. A lost last line on a panic is accepted |
+| D97 | What does "zeroized" cover? | What Tessera owns: `SecretString` and `Zeroizing` temporaries. A request's `HeaderValue` inside `reqwest`, the rope of a masked input in the kit and the clipboard after Copy are outside it, and `docs/security-checklist.md` names them |
+| D98 | Where does the transport warning show? | Above every tab of the connection, beside the unlock banner, for remote `http` and for insecure certificates. It has no close control: the fix is in the profile |
+| D99 | Spec sweep before release | M8 takes the banners, ⚙, About, layout, empty states, NF1, migrations, destructive button audit and the console's `POST /config`. M9 takes several windows, the title bar breadcrumb, the error-to-log link, the NF4 assertion, NF6, NF8 and the issue and PR templates. The memory estimate goes to v1.x as P2. The list is in the M8 design, §3 |
 
 ---
 
