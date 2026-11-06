@@ -27,12 +27,19 @@ pub const MAX_DOC_BYTES: usize = 32 << 20;
 pub const CHANNEL_BATCHES: usize = 2;
 /// Rows the preview shows.
 pub const PREVIEW_LINES: usize = 20;
+/// `text` cut to [`ERROR_BYTES`], on a character.
+pub fn cap_error(text: &str) -> &str {
+    &text[..text.floor_char_boundary(ERROR_BYTES)]
+}
+
 /// Rows schema inference reads.
 pub const SAMPLE_ROWS: usize = 1000;
 /// Failed rows a report keeps in its table.
 pub const REPORT_ROWS: usize = 1000;
 /// Bytes of a rejected row a report shows.
 pub const REPORT_PREVIEW_BYTES: usize = 2048;
+/// The most of an error text that is kept: behind a proxy it can be a whole error page.
+pub const ERROR_BYTES: usize = 4096;
 /// The most a pasted clipboard text may hold (16 MiB).
 pub const CLIPBOARD_LIMIT: usize = 16 << 20;
 /// Retries of a batch the server answers 503 to.

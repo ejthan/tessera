@@ -50,7 +50,7 @@ use crate::connection::{ConnectionState, long_error_text};
 use crate::jobs::JobsGlobal;
 use crate::runtime::Tokio;
 use crate::state::AppState;
-use crate::transfer::{TransferBackendGlobal, read_error_text};
+use crate::transfer::{FileStamp, TransferBackendGlobal, file_stamp, read_error_text};
 
 const WIDTH: f32 = 900.;
 /// A change settles for this long before the preview reruns.
@@ -84,7 +84,7 @@ const DIRTY: [DirtyValues; 4] = [
 ];
 
 /// What the select offers.
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Target {
     /// An existing collection.
     Collection(String),
@@ -127,6 +127,8 @@ struct Loaded {
     source: Source,
     /// The file name; `None` for the clipboard.
     name: Option<SharedString>,
+    /// The file as it was read; `None` for the clipboard.
+    stamp: Option<FileStamp>,
     /// The line above the options.
     shown: SharedString,
 }
@@ -151,6 +153,14 @@ pub(crate) fn inspect(path: &Path) -> Result<(u64, Vec<u8>), Inspect> {
     Ok((meta.len(), head))
 }
 
+/// The line above the options for a file.
+fn file_shown(name: Option<&SharedString>, bytes: u64) -> SharedString {
+    let name = name.cloned().unwrap_or_default();
+    t!("transfer.import.file", name = name, size = size(bytes))
+        .to_string()
+        .into()
+}
+
 /// `n` documents per batch, if `text` is a size the import takes.
 fn batch_size(text: &str) -> Option<u32> {
     text.trim()
@@ -167,11 +177,15 @@ pub struct DocumentImportDialog {
     source: Option<Loaded>,
     source_error: Option<SharedString>,
     source_task: Option<Task<()>>,
+    /// Start found the file changed, and the estimate is new.
+    file_changed: bool,
+    /// Compares the file before Start goes on.
+    check_task: Option<Task<()>>,
     format: Format,
     csv: CsvOptions,
     target: Entity<SelectState<Vec<TargetItem>>>,
-    /// The names `target` holds.
-    offered: Vec<String>,
+    /// The names `target` holds; `None` until it is filled.
+    offered: Option<Vec<String>>,
     /// The chosen collection.
     collection: Option<String>,
     /// Set while "New collection…" is chosen, instead of `collection`.
@@ -288,10 +302,12 @@ impl DocumentImportDialog {
             source: None,
             source_error: None,
             source_task: None,
+            file_changed: false,
+            check_task: None,
             format: Format::Jsonl,
             csv: CsvOptions::default(),
             target: select,
-            offered: Vec::new(),
+            offered: None,
             collection: target,
             new: None,
             new_name,
@@ -305,24 +321,22 @@ impl DocumentImportDialog {
             preview_task: None,
             _subscriptions: subscriptions,
         };
-        let loaded = this
-            .connection
-            .read(cx)
-            .collection_cache
-            .collections
-            .is_some();
-        if loaded {
-            this.collections_changed(window, cx);
-        } else {
+        if !this.list_loaded(cx) {
             this.connection
                 .update(cx, |c, cx| c.load_collection_list(cx));
         }
+        this.collections_changed(window, cx);
         match source {
             Some(Source::File(path)) => this.read_file(path, cx),
             Some(Source::Bytes(bytes)) => this.read_bytes(bytes, cx),
             None => {}
         }
         this
+    }
+
+    fn list_loaded(&self, cx: &App) -> bool {
+        let cache = &self.connection.read(cx).collection_cache;
+        cache.collections.is_some()
     }
 
     /// The names of the connection's collections.
@@ -332,17 +346,22 @@ impl DocumentImportDialog {
         all.map(|c| c.name.clone()).collect()
     }
 
-    /// Fills the select from the list, which may arrive after the dialog opened.
+    /// Fills the select from the list, which may arrive after the dialog opened. The first
+    /// call fills it whatever the list holds: "New collection…" needs no list.
     fn collections_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let names = self.names(cx);
-        // The connection also notifies for changes that leave the list as it was.
-        if names == self.offered {
+        let loaded = self.list_loaded(cx);
+        // The connection also notifies for changes that leave the list as it was, and a
+        // reload drops the list for a moment.
+        if (self.offered.as_ref()).is_some_and(|offered| !loaded || *offered == names) {
             cx.notify();
             return;
         }
-        self.offered = names.clone();
+        self.offered = Some(names.clone());
         // A collection that went away is no target; the list keeps it out of the job too.
-        self.collection = self.collection.take().filter(|name| names.contains(name));
+        if loaded {
+            self.collection = self.collection.take().filter(|name| names.contains(name));
+        }
         let items: Vec<_> = names
             .iter()
             .cloned()
@@ -391,6 +410,11 @@ impl DocumentImportDialog {
             select.set_selected_value(&Target::New, window, cx);
         });
         self.infer(cx);
+    }
+
+    /// What the select shows as chosen.
+    pub fn chosen(&self, cx: &App) -> Option<Target> {
+        self.target.read(cx).selected_value().cloned()
     }
 
     /// The name typed for the new collection.
@@ -568,27 +592,26 @@ impl DocumentImportDialog {
     pub fn read_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let tokio = cx.global::<Tokio>().0.clone();
         self.source_error = None;
+        self.file_changed = false;
         let shown = path.clone();
-        let read = tokio.spawn_blocking(move || inspect(&shown));
+        let read = tokio.spawn_blocking(move || {
+            let stamp = file_stamp(&shown).ok();
+            inspect(&shown).map(|(bytes, head)| (bytes, head, stamp))
+        });
         self.source_task = Some(cx.spawn(async move |this, cx| {
             let read = read.await;
             this.update(cx, |this, cx| match read {
-                Ok(Ok((bytes, head))) => {
+                Ok(Ok((bytes, head, stamp))) => {
                     let name: Option<SharedString> = path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned().into());
                     let (format, csv) = sniff(Some(&path), &head);
                     (this.format, this.csv) = (format, csv);
                     this.source = Some(Loaded {
-                        shown: t!(
-                            "transfer.import.file",
-                            name = name.clone().unwrap_or_default(),
-                            size = size(bytes)
-                        )
-                        .to_string()
-                        .into(),
+                        shown: file_shown(name.as_ref(), bytes),
                         source: Source::File(path),
                         name,
+                        stamp,
                     });
                     this.refresh(cx);
                 }
@@ -610,13 +633,17 @@ impl DocumentImportDialog {
     fn read_bytes(&mut self, bytes: Arc<[u8]>, cx: &mut Context<Self>) {
         let (format, csv) = sniff(None, &bytes[..bytes.len().min(HEAD_BYTES)]);
         (self.format, self.csv) = (format, csv);
+        // A file still being read must not replace this.
+        self.source_task = None;
         self.source_error = None;
+        self.file_changed = false;
         self.source = Some(Loaded {
             shown: t!("transfer.import.clipboard", size = size(bytes.len() as u64))
                 .to_string()
                 .into(),
             source: Source::Bytes(bytes),
             name: None,
+            stamp: None,
         });
         self.refresh(cx);
     }
@@ -699,8 +726,49 @@ impl DocumentImportDialog {
         })
     }
 
-    /// Validates, asks to unlock a read-only connection, confirms, then runs the job.
+    /// Compares a file with what was read off the GPUI thread, then goes on. A file that
+    /// changed stays in the dialog with a new estimate, so the danger level follows it.
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A second create would drop the first in flight.
+        if self.creating || self.job(cx).is_none() {
+            return;
+        }
+        self.file_changed = false;
+        cx.notify();
+        let file = self
+            .source
+            .as_ref()
+            .and_then(|loaded| match &loaded.source {
+                Source::File(path) => Some((path.clone(), loaded.stamp)),
+                Source::Bytes(_) => None,
+            });
+        let Some((path, read)) = file else {
+            return self.unlock_and_confirm(window, cx);
+        };
+        let check = cx.global::<TransferBackendGlobal>().0.file_stamp(path);
+        self.check_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let now = check.await;
+            this.update_in(cx, |this, window, cx| match now {
+                Ok(now) if Some(now) == read => this.unlock_and_confirm(window, cx),
+                Ok(now) => this.source_stale(now, cx),
+                Err(e) => this.fail_source(read_error_text(&e), cx),
+            })
+            .ok();
+        }));
+    }
+
+    /// Takes the file as it is now and estimates it again. A draft keeps the user's edits.
+    fn source_stale(&mut self, now: FileStamp, cx: &mut Context<Self>) {
+        if let Some(loaded) = &mut self.source {
+            loaded.stamp = Some(now);
+            loaded.shown = file_shown(loaded.name.as_ref(), now.0);
+        }
+        self.file_changed = true;
+        self.schedule_preview(cx);
+    }
+
+    /// Validates, asks to unlock a read-only connection, then confirms.
+    fn unlock_and_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(job) = self.job(cx) else {
             return;
         };
@@ -835,7 +903,11 @@ impl DocumentImportDialog {
             this.update_in(cx, |this, window, cx| {
                 this.creating = false;
                 match result {
-                    Ok(_) => this.run(job, window, cx),
+                    Ok(_) => {
+                        this.connection
+                            .update(cx, |c, cx| c.invalidate_collections(cx));
+                        this.run(job, window, cx);
+                    }
                     Err(e) => {
                         let detail = long_error_text(&e, &profile);
                         let text = t!("transfer.import.create_failed", detail = detail);
@@ -1222,8 +1294,9 @@ impl Render for DocumentImportDialog {
         let format = self.render_format(cx);
         let options = self.render_options(cx);
         let preview = self.render_preview(cx);
+        let list_error = self.connection.read(cx).collection_cache.error.clone();
         let theme = cx.theme();
-        let (danger, muted) = (theme.danger, theme.muted_foreground);
+        let (danger, muted, warning) = (theme.danger, theme.muted_foreground, theme.warning);
         v_flex()
             .key_context(IMPORT_DIALOG)
             .track_focus(&self.focus_handle)
@@ -1244,7 +1317,15 @@ impl Render for DocumentImportDialog {
                     .clone()
                     .map(|e| note("transfer.import.source_error", e.to_string(), danger)),
             )
+            .when(self.file_changed, |el| {
+                let text = t!("transfer.import.file_changed").to_string();
+                el.child(note("transfer.import.file_changed", text, warning))
+            })
             .child(format)
+            .children(list_error.map(|detail| {
+                let text = t!("transfer.import.list_error", detail = detail).to_string();
+                note("transfer.import.list_error", text, danger)
+            }))
             .child(options)
             .children(preview)
             .children(

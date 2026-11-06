@@ -27,7 +27,7 @@ use tessera_app::poller::{CollectionsFetcherGlobal, NodeSample, PollFetcherGloba
 use tessera_app::runtime::Tokio;
 use tessera_app::search::{MultiAnswer, SearchAnswer, SearchBackend, SearchBackendGlobal};
 use tessera_app::state::AppState;
-use tessera_app::transfer::{TransferBackend, TransferBackendGlobal};
+use tessera_app::transfer::{FileStamp, TransferBackend, TransferBackendGlobal, file_stamp};
 use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::root::RootView;
 use tessera_client::{
@@ -212,6 +212,8 @@ pub struct FakeData {
     /// `create` fails with this status and Typesense message; `None` creates the collection
     /// (and adds it to `data`).
     pub create_error: Mutex<Option<(u16, String)>>,
+    /// When set, the next `create` answers only once the sender fires or is dropped.
+    pub create_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// Names and bodies sent to `update`.
     pub updates: Mutex<Vec<(String, serde_json::Value)>>,
     /// `update` fails with this status and Typesense message.
@@ -240,6 +242,13 @@ impl FakeData {
     pub fn hold_update(&self) -> tokio::sync::oneshot::Sender<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         *self.update_gate.lock().unwrap() = Some(rx);
+        tx
+    }
+
+    /// Holds the next `create` until the returned sender fires or is dropped.
+    pub fn hold_create(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.create_gate.lock().unwrap() = Some(rx);
         tx
     }
 
@@ -326,7 +335,13 @@ impl CollectionsBackend for FakeBackend {
                 Ok(created)
             }
         };
-        Box::pin(async move { answer })
+        let gate = self.0.create_gate.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.await.ok();
+            }
+            answer
+        })
     }
 
     fn update(
@@ -850,6 +865,14 @@ impl FakeTransfer {
 pub struct FakeTransferBackend(pub Arc<FakeTransfer>);
 
 impl TransferBackend for FakeTransferBackend {
+    fn file_stamp(
+        &self,
+        path: PathBuf,
+    ) -> tessera_app::collections::BoxFuture<Result<FileStamp, ReadError>> {
+        let answer = file_stamp(&path).map_err(|e| ReadError::Io(e.to_string()));
+        Box::pin(async move { answer })
+    }
+
     fn preview(
         &self,
         source: Source,

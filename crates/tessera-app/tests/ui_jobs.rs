@@ -19,12 +19,11 @@ use tessera_app::state::AppState;
 use tessera_app::views::root::RootView;
 use tessera_client::{DirtyValues, Error, ImportAction, ImportParams};
 use tessera_core::profile::Profile;
-use tessera_core::transfer::JobEnd;
-use tessera_core::transfer::TransferError;
 use tessera_core::transfer::export::{ExportFormat, ExportJob, ExportScope, FieldPick};
 use tessera_core::transfer::import::{CountCheck, ImportJob, ImportProgress};
 use tessera_core::transfer::report::ReportRow;
 use tessera_core::transfer::source::{Format, ReadOptions, Source};
+use tessera_core::transfer::{ERROR_BYTES, JobEnd, TransferError};
 
 use common::*;
 
@@ -73,13 +72,19 @@ fn job() -> ImportJob {
 }
 
 async fn connected(cx: &mut TestAppContext) -> Fixture {
+    connected_as(cx, false).await
+}
+
+/// Connected on the staging profile, or with `read_only` on the read-only prod one.
+async fn connected_as(cx: &mut TestAppContext, read_only: bool) -> Fixture {
     fake_backend(cx, Some((Vec::new(), Vec::new())));
     fake_connector(cx, |p| Ok(server_for(p)));
     let fake = fake_transfer(cx);
-    let (staging, _, secrets) = two_profiles();
-    let (handle, state, rt) = open_app(cx, vec![staging.clone()], secrets);
-    cx.update(|cx| state.update(cx, |s, cx| s.connect(staging.id, None, cx)));
-    let id = staging.id;
+    let (staging, prod, secrets) = two_profiles();
+    let profile = if read_only { prod } else { staging };
+    let (handle, state, rt) = open_app(cx, vec![profile.clone()], secrets);
+    cx.update(|cx| state.update(cx, |s, cx| s.connect(profile.id, None, cx)));
+    let id = profile.id;
     cx.condition(&state, |s, cx| {
         s.connection(id, cx)
             .is_some_and(|c| c.read(cx).connected.is_some())
@@ -90,7 +95,7 @@ async fn connected(cx: &mut TestAppContext) -> Fixture {
     Fixture {
         handle,
         state,
-        profile: staging,
+        profile,
         fake,
         jobs,
         conn,
@@ -213,6 +218,32 @@ async fn progress_does_not_notify_the_root(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn progress_does_not_redraw_with_the_tab_hidden(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.press(cx, TOGGLE_LOG);
+    let id = f.start(cx);
+    // The builder of an open dialog runs once per frame of the window.
+    let frames = Arc::new(Mutex::new(0));
+    let count = frames.clone();
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        window.open_dialog(cx, move |dialog, _, _| {
+            *count.lock().unwrap() += 1;
+            dialog
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let before = *frames.lock().unwrap();
+    assert!(before > 0);
+    for i in 0..50 {
+        f.fake.progress(id, update(i));
+        cx.executor().advance_clock(Duration::from_millis(40));
+        cx.run_until_parked();
+    }
+    assert_eq!(*frames.lock().unwrap(), before);
+}
+
+#[gpui_kit::test]
 async fn stop_then_abort(cx: &mut TestAppContext) {
     let f = connected(cx).await;
     let id = f.start(cx);
@@ -247,6 +278,99 @@ async fn finish_reloads_the_collection(cx: &mut TestAppContext) {
     f.fake.finish(id, finished());
     cx.run_until_parked();
     assert_eq!(*changed.lock().unwrap(), ["books"]);
+}
+
+/// A job on the unlocked read-only profile, with its client.
+async fn unlocked_job(cx: &mut TestAppContext) -> (Fixture, JobId, tessera_client::Client) {
+    let f = connected_as(cx, true).await;
+    cx.update(|cx| f.conn.update(cx, |c, cx| c.unlock(cx)));
+    let id = f.start(cx);
+    let client = cx.read(|cx| f.conn.read(cx).connected.as_ref().unwrap().client.clone());
+    assert!(!client.is_read_only());
+    (f, id, client)
+}
+
+fn refused_batch() -> tessera_core::transfer::import::ImportOutcome {
+    let err = TransferError::Client(Error::ReadOnly {
+        method: tessera_client::Method::POST,
+    });
+    let mut outcome = import_outcome(JobEnd::Failed(err), update(1000));
+    outcome.stopped_at_line = Some(1001);
+    outcome
+}
+
+#[gpui_kit::test]
+async fn disconnect_stops_a_write_job_of_an_unlocked_read_only_profile(cx: &mut TestAppContext) {
+    let (f, id, client) = unlocked_job(cx).await;
+    let profile = f.profile.id;
+    cx.update(|cx| f.state.update(cx, |s, cx| s.disconnect(profile, cx)));
+    cx.run_until_parked();
+    assert!(client.is_read_only(), "a disconnect locks (spec 7.1)");
+    assert_eq!(f.status(cx, id), JobStatus::Running, "until its next batch");
+    f.fake.finish(id, refused_batch());
+    cx.run_until_parked();
+    f.press(cx, TOGGLE_JOBS);
+    let text = f.text(cx, "jobs.error.0").unwrap();
+    assert!(text.contains("Locked by disconnect"), "{text}");
+    let line = f.text(cx, "jobs.stopped_at").unwrap();
+    assert!(line.contains("1,001"), "{line}");
+}
+
+#[gpui_kit::test]
+async fn lock_again_is_not_called_a_disconnect(cx: &mut TestAppContext) {
+    let (f, id, _client) = unlocked_job(cx).await;
+    cx.update(|cx| f.conn.update(cx, |c, cx| c.lock(cx)));
+    f.fake.finish(id, refused_batch());
+    cx.run_until_parked();
+    match f.status(cx, id) {
+        JobStatus::Failed(text) => assert!(!text.contains("disconnect"), "{text}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[gpui_kit::test]
+async fn finished_job_reloads_after_a_reconnect(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let id = f.start(cx);
+    let profile = f.profile.id;
+    cx.update(|cx| f.state.update(cx, |s, cx| s.disconnect(profile, cx)));
+    cx.update(|cx| f.state.update(cx, |s, cx| s.connect(profile, None, cx)));
+    cx.condition(&f.state, |s, cx| {
+        s.connection(profile, cx)
+            .is_some_and(|c| c.read(cx).connected.is_some())
+    })
+    .await;
+    let conn = cx.read(|cx| f.state.read(cx).connection(profile, cx).unwrap());
+    let changed = Arc::new(Mutex::new(Vec::new()));
+    let record = changed.clone();
+    let _changed = cx.update(|cx| {
+        cx.subscribe(&conn, move |_, event: &CollectionChanged, _| {
+            record.lock().unwrap().push(event.0.clone());
+        })
+    });
+    f.fake.finish(id, finished());
+    cx.run_until_parked();
+    assert_eq!(*changed.lock().unwrap(), ["books"]);
+}
+
+#[gpui_kit::test]
+async fn failure_text_is_capped(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let id = f.start(cx);
+    let err = TransferError::Client(Error::Http {
+        status: 502,
+        message: "x".repeat(ERROR_BYTES * 100),
+        body: String::new(),
+    });
+    f.fake.finish(
+        id,
+        import_outcome(JobEnd::Failed(err), ImportProgress::default()),
+    );
+    cx.run_until_parked();
+    match f.status(cx, id) {
+        JobStatus::Failed(text) => assert!(text.len() <= ERROR_BYTES, "{}", text.len()),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[gpui_kit::test]
@@ -679,13 +803,36 @@ async fn count_shows_with_the_shortcut(cx: &mut TestAppContext) {
     let id = f.start(cx);
     assert!(f.has(cx, "status.jobs"));
     let text = f.text(cx, "status.jobs").unwrap();
-    assert!(text.contains("1 jobs"), "{text}");
+    assert!(text.contains("1 job") && !text.contains("1 jobs"), "{text}");
     f.click(cx, "status.jobs");
     assert!(f.has(cx, "jobs.panel"));
     f.fake.finish(id, finished());
     cx.run_until_parked();
     f.click(cx, "jobs.dismiss");
     assert!(!f.has(cx, "status.jobs"));
+}
+
+#[gpui_kit::test]
+async fn count_is_plural_from_two(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.start(cx);
+    f.start(cx);
+    let text = f.text(cx, "status.jobs").unwrap();
+    assert!(text.contains("2 jobs"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn report_of_a_job_ended_while_hidden_shows_with_the_tab(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.press(cx, TOGGLE_LOG);
+    let id = f.start(cx);
+    let mut outcome = import_outcome(JobEnd::Finished, update(0));
+    outcome.report = report_with(vec![failed_row(1)]);
+    f.fake.finish(id, outcome);
+    cx.run_until_parked();
+    f.press(cx, TOGGLE_JOBS);
+    let row = f.text(cx, "jobs.report.row.0").unwrap();
+    assert!(row.contains("Field n of line 1 must"), "{row}");
 }
 
 #[gpui_kit::test]
@@ -711,6 +858,57 @@ async fn saved_failed_lines_offer_import(cx: &mut TestAppContext) {
         source.is_some_and(|e| e.label().is_some_and(|l| l.contains("books.failed")))
     })
     .await;
+}
+
+/// Saves the failed lines of the shown job to a new file.
+fn save_failed(f: &Fixture, cx: &mut TestAppContext) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("books.failed.jsonl");
+    std::fs::write(&path, "{}\n").unwrap();
+    f.click(cx, "jobs.save_failed");
+    cx.simulate_new_path_selection(|_| Some(path.clone()));
+    cx.run_until_parked();
+    dir
+}
+
+#[gpui_kit::test]
+async fn saved_failed_lines_of_each_job_stay_offered(cx: &mut TestAppContext) {
+    let (f, _) = finished_with_a_report(cx).await;
+    let _first = save_failed(&f, cx);
+    let id = f.start(cx);
+    let mut outcome = import_outcome(JobEnd::Finished, update(0));
+    outcome.report = report_with(vec![failed_row(1)]);
+    f.fake.finish(id, outcome);
+    cx.run_until_parked();
+    assert!(!f.has(cx, "jobs.import_saved"), "the new job saved nothing");
+    let _second = save_failed(&f, cx);
+    assert!(f.has(cx, "jobs.import_saved"));
+    f.click(cx, "jobs.row.0");
+    assert!(
+        f.has(cx, "jobs.import_saved"),
+        "the first file is still known"
+    );
+}
+
+#[gpui_kit::test]
+async fn saving_failed_lines_does_not_save_the_report(cx: &mut TestAppContext) {
+    let (f, _) = finished_with_a_report(cx).await;
+    let _dir = save_failed(&f, cx);
+    f.click(cx, "jobs.dismiss");
+    assert!(f.has(cx, "confirm.ok"), "the report is still unsaved");
+}
+
+#[gpui_kit::test]
+async fn import_of_saved_lines_says_when_the_connection_is_gone(cx: &mut TestAppContext) {
+    let (f, _) = finished_with_a_report(cx).await;
+    let _dir = save_failed(&f, cx);
+    let profile = f.profile.id;
+    cx.update(|cx| f.state.update(cx, |s, cx| s.disconnect(profile, cx)));
+    cx.run_until_parked();
+    f.click(cx, "jobs.import_saved");
+    let text = f.text(cx, "jobs.saved").unwrap();
+    assert!(text.contains("connection"), "{text}");
+    assert!(!f.has(cx, "transfer.import.start"));
 }
 
 async fn export_running(cx: &mut TestAppContext) -> (Fixture, JobId) {

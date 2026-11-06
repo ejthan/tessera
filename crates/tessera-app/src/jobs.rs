@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Running imports and exports. [`Jobs`] is a global entity, not part of a view or a
-//! connection, so closing a dialog or a tab or disconnecting never drops a job.
+//! connection, so closing a dialog or a tab or disconnecting never drops a job. A disconnect
+//! does lock the client a job shares, which stops a write on a read-only profile.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -12,12 +13,12 @@ use gpui_kit::{
     WeakEntity,
 };
 use rust_i18n::t;
-use tessera_client::Client;
+use tessera_client::{Client, Error};
 use tessera_core::profile::{Environment, Profile};
 use tessera_core::transfer::export::{ExportJob, ExportOutcome, ExportProgress};
 use tessera_core::transfer::import::{ImportJob, ImportOutcome, ImportProgress};
 use tessera_core::transfer::report::Report;
-use tessera_core::transfer::{JobControl, JobEnd, TransferError};
+use tessera_core::transfer::{JobControl, JobEnd, TransferError, cap_error};
 use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
@@ -101,6 +102,7 @@ pub struct Job {
     /// The report was saved, so dismissing it loses nothing.
     pub report_saved: bool,
     profile: Profile,
+    /// Tells whether a refused write came from a disconnect.
     state: WeakEntity<ConnectionState>,
     /// Fires when the backend is done, also while the foreground executor stands still.
     done: Option<oneshot::Receiver<()>>,
@@ -153,7 +155,7 @@ pub fn init(cx: &mut App) {
 
 /// The sentence for a failed job.
 fn failure_text(err: &TransferError, profile: &Profile) -> SharedString {
-    match err {
+    let text = match err {
         TransferError::Client(e) => long_error_text(e, profile),
         TransferError::Read(e) => read_error_text(e),
         TransferError::Report(detail) => t!("jobs.error.report", detail = detail).to_string(),
@@ -165,8 +167,8 @@ fn failure_text(err: &TransferError, profile: &Profile) -> SharedString {
         .to_string(),
         TransferError::UnsafeField(name) => t!("jobs.error.unsafe_field", name = name).to_string(),
         TransferError::Io(detail) => t!("jobs.error.io", detail = detail).to_string(),
-    }
-    .into()
+    };
+    cap_error(&text).to_string().into()
 }
 
 /// What `start` needs to know of a job.
@@ -349,16 +351,15 @@ impl Jobs {
         job.status = match end {
             JobEnd::Finished => JobStatus::Finished,
             JobEnd::Stopped => JobStatus::Stopped,
+            // A disconnect locks the client this job shares (spec 7.1).
+            JobEnd::Failed(TransferError::Client(Error::ReadOnly { .. }))
+                if job.state.upgrade().is_none_or(|c| c.read(cx).closed) =>
+            {
+                JobStatus::Failed(t!("jobs.error.locked_by_disconnect").to_string().into())
+            }
             JobEnd::Failed(err) => JobStatus::Failed(failure_text(err, &job.profile)),
         };
         job.outcome = Some(outcome);
-        // Also after a stop or a failure: what arrived stays on the server.
-        let reload = (job.kind == JobKind::Import)
-            .then(|| job.state.upgrade().map(|c| (c, job.collection.clone())))
-            .flatten();
-        if let Some((connection, name)) = reload {
-            connection.update(cx, |c, cx| c.collection_changed(name, cx));
-        }
         cx.emit(RunningChanged(self.running()));
         cx.emit(JobFinished(id));
         cx.notify();

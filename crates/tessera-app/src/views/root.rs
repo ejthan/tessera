@@ -29,7 +29,7 @@ use crate::actions::{
     ToggleRequestLog,
 };
 use crate::connection::ConnectionState;
-use crate::jobs::{JobFinished, JobId, JobStatus, Jobs, JobsGlobal, Live, RunningChanged};
+use crate::jobs::{JobFinished, JobId, JobKind, JobStatus, Jobs, JobsGlobal, Live, RunningChanged};
 use crate::state::{
     AppState, CloseCollection, OpenCollection, OpenCollections, OpenConsole, OpenOverview,
     OpenSearch,
@@ -50,6 +50,9 @@ pub struct RootView {
     welcome: Entity<WelcomePanel>,
     log: Entity<RequestLogPanel>,
     jobs: Entity<JobsPanel>,
+    /// How many jobs run; `None` without a job. `render` must not read `Jobs`: that would
+    /// redraw the window on every progress update.
+    running_jobs: Option<usize>,
     /// The connection tab selected last, in the center or an open dock. Band, frame, title bar
     /// and status bar follow it.
     active: Option<PanelId>,
@@ -58,6 +61,11 @@ pub struct RootView {
     /// What was wrong with `keymap.toml`, in full. It stays until the file is fixed.
     keymap_errors: Vec<String>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What the status bar counts.
+fn count_running(jobs: &Jobs) -> Option<usize> {
+    (!jobs.jobs().is_empty()).then(|| jobs.running())
 }
 
 impl RootView {
@@ -89,8 +97,12 @@ impl RootView {
             area.set_center(center, window, cx);
         });
         let job_list = cx.global::<JobsGlobal>().0.clone();
+        let running_jobs = count_running(job_list.read(cx));
         let subscriptions = vec![
-            cx.subscribe(&job_list, |_, _, _: &RunningChanged, cx| cx.notify()),
+            cx.subscribe(&job_list, |this, jobs, _: &RunningChanged, cx| {
+                this.running_jobs = count_running(jobs.read(cx));
+                cx.notify();
+            }),
             cx.subscribe_in(
                 &job_list,
                 window,
@@ -166,6 +178,7 @@ impl RootView {
             welcome,
             log,
             jobs,
+            running_jobs,
             active: None,
             displayed: Vec::new(),
             keymap_errors: Vec::new(),
@@ -249,8 +262,24 @@ impl RootView {
         }
     }
 
+    /// Reloads what an import wrote, also after a stop or a failure: what arrived stays on the
+    /// server. By profile, as the connection may be a new one by now.
+    fn reload_after(&self, id: JobId, cx: &mut Context<Self>) {
+        let jobs: &Jobs = cx.global::<JobsGlobal>().0.read(cx);
+        let job = jobs.jobs().iter().find(|job| job.id == id);
+        let Some(job) = job.filter(|job| job.kind == JobKind::Import && job.outcome.is_some())
+        else {
+            return;
+        };
+        let name = job.collection.clone();
+        if let Some(connection) = self.state.read(cx).connection(job.connection, cx) {
+            connection.update(cx, |c, cx| c.collection_changed(name, cx));
+        }
+    }
+
     /// A job ending is a background event, so it is the one toast, unless its tab is on screen.
     fn job_finished(&mut self, id: JobId, window: &mut Window, cx: &mut Context<Self>) {
+        self.reload_after(id, cx);
         if self.bottom_shows(self.jobs_id(), cx) {
             return;
         }
@@ -591,9 +620,8 @@ impl Render for RootView {
         let unlocked = active.is_some_and(|c| c.writes_unlocked);
         let prod = profile.is_some_and(|p| p.environment.is_prod());
         let log_open = self.bottom_shows(self.log_id(), cx);
-        let job_list: &Jobs = cx.global::<JobsGlobal>().0.read(cx);
-        let jobs = (!job_list.jobs().is_empty()).then(|| status_bar::JobsEntry {
-            running: job_list.running(),
+        let jobs = self.running_jobs.map(|running| status_bar::JobsEntry {
+            running,
             open: self.bottom_shows(self.jobs_id(), cx),
         });
         let title = SharedString::from(
