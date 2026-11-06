@@ -18,6 +18,7 @@ use tessera_core::documents::views::{self, CollectionView, ViewsFile};
 use tessera_core::import;
 use tessera_core::log::{LogEntry, RequestLog};
 use tessera_core::profile::Profile;
+use tessera_core::search::params::SearchDraft;
 use tessera_core::secrets::{SecretError, SecretStore};
 use tessera_core::store::{self, ConnectionsFile, SCHEMA_VERSION, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -46,6 +47,9 @@ pub struct OpenCollections(pub Uuid);
 
 /// Asks the window to show the tab of one collection of a profile.
 pub struct OpenCollection(pub Uuid, pub String);
+
+/// Asks the window to show the search tab of a profile, with `.1` loaded into it when given.
+pub struct OpenSearch(pub Uuid, pub Option<SearchDraft>);
 
 /// Asks the window to close the tab of one collection of a profile, which no longer exists.
 pub struct CloseCollection(pub Uuid, pub String);
@@ -619,6 +623,13 @@ impl AppState {
         cx.notify();
     }
 
+    /// Asks for the search tab of profile `id`, showing `draft` when given.
+    pub fn open_search(&mut self, id: Uuid, draft: Option<SearchDraft>, cx: &mut Context<Self>) {
+        self.selected = Some(id);
+        cx.emit(OpenSearch(id, draft));
+        cx.notify();
+    }
+
     /// Asks for the tab of collection `name` of profile `id` to close.
     pub fn close_collection(&mut self, id: Uuid, name: String, cx: &mut Context<Self>) {
         cx.emit(CloseCollection(id, name));
@@ -664,6 +675,7 @@ fn observe_connection(conn: &Entity<ConnectionState>, cx: &mut Context<AppState>
 impl EventEmitter<OpenOverview> for AppState {}
 impl EventEmitter<OpenCollections> for AppState {}
 impl EventEmitter<OpenCollection> for AppState {}
+impl EventEmitter<OpenSearch> for AppState {}
 impl EventEmitter<CloseCollection> for AppState {}
 
 /// Runs a blocking secret-store or file call on tokio's blocking pool.

@@ -15,12 +15,16 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use super::connect_dialog::ConnectDialog;
-use super::dock::{CollectionPanel, CollectionsPanel, OverviewPanel, SidebarPanel, WelcomePanel};
+use super::dock::{
+    CollectionPanel, CollectionsPanel, OverviewPanel, SearchPanel, SidebarPanel, WelcomePanel,
+};
 use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
-use crate::actions::{CopyAsCurl, NewConnection, ToggleRequestLog};
+use crate::actions::{CopyAsCurl, NewConnection, OpenSearchTab, ToggleRequestLog};
 use crate::connection::ConnectionState;
-use crate::state::{AppState, CloseCollection, OpenCollection, OpenCollections, OpenOverview};
+use crate::state::{
+    AppState, CloseCollection, OpenCollection, OpenCollections, OpenOverview, OpenSearch,
+};
 
 /// Width of the left sidebar.
 const SIDEBAR_WIDTH: f32 = 240.;
@@ -96,6 +100,19 @@ impl RootView {
                     this.open_tab(event.0, Kind::Collection(event.1.clone()), window, cx);
                 },
             ),
+            cx.subscribe_in(&state, window, |this, _, event: &OpenSearch, window, cx| {
+                this.open_tab(event.0, Kind::Search, window, cx);
+                let Some(draft) = event.1.clone() else {
+                    return;
+                };
+                let tab = this
+                    .active
+                    .and_then(|id| connection_tab(this.dock.read(cx), id));
+                if let Some(ConnectionTab::Search(panel)) = tab {
+                    let workbench = panel.read(cx).workbench().clone();
+                    workbench.update(cx, |w, cx| w.load(vec![draft], false, window, cx));
+                }
+            }),
             cx.subscribe_in(
                 &state,
                 window,
@@ -231,6 +248,10 @@ impl RootView {
                                 cx.new(|cx| CollectionPanel::new(conn, state, name, window, cx));
                             (PanelId::from(panel.entity_id()), panel_handle(panel))
                         }
+                        Kind::Search => {
+                            let panel = cx.new(|cx| SearchPanel::new(conn, state, window, cx));
+                            (PanelId::from(panel.entity_id()), panel_handle(panel))
+                        }
                     };
                     (id, Some(handle))
                 }
@@ -250,6 +271,7 @@ impl RootView {
         match connection_tab(self.dock.read(cx), panel) {
             Some(ConnectionTab::Collections(tab)) => tab.focus_handle(cx).focus(window, cx),
             Some(ConnectionTab::Collection(tab)) => tab.focus_handle(cx).focus(window, cx),
+            Some(ConnectionTab::Search(tab)) => tab.focus_handle(cx).focus(window, cx),
             _ => {}
         }
     }
@@ -296,6 +318,7 @@ impl RootView {
                     ConnectionTab::Overview(panel) => area.remove_panel(panel, window, cx),
                     ConnectionTab::Collections(panel) => area.remove_panel(panel, window, cx),
                     ConnectionTab::Collection(panel) => area.remove_panel(panel, window, cx),
+                    ConnectionTab::Search(panel) => area.remove_panel(panel, window, cx),
                 }
             }
         });
@@ -343,6 +366,7 @@ enum Kind {
     Collections,
     /// The schema tab of the named collection.
     Collection(String),
+    Search,
 }
 
 /// A tab of one connection.
@@ -350,6 +374,7 @@ enum ConnectionTab {
     Overview(Entity<OverviewPanel>),
     Collections(Entity<CollectionsPanel>),
     Collection(Entity<CollectionPanel>),
+    Search(Entity<SearchPanel>),
 }
 
 impl ConnectionTab {
@@ -358,6 +383,7 @@ impl ConnectionTab {
             Self::Overview(_) => Kind::Overview,
             Self::Collections(_) => Kind::Collections,
             Self::Collection(panel) => Kind::Collection(panel.read(cx).name().to_owned()),
+            Self::Search(_) => Kind::Search,
         }
     }
 
@@ -366,6 +392,7 @@ impl ConnectionTab {
             Self::Overview(panel) => panel.entity_id(),
             Self::Collections(panel) => panel.entity_id(),
             Self::Collection(panel) => panel.entity_id(),
+            Self::Search(panel) => panel.entity_id(),
         })
     }
 
@@ -374,6 +401,7 @@ impl ConnectionTab {
             Self::Overview(panel) => panel.read(cx).connection().clone(),
             Self::Collections(panel) => panel.read(cx).connection().clone(),
             Self::Collection(panel) => panel.read(cx).connection().clone(),
+            Self::Search(panel) => panel.read(cx).connection().clone(),
         }
     }
 }
@@ -385,12 +413,16 @@ fn connection_tab(area: &DockArea, id: PanelId) -> Option<ConnectionTab> {
         Ok(panel) => return Some(ConnectionTab::Overview(panel)),
         Err(view) => view,
     };
-    match view.downcast::<CollectionsPanel>() {
-        Ok(panel) => Some(ConnectionTab::Collections(panel)),
+    let view = match view.downcast::<CollectionsPanel>() {
+        Ok(panel) => return Some(ConnectionTab::Collections(panel)),
+        Err(view) => view,
+    };
+    match view.downcast::<CollectionPanel>() {
+        Ok(panel) => Some(ConnectionTab::Collection(panel)),
         Err(view) => view
-            .downcast::<CollectionPanel>()
+            .downcast::<SearchPanel>()
             .ok()
-            .map(ConnectionTab::Collection),
+            .map(ConnectionTab::Search),
     }
 }
 
@@ -434,6 +466,12 @@ impl Render for RootView {
                 })
             });
         let red = rgb(env_badge::PROD_RED);
+        let state = self.state.read(cx);
+        let can_search = state
+            .selected
+            .and_then(|id| state.connection(id, cx))
+            .filter(|c| c.read(cx).connected.is_some())
+            .map(|c| c.read(cx).profile.id);
         let root = v_flex();
         #[cfg(feature = "frame-overlay")]
         let root = root.on_action(|_: &crate::actions::ToggleFrameOverlay, window, _| {
@@ -461,6 +499,11 @@ impl Render for RootView {
                     this.focus_handle.focus(window, cx);
                 }
             }))
+            .when_some(can_search, |el, id| {
+                el.on_action(cx.listener(move |this, _: &OpenSearchTab, _, cx| {
+                    this.state.update(cx, |s, cx| s.open_search(id, None, cx));
+                }))
+            })
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(TitleBar::new().child(switcher))

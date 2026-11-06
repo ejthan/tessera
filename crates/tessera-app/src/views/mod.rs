@@ -17,6 +17,7 @@ pub mod request_log;
 pub mod root;
 pub mod schema_dialog;
 pub mod schema_view;
+pub mod search;
 pub mod sidebar;
 pub mod stats_table;
 pub mod status_bar;

@@ -2,12 +2,14 @@
 
 //! Reusable GPUI widgets for Tessera.
 
+pub mod body_view;
 pub mod confirm;
 pub mod confirm_danger;
 pub mod field_type_select;
 pub mod filter_input;
 pub mod json_editor;
 
+pub use body_view::{BodyView, Shown};
 pub use field_type_select::{FieldTypeChanged, FieldTypeSelect, field_type_description};
 pub use filter_input::{FacetFetch, FilterField, FilterInput, FilterInputEvent};
 pub use json_editor::{JsonEditor, JsonEditorEvent, JsonError, JsonMark, MarkSeverity};

@@ -65,7 +65,19 @@ gpui_kit::actions!(
         DeleteDocuments,
         DeleteByQuery,
         UpdateByQuery,
-        BulkContinue
+        BulkContinue,
+        OpenSearchTab,
+        RunSearch,
+        ShowHits,
+        ShowRawResult,
+        ToggleInstant,
+        FocusQuery,
+        NextResultPage,
+        PreviousResultPage,
+        AddCondition,
+        MoveChipLeft,
+        MoveChipRight,
+        RemoveChip
     ]
 );
 
@@ -109,6 +121,16 @@ pub const SIDEBAR_LINK: &str = "SidebarLink";
 pub const SCHEMA_DIALOG: &str = "SchemaDialog";
 /// Key context of the dialog's last field row, where ⌘↩ / Ctrl+↩ adds the next field.
 pub const SCHEMA_LAST_FIELD: &str = "SchemaLastField";
+/// Key context of a search tab.
+pub const WORKBENCH: &str = "Workbench";
+/// An input in a search tab, which has its own ⌘↩.
+const WORKBENCH_INPUT: &str = "Workbench > Input";
+/// Key context of the Add condition row, deeper than Run.
+pub const CONDITION_ROW: &str = "ConditionRow";
+/// The value input of that row.
+const CONDITION_INPUT: &str = "ConditionRow > Input";
+/// Key context of a focused `query_by` chip.
+pub const CHIP: &str = "SearchChip";
 
 #[cfg(target_os = "macos")]
 const NEW_CONNECTION: &str = "cmd-n";
@@ -264,6 +286,30 @@ const DELETE_QUERY: &str = "ctrl-shift-k";
 const UPDATE_QUERY: &str = "cmd-shift-u";
 #[cfg(not(target_os = "macos"))]
 const UPDATE_QUERY: &str = "ctrl-shift-u";
+#[cfg(target_os = "macos")]
+const OPEN_SEARCH: &str = "cmd-shift-e";
+#[cfg(not(target_os = "macos"))]
+const OPEN_SEARCH: &str = "ctrl-shift-e";
+#[cfg(target_os = "macos")]
+const SHOW_HITS: &str = "cmd-3";
+#[cfg(not(target_os = "macos"))]
+const SHOW_HITS: &str = "ctrl-3";
+#[cfg(target_os = "macos")]
+const SHOW_RAW: &str = "cmd-4";
+#[cfg(not(target_os = "macos"))]
+const SHOW_RAW: &str = "ctrl-4";
+#[cfg(target_os = "macos")]
+const TOGGLE_INSTANT: &str = "cmd-alt-l";
+#[cfg(not(target_os = "macos"))]
+const TOGGLE_INSTANT: &str = "ctrl-alt-l";
+#[cfg(target_os = "macos")]
+const PREVIOUS_PAGE: &str = "cmd-alt-up";
+#[cfg(not(target_os = "macos"))]
+const PREVIOUS_PAGE: &str = "ctrl-alt-up";
+#[cfg(target_os = "macos")]
+const NEXT_PAGE: &str = "cmd-alt-down";
+#[cfg(not(target_os = "macos"))]
+const NEXT_PAGE: &str = "ctrl-alt-down";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -362,6 +408,25 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SAVE, SubmitSchema, Some(SCHEMA_DIALOG)),
         // Deeper than the dialog, so in the last row ⌘↩ adds a field instead of creating.
         KeyBinding::new(SAVE, AddField, Some(SCHEMA_LAST_FIELD)),
+        KeyBinding::new(OPEN_SEARCH, OpenSearchTab, None),
+        KeyBinding::new(LOCK_AGAIN, LockAgain, Some(WORKBENCH)),
+        KeyBinding::new(SAVE, RunSearch, Some(WORKBENCH)),
+        KeyBinding::new(SAVE, RunSearch, Some(WORKBENCH_INPUT)),
+        KeyBinding::new(SHOW_FORM, ShowForm, Some(WORKBENCH)),
+        KeyBinding::new(SHOW_JSON, ShowJson, Some(WORKBENCH)),
+        KeyBinding::new(SHOW_HITS, ShowHits, Some(WORKBENCH)),
+        KeyBinding::new(SHOW_RAW, ShowRawResult, Some(WORKBENCH)),
+        KeyBinding::new(TOGGLE_INSTANT, ToggleInstant, Some(WORKBENCH)),
+        KeyBinding::new(FIND, FocusQuery, Some(WORKBENCH)),
+        KeyBinding::new(PREVIOUS_PAGE, PreviousResultPage, Some(WORKBENCH)),
+        KeyBinding::new(NEXT_PAGE, NextResultPage, Some(WORKBENCH)),
+        // Deeper than Run, so in the row ⌘↩ adds the condition.
+        KeyBinding::new(SAVE, AddCondition, Some(CONDITION_ROW)),
+        KeyBinding::new(SAVE, AddCondition, Some(CONDITION_INPUT)),
+        KeyBinding::new("alt-left", MoveChipLeft, Some(CHIP)),
+        KeyBinding::new("alt-right", MoveChipRight, Some(CHIP)),
+        KeyBinding::new("delete", RemoveChip, Some(CHIP)),
+        KeyBinding::new("backspace", RemoveChip, Some(CHIP)),
     ]);
     #[cfg(feature = "frame-overlay")]
     cx.bind_keys([KeyBinding::new(

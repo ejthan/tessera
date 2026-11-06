@@ -9,6 +9,7 @@ pub mod documents;
 pub mod i18n;
 pub mod poller;
 pub mod runtime;
+pub mod search;
 pub mod state;
 pub mod views;
 
@@ -104,6 +105,9 @@ pub fn run(launch: Launch) -> Result<(), String> {
             collections::tokio_backend(handle.clone()),
         ));
         cx.set_global(documents::DocumentsBackendGlobal(documents::tokio_backend(
+            handle.clone(),
+        )));
+        cx.set_global(search::SearchBackendGlobal(search::tokio_backend(
             handle.clone(),
         )));
         cx.set_global(runtime::Tokio(handle));
