@@ -68,6 +68,7 @@ impl Client {
         let request_body = self
             .hook
             .as_ref()
+            .filter(|_| self.keep_request_body)
             .and_then(|_| body.as_ref().map(|(text, _)| Body::new(text)));
         let mut request = self
             .http

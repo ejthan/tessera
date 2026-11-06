@@ -10,9 +10,10 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 use tessera_client::{
-    BODY_LIMIT, Client, ClientOptions, DocumentQuery, Error, RequestEvent, RequestHook,
+    BODY_LIMIT, Client, ClientOptions, DirtyValues, DocumentQuery, Error, ImportAction,
+    ImportParams, RequestEvent, RequestHook,
 };
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{body_string, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(url: &str) -> Client {
@@ -458,4 +459,194 @@ async fn dot_ids_never_reach_the_server() {
         let patched = client.patch_document("c", id, &serde_json::json!({})).await;
         assert!(refused(&patched.unwrap_err()));
     }
+}
+
+fn params(action: ImportAction, dirty_values: DirtyValues) -> ImportParams {
+    ImportParams {
+        action,
+        batch_size: 500,
+        dirty_values,
+    }
+}
+
+#[tokio::test]
+async fn import_sends_action_and_options() {
+    let actions = [
+        (ImportAction::Create, "create"),
+        (ImportAction::Upsert, "upsert"),
+        (ImportAction::Update, "update"),
+        (ImportAction::Emplace, "emplace"),
+    ];
+    let dirty = [
+        (DirtyValues::CoerceOrReject, "coerce_or_reject"),
+        (DirtyValues::CoerceOrDrop, "coerce_or_drop"),
+        (DirtyValues::Drop, "drop"),
+        (DirtyValues::Reject, "reject"),
+    ];
+    for (action, a) in actions {
+        for (value, d) in dirty {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/collections/c/documents/import"))
+                .and(query_param("action", a))
+                .and(query_param("batch_size", "500"))
+                .and(query_param("dirty_values", d))
+                .and(query_param("return_id", "true"))
+                .and(header("content-type", "text/plain"))
+                .and(body_string("{\"id\":\"1\"}"))
+                .respond_with(ResponseTemplate::new(200).set_body_string("{\"success\":true}\n"))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let lines = client(&server.uri())
+                .import_batch("c", &params(action, value), "{\"id\":\"1\"}")
+                .await
+                .unwrap();
+            assert_eq!(lines.len(), 1);
+        }
+    }
+}
+
+async fn import_answer(answer: &str) -> Vec<tessera_client::ImportLine> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/collections/c/documents/import"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(answer))
+        .mount(&server)
+        .await;
+    client(&server.uri())
+        .import_batch(
+            "c",
+            &params(ImportAction::Create, DirtyValues::default()),
+            "x",
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn import_decodes_lines_in_order() {
+    let lines = import_answer(
+        "{\"success\":true,\"id\":\"1\"}\n{\"code\":400,\"error\":\"Field `n` must be an int32.\",\"id\":\"2\",\"success\":false}\n",
+    )
+    .await;
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].success);
+    assert_eq!(lines[0].id.as_deref(), Some("1"));
+    assert_eq!((lines[0].code, lines[0].error.as_deref()), (None, None));
+    assert!(!lines[1].success);
+    assert_eq!(lines[1].code, Some(400));
+    assert_eq!(
+        lines[1].error.as_deref(),
+        Some("Field `n` must be an int32.")
+    );
+    assert_eq!(lines[1].id.as_deref(), Some("2"));
+}
+
+#[tokio::test]
+async fn import_keeps_an_undecodable_line() {
+    let lines = import_answer("{\"success\":true}\nnot json\n").await;
+    assert_eq!(lines.len(), 2);
+    assert!(!lines[1].success);
+    assert_eq!(lines[1].error.as_deref(), Some("not json"));
+    assert_eq!((lines[1].code, lines[1].id.as_deref()), (None, None));
+}
+
+#[tokio::test]
+async fn import_empty_answer_is_empty() {
+    assert!(import_answer("").await.is_empty());
+}
+
+#[tokio::test]
+async fn import_error_status_is_http() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/collections/gone/documents/import"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_string("{\"message\":\"Collection not found\"}"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/collections/busy/documents/import"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("Not Ready"))
+        .mount(&server)
+        .await;
+    let c = client(&server.uri());
+    let p = params(ImportAction::Create, DirtyValues::default());
+    let e = c.import_batch("gone", &p, "x").await.unwrap_err();
+    assert_eq!(e.typesense_message(), Some("Collection not found"));
+    let e = c.import_batch("busy", &p, "x").await.unwrap_err();
+    assert!(matches!(e, Error::Http { status: 503, .. }), "{e:?}");
+}
+
+#[tokio::test]
+async fn import_is_refused_when_read_only() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let c = Client::new(
+        &[&server.uri()],
+        SecretString::from("k"),
+        ClientOptions {
+            read_only: true,
+            ..ClientOptions::default()
+        },
+    )
+    .unwrap();
+    let e = c
+        .import_batch(
+            "c",
+            &params(ImportAction::Create, DirtyValues::default()),
+            "x",
+        )
+        .await;
+    assert!(matches!(e, Err(Error::ReadOnly { .. })));
+}
+
+#[tokio::test]
+async fn import_event_has_no_bodies() {
+    let server = MockServer::start().await;
+    let answer = "{\"success\":true}\n";
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(answer))
+        .mount(&server)
+        .await;
+    let events = Arc::new(Mutex::new(Vec::<RequestEvent>::new()));
+    let sink = events.clone();
+    let hook: RequestHook = Arc::new(move |e: &RequestEvent| sink.lock().unwrap().push(e.clone()));
+    let c = client(&server.uri()).with_hook(hook);
+    let p = params(ImportAction::Create, DirtyValues::default());
+    let big = "a".repeat(BODY_LIMIT + 10);
+    c.import_batch("c", &p, "{\"id\":\"1\"}").await.unwrap();
+    c.import_batch("c", &p, &big).await.unwrap();
+    let events = events.lock().unwrap();
+    for e in events.iter() {
+        assert!(e.request_body.is_none() && e.response_body.is_none());
+        assert_eq!((e.status, e.size), (Some(200), Some(answer.len() as u64)));
+    }
+    assert_eq!(events.len(), 2);
+}
+
+#[tokio::test]
+async fn without_bodies_keeps_other_clients_logging() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{\"success\":true}\n"))
+        .mount(&server)
+        .await;
+    let events = Arc::new(Mutex::new(Vec::<RequestEvent>::new()));
+    let sink = events.clone();
+    let hook: RequestHook = Arc::new(move |e: &RequestEvent| sink.lock().unwrap().push(e.clone()));
+    let c = client(&server.uri()).with_hook(hook);
+    let _quiet = c.without_bodies();
+    c.create_document("c", &serde_json::json!({"id":"1"}))
+        .await
+        .unwrap();
+    let events = events.lock().unwrap();
+    assert!(events[0].request_body.is_some());
+    assert!(events[0].response_body.is_some());
 }

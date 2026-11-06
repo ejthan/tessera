@@ -24,6 +24,81 @@ pub struct DocumentQuery {
     pub exclude_fields: Option<String>,
 }
 
+/// What `documents/import` does with each line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportAction {
+    /// Add; an existing id is refused.
+    Create,
+    /// Add or replace.
+    Upsert,
+    /// Merge into an existing document; a missing id is refused.
+    Update,
+    /// Add, or merge into an existing document.
+    Emplace,
+}
+
+impl ImportAction {
+    /// The value of the `action` parameter.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Upsert => "upsert",
+            Self::Update => "update",
+            Self::Emplace => "emplace",
+        }
+    }
+}
+
+/// What the server does with a value of the wrong type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DirtyValues {
+    /// Convert it, else refuse the document.
+    #[default]
+    CoerceOrReject,
+    /// Convert it, else leave the field out.
+    CoerceOrDrop,
+    /// Leave the field out.
+    Drop,
+    /// Refuse the document.
+    Reject,
+}
+
+impl DirtyValues {
+    /// The value of the `dirty_values` parameter.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CoerceOrReject => "coerce_or_reject",
+            Self::CoerceOrDrop => "coerce_or_drop",
+            Self::Drop => "drop",
+            Self::Reject => "reject",
+        }
+    }
+}
+
+/// How one import batch is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportParams {
+    /// What to do with each line.
+    pub action: ImportAction,
+    /// Documents the server indexes per round, sent as `batch_size`.
+    pub batch_size: u32,
+    /// What to do with a value of the wrong type.
+    pub dirty_values: DirtyValues,
+}
+
+/// The server's answer to one line of an import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportLine {
+    /// Whether the document was stored.
+    pub success: bool,
+    /// The HTTP-like code of a failure.
+    pub code: Option<u16>,
+    /// Why it failed; for an answer line that is no JSON object, that line.
+    pub error: Option<String>,
+    /// The document's id.
+    pub id: Option<String>,
+}
+
 /// One page of documents, without highlights or facets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchPage {
@@ -309,6 +384,73 @@ impl Client {
         {
             (200..300, body) => Ok(body),
             (status, body) => Err(Error::http(status, body)),
+        }
+    }
+
+    /// `POST …/documents/import`: one batch, one line per non-empty line of `body`. A 200 can
+    /// hold only failures, so every returned line counts. Not retried on another node: a
+    /// `POST` is not idempotent. The event keeps no bodies, a batch can be megabytes.
+    pub async fn import_batch(
+        &self,
+        collection: &str,
+        params: &ImportParams,
+        body: &str,
+    ) -> Result<Vec<ImportLine>, Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            success: bool,
+            code: Option<u16>,
+            error: Option<String>,
+            id: Option<String>,
+        }
+        let path = collection_path(collection, "/documents/import")?;
+        let batch_size = params.batch_size.to_string();
+        let query = encode_query(&[
+            ("action", params.action.as_str()),
+            ("batch_size", &batch_size),
+            ("dirty_values", params.dirty_values.as_str()),
+            ("return_id", "true"),
+        ]);
+        let (status, _, text) = self
+            .without_bodies()
+            .send_with(
+                self.active_node(),
+                crate::Method::POST,
+                &path,
+                Some(&query),
+                Some((body.to_string(), "text/plain")),
+                Some(LONG_TIMEOUT),
+            )
+            .await?;
+        if !(200..300).contains(&status) {
+            return Err(Error::http(status, text));
+        }
+        Ok(text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| match serde_json::from_str::<Raw>(line) {
+                Ok(raw) => ImportLine {
+                    success: raw.success,
+                    code: raw.code,
+                    error: raw.error,
+                    id: raw.id,
+                },
+                Err(_) => ImportLine {
+                    success: false,
+                    code: None,
+                    error: Some(line.to_string()),
+                    id: None,
+                },
+            })
+            .collect())
+    }
+
+    /// A clone whose request events keep no request or response body, for big batches.
+    pub fn without_bodies(&self) -> Self {
+        Self {
+            keep_request_body: false,
+            keep_response_body: false,
+            ..self.clone()
         }
     }
 
