@@ -381,6 +381,11 @@ impl SchemaDialog {
         if self.editing() || self.infer_task.is_some() {
             return;
         }
+        if self.locked() {
+            self.infer_error = Some(t!("schema.infer_locked").to_string().into());
+            cx.notify();
+            return;
+        }
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -432,7 +437,8 @@ impl SchemaDialog {
         );
     }
 
-    /// Fills the form and the JSON tab, keeping the name.
+    /// Fills the form and the JSON tab. The fields come from the file; everything else of the
+    /// draft stays, and so does the sorting field while it can still sort.
     fn apply_inferred(
         &mut self,
         inferred: &InferredSchema,
@@ -440,7 +446,14 @@ impl SchemaDialog {
         cx: &mut Context<Self>,
     ) {
         self.infer_notes = inferred.notes.clone();
-        self.replace_draft(inferred.to_draft(&self.draft.name), window, cx);
+        let proposed = inferred.to_draft(&self.draft.name);
+        let mut draft = self.draft.clone();
+        draft.fields = proposed.fields;
+        draft.enable_nested_fields = proposed.enable_nested_fields;
+        if !sync::sortable(&draft).contains(&draft.default_sorting_field) {
+            draft.default_sorting_field.clear();
+        }
+        self.replace_draft(draft, window, cx);
     }
 
     fn use_geopoint(&mut self, field: &str, window: &mut Window, cx: &mut Context<Self>) {

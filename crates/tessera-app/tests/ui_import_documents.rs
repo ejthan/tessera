@@ -544,6 +544,22 @@ async fn every_control_shows_its_shortcut(cx: &mut TestAppContext) {
     }
 }
 
+#[gpui_kit::test]
+async fn edit_schema_shows_its_shortcut_and_works(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    let button = f.act(cx, |window, _| {
+        window.find("transfer.import.edit_schema").bounds()
+    });
+    let kbd = gpui_kit::VisualTestContext::from_window(f.handle.into(), cx)
+        .debug_bounds(key("kbd:cmd-e", "kbd:ctrl-e"))
+        .unwrap();
+    assert!(button.contains(&kbd.center()));
+    f.press(cx, key("cmd-e", "ctrl-e"));
+    settle(cx);
+    assert!(f.has(cx, "schema.submit"));
+}
+
 /// A schema proposal with `n` and a field that may be a `geopoint`.
 fn inferred() -> InferredSchema {
     InferredSchema {

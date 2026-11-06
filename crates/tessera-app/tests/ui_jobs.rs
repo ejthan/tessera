@@ -448,6 +448,14 @@ impl Fixture {
         .unwrap()
     }
 
+    fn bounds(&self, cx: &mut TestAppContext, id: &str) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.find(id.to_string()).bounds()
+        })
+        .unwrap()
+    }
+
     fn has(&self, cx: &mut TestAppContext, id: &str) -> bool {
         cx.update_window(self.handle.into(), |_, window, cx| {
             window.render_frame(cx);
@@ -709,6 +717,19 @@ async fn toast_when_it_is_hidden(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn toast_names_the_connection(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let id = f.start(cx);
+    f.fake.finish(id, finished());
+    cx.run_until_parked();
+    let text = cx.read(|cx| {
+        let jobs = f.jobs.read(cx).jobs();
+        jobs.iter().find(|j| j.id == id).unwrap().toast_text()
+    });
+    assert!(text.starts_with(&format!("{}: ", f.profile.name)), "{text}");
+}
+
+#[gpui_kit::test]
 async fn save_report_uses_the_picked_path(cx: &mut TestAppContext) {
     let (f, _) = finished_with_a_report(cx).await;
     *f.fake.saved_lines.lock().unwrap() = 1;
@@ -754,6 +775,53 @@ async fn shift_command_j_opens_jobs(cx: &mut TestAppContext) {
     assert!(f.has(cx, "jobs.panel"));
     assert!(f.has(cx, "jobs.empty"));
     assert!(!f.has(cx, "dock.bottom"));
+}
+
+#[gpui_kit::test]
+async fn empty_panel_offers_import_for_the_selected_connection(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.press(cx, TOGGLE_JOBS);
+    assert!(f.has(cx, "jobs.import"));
+    let button = f.bounds(cx, "jobs.import");
+    let kbd = gpui_kit::VisualTestContext::from_window(f.handle.into(), cx)
+        .debug_bounds(key("kbd:cmd-shift-i", "kbd:ctrl-shift-i"))
+        .unwrap();
+    assert!(button.contains(&kbd.center()));
+    f.click(cx, "jobs.import");
+    cx.run_until_parked();
+    assert!(f.has(cx, "transfer.import.start"));
+}
+
+#[gpui_kit::test]
+async fn empty_panel_has_no_import_without_a_selected_connection(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    cx.update(|cx| {
+        f.state.update(cx, |s, cx| {
+            s.selected = None;
+            cx.notify();
+        })
+    });
+    f.press(cx, TOGGLE_JOBS);
+    assert!(f.has(cx, "jobs.empty"));
+    assert!(!f.has(cx, "jobs.import"));
+}
+
+#[gpui_kit::test]
+async fn import_this_file_shows_its_shortcut(cx: &mut TestAppContext) {
+    let (f, _) = finished_with_a_report(cx).await;
+    let _dir = save_failed(&f, cx);
+    let button = f.bounds(cx, "jobs.import_saved");
+    let kbd = gpui_kit::VisualTestContext::from_window(f.handle.into(), cx)
+        .debug_bounds(key("kbd:cmd-o", "kbd:ctrl-o"))
+        .unwrap();
+    assert!(button.contains(&kbd.center()));
+    f.panel_focus(cx);
+    f.press(cx, key("cmd-o", "ctrl-o"));
+    cx.wait_for(f.handle.into(), Duration::from_millis(5000), |window, _| {
+        let source = window.try_find("transfer.import.source");
+        source.is_some_and(|e| e.label().is_some_and(|l| l.contains("books.failed")))
+    })
+    .await;
 }
 
 #[gpui_kit::test]
@@ -944,6 +1012,17 @@ async fn finished_export_shows_unlisted_and_mismatch_warnings(cx: &mut TestAppCo
     assert_eq!(
         mismatch,
         "Exported 9 of 10. Others may have written at the same time."
+    );
+}
+
+#[gpui_kit::test]
+async fn export_that_found_nothing_says_it_kept_the_file(cx: &mut TestAppContext) {
+    let (f, id) = export_running(cx).await;
+    f.fake.finish_export(id, export_kept_outcome());
+    cx.run_until_parked();
+    assert_eq!(
+        f.text(cx, "jobs.export_kept").unwrap(),
+        "No documents; kept the existing file."
     );
 }
 

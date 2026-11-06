@@ -100,6 +100,8 @@ pub struct ExportOutcome {
     /// CSV values left out: their key was not in the header, or it repeated a key of the
     /// same document once flattened (`{"a.b":1,"a":{"b":2}}` keeps 1).
     pub unlisted_values: u64,
+    /// Nothing was found, so the file that was there stays untouched.
+    pub kept_existing: bool,
 }
 
 /// Whether `name` can be sent in `include_fields` or `exclude_fields`. A comma would split
@@ -416,6 +418,7 @@ pub async fn run_export(
         end: JobEnd::Failed(e),
         progress: state,
         unlisted_values,
+        kept_existing: false,
     };
 
     let names = match &job.fields {
@@ -447,6 +450,7 @@ pub async fn run_export(
     if matches!(written, Ok(Written::All)) {
         written = sink.close().await.map(|()| Written::All);
     }
+    let mut kept_existing = false;
     let end = match written {
         Ok(Written::Stopped) => {
             sink.state.phase = Phase::Stopping;
@@ -457,6 +461,7 @@ pub async fn run_export(
         Ok(Written::All) if sink.state.docs == 0 && part.replaces() => {
             drop(sink.writer);
             drop(part);
+            kept_existing = true;
             JobEnd::Finished
         }
         Ok(Written::All) => match part.persist(sink.writer, &job.target).await {
@@ -471,6 +476,7 @@ pub async fn run_export(
         end,
         progress: state,
         unlisted_values: sink.csv.unlisted,
+        kept_existing,
     }
 }
 

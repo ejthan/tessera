@@ -116,6 +116,8 @@ gpui_kit::actions!(
         SaveFailedLines,
         ImportDocuments,
         PickImportFile,
+        ImportSavedLines,
+        EditImportSchema,
         PasteImport,
         StartTransfer,
         ExportDocuments,
@@ -592,6 +594,8 @@ pub const PALETTE_HIDDEN: &[&str] = &[
     "tessera::DeleteSavedQuery",
     "tessera::ToggleFrameOverlay",
     "tessera::PickImportFile",
+    "tessera::ImportSavedLines",
+    "tessera::EditImportSchema",
     "tessera::PasteImport",
     "tessera::StartTransfer",
     "tessera::InferFromFile",
@@ -829,6 +833,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(IMPORT_DOCUMENTS, ImportDocuments, Some(COLLECTIONS)),
         KeyBinding::new(OPEN_SAVED, PickImportFile, Some(IMPORT_DIALOG)),
         KeyBinding::new(PASTE_IMPORT, PasteImport, Some(IMPORT_DIALOG)),
+        KeyBinding::new(EDIT, EditImportSchema, Some(IMPORT_DIALOG)),
         KeyBinding::new(SAVE, StartTransfer, Some(IMPORT_DIALOG)),
         KeyBinding::new(SAVE, StartTransfer, Some(IMPORT_INPUT)),
         KeyBinding::new(EXPORT_DOCUMENTS, ExportDocuments, Some(COLLECTION)),
@@ -840,6 +845,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(DELETE, DismissJob, Some(JOBS)),
         KeyBinding::new(SAVE_QUERY, SaveReport, Some(JOBS)),
         KeyBinding::new(SORT, SaveFailedLines, Some(JOBS)),
+        KeyBinding::new(OPEN_SAVED, ImportSavedLines, Some(JOBS)),
+        KeyBinding::new(IMPORT_DOCUMENTS, ImportDocuments, Some(JOBS)),
     ]);
     #[cfg(feature = "frame-overlay")]
     cx.bind_keys([KeyBinding::new(

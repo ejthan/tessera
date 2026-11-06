@@ -1231,3 +1231,59 @@ async fn cancelled_picker_changes_nothing(cx: &mut TestAppContext) {
     assert!(f.fake.infers.lock().unwrap().is_empty());
     assert!(!f.has(cx, "schema.infer_error"));
 }
+
+#[gpui_kit::test]
+async fn infer_with_unparsable_json_says_why(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    *f.fake.infer.lock().unwrap() = Some(Ok(inferred()));
+    let dialog = f.create(cx);
+    f.set_json(cx, &dialog, "{ nope");
+    f.act(cx, |window, cx| window.click("schema.infer", cx));
+    let text = f.label_of(cx, "schema.infer_error");
+    assert!(text.contains("JSON"), "{text}");
+    assert!(f.fake.infers.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn infer_keeps_what_the_file_does_not_say(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let mut proposal = inferred();
+    proposal.fields.push(FieldDraft::new("n", FieldType::Int32));
+    *f.fake.infer.lock().unwrap() = Some(Ok(proposal));
+    let dialog = f.create(cx);
+    let draft = |sorting: &str| {
+        json!({"name": "c", "fields": [{"name": "n", "type": "int32"}],
+            "default_sorting_field": sorting, "token_separators": ["-"],
+            "symbols_to_index": ["+"], "metadata": {"k": 1}})
+        .to_string()
+    };
+    f.set_json(cx, &dialog, &draft("n"));
+    let (_dir, path) = f.file();
+    f.infer_from(cx, Some(path.clone())).await;
+    f.act(cx, |window, cx| window.click("confirm.ok", cx));
+    let out = f.json(cx, &dialog);
+    assert_eq!(out["default_sorting_field"], "n");
+    assert_eq!(out["token_separators"], json!(["-"]));
+    assert_eq!(out["symbols_to_index"], json!(["+"]));
+    assert_eq!(out["metadata"], json!({"k": 1}));
+    assert_eq!(f.field_names(cx, &dialog), ["title", "place", "n"]);
+}
+
+#[gpui_kit::test]
+async fn infer_drops_a_sorting_field_the_file_lacks(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    *f.fake.infer.lock().unwrap() = Some(Ok(inferred()));
+    let dialog = f.create(cx);
+    let text = json!({"name": "c", "fields": [{"name": "n", "type": "int32"}],
+        "default_sorting_field": "n"})
+    .to_string();
+    f.set_json(cx, &dialog, &text);
+    let (_dir, path) = f.file();
+    f.infer_from(cx, Some(path)).await;
+    f.act(cx, |window, cx| window.click("confirm.ok", cx));
+    assert!(
+        f.json(cx, &dialog)
+            .get("default_sorting_field")
+            .is_none_or(|v| v == "")
+    );
+}

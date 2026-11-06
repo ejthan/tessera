@@ -1025,6 +1025,15 @@ pub fn export_outcome(
             ..Default::default()
         },
         unlisted_values,
+        kept_existing: false,
+    }
+}
+
+/// An export that found nothing and left the file that was there.
+pub fn export_kept_outcome() -> ExportOutcome {
+    ExportOutcome {
+        kept_existing: true,
+        ..export_outcome(JobEnd::Finished, 0, None, 0)
     }
 }
 

@@ -155,6 +155,17 @@ async fn csv_puts_id_first_and_writes_nothing_for_nothing() {
 }
 
 #[tokio::test]
+async fn an_empty_result_without_a_target_keeps_nothing() {
+    let (_dir, target) = target();
+    let server = serving("").await;
+    assert!(
+        !finished(&server.uri(), job(&target, ExportFormat::Jsonl))
+            .await
+            .kept_existing
+    );
+}
+
+#[tokio::test]
 async fn csv_header_comes_from_the_first_1000() {
     let (_dir, target) = target();
     let mut body: String = (0..1000).map(|i| format!("{{\"id\":\"{i}\"}}\n")).collect();
@@ -380,6 +391,7 @@ async fn an_empty_result_keeps_the_target() {
         let server = serving("").await;
         let outcome = finished(&server.uri(), job(&target, format)).await;
         assert_eq!(outcome.progress.docs, 0);
+        assert!(outcome.kept_existing, "{format:?}");
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
             "old",

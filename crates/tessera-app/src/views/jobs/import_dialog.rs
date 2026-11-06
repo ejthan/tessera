@@ -44,7 +44,7 @@ use super::super::request_detail::size;
 use super::super::root::RootView;
 use super::super::schema_dialog::SchemaDialog;
 use super::{infer_notes, note, note_owned};
-use crate::actions::{IMPORT_DIALOG, PasteImport, PickImportFile, StartTransfer};
+use crate::actions::{EditImportSchema, IMPORT_DIALOG, PasteImport, PickImportFile, StartTransfer};
 use crate::collections::CollectionsBackendGlobal;
 use crate::connection::{ConnectionState, long_error_text};
 use crate::jobs::JobsGlobal;
@@ -1026,7 +1026,7 @@ impl DocumentImportDialog {
             })
     }
 
-    fn render_options(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_options(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         // Not a `ButtonGroup`: it overwrites the `disabled` of its children.
         let actions = h_flex().gap_1().children(ACTIONS.into_iter().map(|action| {
             let name = action.as_str();
@@ -1102,6 +1102,11 @@ impl DocumentImportDialog {
                                 .small()
                                 .disabled(self.new.as_ref().is_none_or(|n| n.draft.is_none()))
                                 .label(t!("transfer.import.edit_schema").to_string())
+                                .children(Kbd::binding_for_action(
+                                    &EditImportSchema,
+                                    Some(IMPORT_DIALOG),
+                                    window,
+                                ))
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.edit_schema(window, cx)),
                                 ),
@@ -1292,7 +1297,7 @@ impl Render for DocumentImportDialog {
         let can_start = self.job(cx).is_some();
         let source = self.render_source(window, cx);
         let format = self.render_format(cx);
-        let options = self.render_options(cx);
+        let options = self.render_options(window, cx);
         let preview = self.render_preview(cx);
         let list_error = self.connection.read(cx).collection_cache.error.clone();
         let theme = cx.theme();
@@ -1310,6 +1315,9 @@ impl Render for DocumentImportDialog {
                 this.choose_file(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PasteImport, _, cx| this.paste(cx)))
+            .on_action(cx.listener(|this, _: &EditImportSchema, window, cx| {
+                this.edit_schema(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &StartTransfer, window, cx| this.start(window, cx)))
             .child(source)
             .children(

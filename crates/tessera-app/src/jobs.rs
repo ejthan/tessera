@@ -116,6 +116,31 @@ impl Job {
         matches!(self.status, JobStatus::Running | JobStatus::Stopping)
     }
 
+    /// The toast for the job having ended; it names the connection, as UX rule 1 asks.
+    pub fn toast_text(&self) -> String {
+        let (connection, name) = (self.connection_name.clone(), self.label.clone());
+        let grouped = crate::views::overview::grouped;
+        match (&self.status, &self.live) {
+            (JobStatus::Failed(_), _) => {
+                t!("jobs.toast_failed", connection = connection, name = name)
+            }
+            (_, Live::Import(p)) => t!(
+                "jobs.toast_import",
+                connection = connection,
+                name = name,
+                imported = grouped(p.imported),
+                failed = grouped(p.failed)
+            ),
+            (_, Live::Export(p)) => t!(
+                "jobs.toast_export",
+                connection = connection,
+                name = name,
+                docs = grouped(p.docs)
+            ),
+        }
+        .to_string()
+    }
+
     /// The report of a finished import.
     pub fn report(&self) -> Option<&Arc<Report>> {
         match &self.outcome {

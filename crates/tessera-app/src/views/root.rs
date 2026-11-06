@@ -20,7 +20,6 @@ use super::dock::{
     WelcomePanel,
 };
 use super::jobs::panel::JobsPanel;
-use super::overview::grouped;
 use super::palette::{self, PaletteMode};
 use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
@@ -29,7 +28,7 @@ use crate::actions::{
     ToggleRequestLog,
 };
 use crate::connection::ConnectionState;
-use crate::jobs::{JobFinished, JobId, JobKind, JobStatus, Jobs, JobsGlobal, Live, RunningChanged};
+use crate::jobs::{JobFinished, JobId, JobKind, Jobs, JobsGlobal, RunningChanged};
 use crate::state::{
     AppState, CloseCollection, OpenCollection, OpenCollections, OpenConsole, OpenOverview,
     OpenSearch,
@@ -287,20 +286,8 @@ impl RootView {
         let Some(job) = jobs.jobs().iter().find(|job| job.id == id) else {
             return;
         };
-        let name = job.label.clone();
-        let text = match (&job.status, &job.live) {
-            (JobStatus::Failed(_), _) => t!("jobs.toast_failed", name = name),
-            (_, Live::Import(p)) => t!(
-                "jobs.toast_import",
-                name = name,
-                imported = grouped(p.imported),
-                failed = grouped(p.failed)
-            ),
-            (_, Live::Export(p)) => {
-                t!("jobs.toast_export", name = name, docs = grouped(p.docs))
-            }
-        };
-        window.push_notification(text.to_string(), cx);
+        let text = job.toast_text();
+        window.push_notification(text, cx);
     }
 
     fn open_palette(&self, mode: PaletteMode, window: &mut Window, cx: &mut Context<Self>) {
