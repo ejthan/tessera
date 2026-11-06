@@ -131,7 +131,8 @@ gpui_kit::actions!(
         EditResource,
         DeleteResource,
         ReloadResource,
-        FocusResourceFilter
+        FocusResourceFilter,
+        SaveResource
     ]
 );
 
@@ -201,6 +202,12 @@ pub const CONSOLE: &str = "Console";
 const CONSOLE_INPUT: &str = "Console > Input";
 /// Key context of a resource tab.
 pub const RESOURCES: &str = "Resources";
+/// An input in a resource tab, which has its own ⌘↩.
+const RESOURCES_INPUT: &str = "Resources > Input";
+/// Key context of the alias dialog.
+pub const ALIAS_DIALOG: &str = "AliasDialog";
+/// An input in that dialog, which has its own ⌘↩.
+const ALIAS_INPUT: &str = "AliasDialog > Input";
 /// Key context of a list in a toolbar.
 pub const QUERY_LIST: &str = "QueryList";
 /// The filter of that list, which keeps the focus while the arrows move the selection.
@@ -570,6 +577,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     DeleteResource,
     ReloadResource,
     FocusResourceFilter,
+    SaveResource,
     StopWaiting,
     RemoveBodyFile,
     ShowResponseBody,
@@ -821,6 +829,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(DELETE, DeleteResource, Some(RESOURCES)),
         KeyBinding::new(REFRESH, ReloadResource, Some(RESOURCES)),
         KeyBinding::new(FIND, FocusResourceFilter, Some(RESOURCES)),
+        KeyBinding::new(SAVE, SaveResource, Some(RESOURCES)),
+        KeyBinding::new(SAVE, SaveResource, Some(RESOURCES_INPUT)),
+        KeyBinding::new(SAVE, SaveResource, Some(ALIAS_DIALOG)),
+        KeyBinding::new(SAVE, SaveResource, Some(ALIAS_INPUT)),
         KeyBinding::new(SHOW_FULL_BODY, ShowFullBody, Some(REQUEST_LOG)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(CONSOLE)),
         KeyBinding::new(SAVE, SendRequest, Some(CONSOLE)),

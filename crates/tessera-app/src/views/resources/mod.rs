@@ -2,17 +2,36 @@
 
 //! The views of the relevance resources, one tab per connection and kind.
 
+pub mod aliases;
+
+use std::rc::Rc;
+
+use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    Action, AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
-    ParentElement as _, Render, Styled as _, Window, div, prelude::*,
+    Action, AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Hsla,
+    IntoElement, ParentElement as _, Render, SharedString, Stateful, Styled as _, Subscription,
+    Task, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
+use tessera_client::Client;
+use tessera_widgets::confirm;
+use tessera_widgets::confirm_danger::{self, DangerOptions};
 
+use self::aliases::AliasesView;
+use super::env_badge;
+use crate::actions::{FocusResourceFilter, NewResource, RESOURCES, ReloadResource};
 use crate::connection::ConnectionState;
 use crate::state::{AppState, ResourceKind};
 
 /// The view inside a resource tab.
 pub enum ResourceView {
+    /// See [`AliasesView`].
+    Aliases(Entity<AliasesView>),
     /// A kind whose view has not arrived: no sidebar row, shortcut or palette entry reaches it.
     Pending(Entity<PendingView>),
 }
@@ -21,20 +40,26 @@ impl ResourceView {
     /// The view of `kind`.
     pub fn new(
         kind: ResourceKind,
-        _connection: Entity<ConnectionState>,
+        connection: Entity<ConnectionState>,
         _state: Entity<AppState>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> Self {
-        Self::Pending(cx.new(|cx| PendingView {
-            kind,
-            focus_handle: cx.focus_handle(),
-        }))
+        match kind {
+            ResourceKind::Aliases => {
+                Self::Aliases(cx.new(|cx| AliasesView::new(connection, window, cx)))
+            }
+            _ => Self::Pending(cx.new(|cx| PendingView {
+                kind,
+                focus_handle: cx.focus_handle(),
+            })),
+        }
     }
 
     /// What it draws.
     pub fn view(&self) -> AnyView {
         match self {
+            Self::Aliases(view) => view.clone().into(),
             Self::Pending(view) => view.clone().into(),
         }
     }
@@ -42,13 +67,17 @@ impl ResourceView {
     /// Its focus: its shortcuts work from the moment the tab shows.
     pub fn focus_handle(&self, cx: &App) -> FocusHandle {
         match self {
+            Self::Aliases(view) => view.focus_handle(cx),
             Self::Pending(view) => view.read(cx).focus_handle.clone(),
         }
     }
 
     /// Actions with no target now, for [`gated`](crate::actions::gated).
-    pub fn gates(&self, _cx: &App) -> Vec<(bool, &'static dyn Action)> {
-        Vec::new()
+    pub fn gates(&self, cx: &App) -> Vec<(bool, &'static dyn Action)> {
+        match self {
+            Self::Aliases(view) => view.read(cx).gates(cx),
+            Self::Pending(_) => Vec::new(),
+        }
     }
 }
 
@@ -56,12 +85,6 @@ impl ResourceView {
 pub struct PendingView {
     kind: ResourceKind,
     focus_handle: FocusHandle,
-}
-
-impl Focusable for PendingView {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
 }
 
 impl Render for PendingView {
@@ -72,4 +95,392 @@ impl Render for PendingView {
             .p_4()
             .child(t!(self.kind.title_key()).to_string())
     }
+}
+
+/// One column: the suffix of its locale key and test id, its width, and whether it is a number.
+pub(super) type ResourceColumn = (&'static str, f32, bool);
+
+/// One row of a [`ResourceList`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListRow {
+    /// The resource's name, which identifies the row.
+    pub key: String,
+    /// The cells, as text. The first is matched by the filter, like all of them.
+    pub cells: Vec<String>,
+    /// The last cell states a problem.
+    pub warning: bool,
+}
+
+/// The table's data: every row, and the part that passes the filter.
+pub struct ListRows {
+    /// Prefix of the locale keys and test ids.
+    prefix: &'static str,
+    columns: &'static [ResourceColumn],
+    all: Vec<ListRow>,
+    visible: Vec<usize>,
+    query: String,
+}
+
+impl ListRows {
+    fn rebuild(&mut self) {
+        let query = self.query.trim().to_lowercase();
+        let hit = |r: &ListRow| r.cells.iter().any(|c| c.to_lowercase().contains(&query));
+        self.visible = (0..self.all.len()).filter(|i| hit(&self.all[*i])).collect();
+    }
+
+    fn row(&self, row_ix: usize) -> Option<&ListRow> {
+        self.all.get(*self.visible.get(row_ix)?)
+    }
+}
+
+impl TableDelegate for ListRows {
+    fn columns_count(&self, _: &App) -> usize {
+        self.columns.len()
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.visible.len()
+    }
+
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        let (key, width, numeric) = self.columns[col_ix];
+        let title = t!(format!("{}.col.{key}", self.prefix)).to_string();
+        let column = Column::new(key, title)
+            .width(px(width))
+            .resizable(false)
+            .movable(false);
+        if numeric { column.text_right() } else { column }
+    }
+
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> Stateful<gpui_kit::Div> {
+        let Some(row) = self.row(row_ix) else {
+            return div().id(("resources.filler", row_ix));
+        };
+        div()
+            .id(SharedString::from(format!(
+                "{}.row.{}",
+                self.prefix, row.key
+            )))
+            .aria_label(row.cells.join(" · "))
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let (prefix, column) = (self.prefix, self.columns[col_ix].0);
+        let warn = col_ix + 1 == self.columns.len();
+        let warning = cx.theme().warning;
+        let Some(row) = self.row(row_ix) else {
+            return div().into_any_element();
+        };
+        let text = SharedString::from(row.cells[col_ix].clone());
+        div()
+            .id(SharedString::from(format!("{prefix}.{column}.{}", row.key)))
+            .test_support()
+            .aria_label(text.clone())
+            .truncate()
+            .when(warn && row.warning, |el| el.text_color(warning))
+            .child(text)
+            .into_any_element()
+    }
+
+    fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
+        Some(self.row(row_ix)?.cells[col_ix].clone().into())
+    }
+}
+
+/// A filter and a table of named resources, with the selection that survives a reload.
+pub struct ResourceList {
+    table: Entity<TableState<ListRows>>,
+    filter: Entity<InputState>,
+    selected: Option<String>,
+    _subscriptions: [Subscription; 2],
+}
+
+impl ResourceList {
+    /// An empty list.
+    pub(super) fn new(
+        prefix: &'static str,
+        columns: &'static [ResourceColumn],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let rows = ListRows {
+            prefix,
+            columns,
+            all: Vec::new(),
+            visible: Vec::new(),
+            query: String::new(),
+        };
+        let table = cx.new(|cx| {
+            TableState::new(rows, window, cx)
+                .sortable(false)
+                .col_movable(false)
+                .col_resizable(false)
+                .col_selectable(false)
+                .row_header(false)
+        });
+        let placeholder = t!(format!("{prefix}.filter")).to_string();
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        let subscriptions = [
+            cx.subscribe(&filter, |this, filter, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let query = filter.read(cx).value().to_string();
+                    this.table.update(cx, |t, cx| {
+                        t.delegate_mut().query = query;
+                        t.delegate_mut().rebuild();
+                        cx.notify();
+                    });
+                    this.reselect(cx);
+                }
+            }),
+            cx.subscribe(&table, |this, table, event: &TableEvent, cx| {
+                if let TableEvent::SelectRow(ix) = event {
+                    this.selected = table.read(cx).delegate().row(*ix).map(|r| r.key.clone());
+                    cx.notify();
+                }
+            }),
+        ];
+        Self {
+            table,
+            filter,
+            selected: None,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Replaces the rows.
+    pub(super) fn set_rows(&mut self, rows: Vec<ListRow>, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().all = rows;
+            t.delegate_mut().rebuild();
+            cx.notify();
+        });
+        self.reselect(cx);
+    }
+
+    /// Selects the row of the selected name again after the rows changed.
+    fn reselect(&mut self, cx: &mut Context<Self>) {
+        if let Some(name) = self.selected.clone() {
+            self.table.update(cx, |t, cx| {
+                let d = t.delegate();
+                let ix = d.visible.iter().position(|i| d.all[*i].key == name);
+                match ix {
+                    Some(ix) if t.selected_row() != Some(ix) => t.set_selected_row(ix, cx),
+                    None => t.clear_selection(cx),
+                    _ => {}
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    /// The selected row's name, only while the row is on screen.
+    pub(super) fn selected(&self, cx: &App) -> Option<String> {
+        let table = self.table.read(cx);
+        let row = table.delegate().row(table.selected_row()?)?;
+        Some(row.key.clone())
+    }
+
+    /// Puts the cursor in the filter.
+    pub(super) fn focus_filter(this: &Entity<Self>, window: &mut Window, cx: &mut App) {
+        let filter = this.read(cx).filter.read(cx).focus_handle(cx);
+        filter.focus(window, cx);
+    }
+}
+
+impl Render for ResourceList {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let prefix = self.table.read(cx).delegate().prefix;
+        div().size_full().child(
+            DataTable::new(&self.table)
+                .bordered(false)
+                .accessibility_label(t!(format!("sidebar.{prefix}")).to_string()),
+        )
+    }
+}
+
+/// The toolbar of a list: filter, New and Reload.
+pub(super) fn toolbar(
+    prefix: &'static str,
+    list: &Entity<ResourceList>,
+    focus: &FocusHandle,
+    locked: bool,
+    window: &Window,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let (on_new, on_reload) = (focus.clone(), focus.clone());
+    let filter_label = t!(format!("{prefix}.filter")).to_string();
+    let new_id = SharedString::from(format!("{prefix}.new"));
+    h_flex()
+        .flex_none()
+        .flex_wrap()
+        .gap_3()
+        .p_2()
+        .items_center()
+        .child(
+            div().w(px(280.)).child(
+                Input::new(&list.read(cx).filter)
+                    .suffix(div().children(Kbd::binding_for_action(
+                        &FocusResourceFilter,
+                        Some(RESOURCES),
+                        window,
+                    )))
+                    .id(SharedString::from(format!("{prefix}.filter")))
+                    .aria_label(filter_label),
+            ),
+        )
+        .child(div().flex_1())
+        .child(
+            Button::new(new_id.clone())
+                .primary()
+                .small()
+                .label(t!("resources.new").to_string())
+                .when(locked, |b| b.child(env_badge::lock(&new_id, false, cx)))
+                .children(Kbd::binding_for_action(
+                    &NewResource,
+                    Some(RESOURCES),
+                    window,
+                ))
+                .on_click(move |_, window, cx| on_new.dispatch_action(&NewResource, window, cx)),
+        )
+        .child(
+            Button::new(SharedString::from(format!("{prefix}.reload")))
+                .ghost()
+                .small()
+                .label(t!("resources.reload").to_string())
+                .children(Kbd::binding_for_action(
+                    &ReloadResource,
+                    Some(RESOURCES),
+                    window,
+                ))
+                .on_click(move |_, window, cx| {
+                    on_reload.dispatch_action(&ReloadResource, window, cx);
+                }),
+        )
+}
+
+/// A button under a list that acts on the selected row, through `action`.
+pub(super) fn row_button(
+    id: String,
+    label: String,
+    action: &'static dyn Action,
+    (disabled, locked): (bool, bool),
+    focus: &FocusHandle,
+    window: &Window,
+    cx: &App,
+) -> Button {
+    let focus = focus.clone();
+    Button::new(SharedString::from(id.clone()))
+        .small()
+        .label(label)
+        .when(locked, |b| b.child(env_badge::lock(&id, false, cx)))
+        .children(Kbd::binding_for_action(action, Some(RESOURCES), window))
+        .disabled(disabled)
+        .on_click(move |_, window, cx| focus.dispatch_action(action, window, cx))
+}
+
+/// The explanation of an empty list, with its docs link.
+pub(super) fn empty_state(prefix: &'static str, docs: &'static str) -> impl IntoElement {
+    let sentence = t!(format!("{prefix}.empty")).to_string();
+    v_flex()
+        .id(SharedString::from(format!("{prefix}.empty")))
+        .test_support()
+        .aria_label(SharedString::from(sentence.clone()))
+        .gap_2()
+        .p_4()
+        .items_start()
+        .text_sm()
+        .child(sentence)
+        .child(
+            Button::new(SharedString::from(format!("{prefix}.docs")))
+                .link()
+                .label(t!("resources.docs").to_string())
+                .on_click(move |_, _, cx| cx.open_url(docs)),
+        )
+}
+
+/// One inline line of text, in full.
+pub(super) fn notice(
+    id: impl Into<SharedString>,
+    text: SharedString,
+    color: Hsla,
+) -> impl IntoElement {
+    div()
+        .id(id.into())
+        .test_support()
+        .aria_label(text.clone())
+        .px_2()
+        .py_1()
+        .text_sm()
+        .text_color(color)
+        .child(text)
+}
+
+/// The client of `connection`, while it is connected.
+pub(super) fn client_of(connection: &Entity<ConnectionState>, cx: &App) -> Option<Client> {
+    let connected = connection.read(cx).connected.as_ref();
+    connected.map(|c| c.client.clone())
+}
+
+/// What a destructive write asks (D62).
+pub(super) struct Danger {
+    pub title: String,
+    /// The concrete consequences.
+    pub lines: Vec<String>,
+    /// What to type where `typed` is set.
+    pub expected: String,
+    pub action: String,
+    /// Asks for the name instead of a plain confirmation.
+    pub typed: bool,
+    /// Shows the PROD badge.
+    pub prod: bool,
+}
+
+/// Asks, then runs `run`. Cancelling sends nothing. A typed confirmation shows a failure in its
+/// dialog; after a plain one, which is closed by then, `on_error` gets it.
+pub(super) fn confirm_write(
+    danger: Danger,
+    run: impl Fn(&mut Window, &mut App) -> Task<Result<(), SharedString>> + 'static,
+    on_error: impl Fn(SharedString, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if danger.typed {
+        let options = DangerOptions {
+            title: danger.title.into(),
+            consequences: danger.lines.into_iter().map(Into::into).collect(),
+            expected: danger.expected.into(),
+            action_label: danger.action.into(),
+            prod: danger.prod,
+        };
+        return confirm_danger::open(options, run, window, cx);
+    }
+    let on_error = Rc::new(on_error);
+    confirm::open(
+        danger.title,
+        danger.lines.join(" "),
+        danger.action,
+        move |window, cx| {
+            let task = run(window, cx);
+            let on_error = on_error.clone();
+            cx.spawn(async move |cx| {
+                if let Err(text) = task.await {
+                    cx.update(|cx| on_error(text, cx));
+                }
+            })
+            .detach();
+        },
+        window,
+        cx,
+    );
 }
