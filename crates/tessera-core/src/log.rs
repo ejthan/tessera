@@ -51,7 +51,10 @@ impl Filter {
         let m = &e.event.method;
         (self.show_polling || self.errors_only || e.event.origin == Origin::User)
             && (!self.errors_only || e.is_error())
-            && (!self.writes_only || ![Method::GET, Method::HEAD, Method::OPTIONS].contains(m))
+            && (!self.writes_only
+                || (![Method::GET, Method::HEAD, Method::OPTIONS].contains(m)
+                    // A search sent as POST reads.
+                    && !e.event.path.ends_with("/multi_search")))
             && (self.methods.is_empty() || self.methods.contains(m))
             && (self.connections.is_empty() || self.connections.contains(&e.connection))
     }
@@ -238,6 +241,20 @@ pub(crate) mod tests {
             ..Filter::default()
         };
         assert_eq!(ids(&log, &f), [3]);
+    }
+
+    #[test]
+    fn writes_filter_skips_multi_search() {
+        let mut log = RequestLog::default();
+        let mut search = entry(1, Method::POST, Origin::User, Some(200));
+        search.event.path = "/multi_search".into();
+        log.push(search);
+        log.push(entry(2, Method::POST, Origin::User, Some(201)));
+        let f = Filter {
+            writes_only: true,
+            ..Filter::default()
+        };
+        assert_eq!(ids(&log, &f), [2]);
     }
 
     #[test]

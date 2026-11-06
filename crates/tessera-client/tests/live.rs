@@ -721,3 +721,117 @@ async fn live_count_is_what_a_delete_removes_under_a_curation_set() {
     .await;
     assert_eq!(seen, [(7, 7, 7), (7, 7, 7), (7, 7, 7)]);
 }
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_search_multi_search_and_presets() {
+    use serde_json::{Value, json};
+    use tessera_client::MultiSearch;
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_search";
+    let preset = "tessera_it_preset";
+    let _ = client.delete_collection(name).await;
+    client
+        .create_collection(&json!({"name":name,"fields":[
+            {"name":"title","type":"string"},{"name":"n","type":"int32"}
+        ]}))
+        .await
+        .unwrap();
+    let docs: String = (0..20)
+        .map(|i| json!({"id":format!("d{i}"),"title":format!("harbor {i}"),"n":i}).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let imported = admin_request(
+        reqwest::Method::POST,
+        &format!("collections/{name}/documents/import?action=create"),
+    )
+    .body(docs)
+    .send()
+    .await
+    .expect("import");
+    assert!(imported.status().is_success());
+    let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+
+    let plain = client
+        .search(name, &[pair("q", "harbor"), pair("query_by", "title")])
+        .await;
+    // Over 5,000 bytes of filter: the POST route must answer like the shortened GET.
+    let padding: Vec<String> = (1000..2000).map(|n| n.to_string()).collect();
+    let long_filter = format!("n:[0,1,2,3,4,{}]", padding.join(","));
+    assert!(long_filter.len() > 5000);
+    let long = client
+        .search(name, &[pair("q", "*"), pair("filter_by", &long_filter)])
+        .await;
+    let short = client
+        .search(name, &[pair("q", "*"), pair("filter_by", "n:[0,1,2,3,4]")])
+        .await;
+    let count = client.count_documents(name, Some(&long_filter)).await;
+    let search = |q: &str| {
+        json!({"collection":name,"q":q,"query_by":"title"})
+            .as_object()
+            .unwrap()
+            .clone()
+    };
+    let mut bad = search("harbor");
+    bad.insert("query_by".into(), "nope".into());
+    let federated = client
+        .multi_search(&MultiSearch {
+            union: false,
+            searches: vec![search("harbor"), bad],
+            page: None,
+            per_page: None,
+        })
+        .await;
+    let union = client
+        .multi_search(&MultiSearch {
+            union: true,
+            searches: vec![search("harbor"), search("harbor")],
+            page: Some(1),
+            per_page: Some(3),
+        })
+        .await;
+    let mixed = client
+        .multi_search(&MultiSearch {
+            union: true,
+            searches: vec![search("*"), search("harbor")],
+            page: None,
+            per_page: None,
+        })
+        .await;
+    let stored = client
+        .upsert_preset(preset, &json!({"q":"harbor","query_by":"title"}))
+        .await;
+    let got = client.preset(preset).await;
+    let listed = client.presets().await;
+    let removed = admin(reqwest::Method::DELETE, &format!("presets/{preset}"), None).await;
+    let _ = client.delete_collection(name).await;
+
+    let plain: Value = serde_json::from_str(&plain.unwrap()).unwrap();
+    assert_eq!(plain["found"], 20);
+    let (mut long, mut short): (Value, Value) = (
+        serde_json::from_str(&long.unwrap()).unwrap(),
+        serde_json::from_str(&short.unwrap()).unwrap(),
+    );
+    for v in [&mut long, &mut short] {
+        for key in ["search_time_ms", "request_params"] {
+            v.as_object_mut().unwrap().remove(key);
+        }
+    }
+    assert_eq!(long, short);
+    assert_eq!(count.unwrap(), 5);
+    let federated: Value = serde_json::from_str(&federated.unwrap()).unwrap();
+    assert_eq!(federated["results"][0]["found"], 20);
+    assert!(federated["results"][1]["code"].is_number());
+    let union: Value = serde_json::from_str(&union.unwrap()).unwrap();
+    assert_eq!(union["hits"].as_array().unwrap().len(), 3);
+    assert_eq!(union["page"], 1);
+    assert!(
+        matches!(mixed, Err(Error::Http { status: 400, .. })),
+        "{mixed:?}"
+    );
+    stored.unwrap();
+    assert_eq!(got.unwrap()["value"]["q"], "harbor");
+    assert!(listed.unwrap().iter().any(|p| p.name == preset));
+    assert!(removed.is_object());
+}

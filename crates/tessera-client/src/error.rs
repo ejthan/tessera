@@ -70,6 +70,15 @@ impl Error {
         }
     }
 
+    /// A failure the server reports inside a 200 answer as `{"code","error"}`.
+    pub(crate) fn embedded(code: u16, error: String, body: String) -> Self {
+        Self::Http {
+            status: code,
+            message: error,
+            body,
+        }
+    }
+
     pub(crate) fn http(status: u16, body: String) -> Self {
         #[derive(serde::Deserialize)]
         struct Message {
