@@ -7,6 +7,7 @@ pub mod facet;
 pub mod fuzzy;
 pub mod history;
 pub mod params;
+pub mod presets;
 pub mod results;
 pub mod saved;
 pub mod sort;
