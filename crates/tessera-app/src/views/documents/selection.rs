@@ -249,8 +249,8 @@ fn run(
 }
 
 /// Deletes one id through its endpoint, several in `id_batches`, in sequence. Stops at the
-/// first failure: how many went, and that failure. `.` and `..` have no endpoint, and ids a
-/// filter cannot name exactly go one by one.
+/// first failure: how many went, and that failure. `.` and `..` have no endpoint, so they
+/// take the filter `id_batches` gives them.
 async fn delete_ids(
     backend: &dyn DocumentsBackend,
     client: Client,

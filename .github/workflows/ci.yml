@@ -71,6 +71,9 @@ jobs:
       - run: cargo test -p tessera-client --test live --locked -- --ignored
         env:
           TESSERA_IT_URL: http://localhost:8108
+      - run: cargo test -p tessera-core --test live_ids --locked -- --ignored
+        env:
+          TESSERA_IT_URL: http://localhost:8108
           TESSERA_IT_KEY: xyz
 
   build:

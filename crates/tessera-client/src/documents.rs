@@ -6,7 +6,7 @@ use percent_encoding::utf8_percent_encode;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::collections::{SEGMENT, collection_path};
+use crate::collections::{SEGMENT, addressable, collection_path};
 use crate::{Client, Error, LONG_TIMEOUT};
 
 /// Which page of a collection to fetch, and how.
@@ -85,21 +85,16 @@ pub(crate) fn segment(s: &str) -> String {
     utf8_percent_encode(s, SEGMENT).to_string()
 }
 
-/// `collections/{c}/documents/{id}`. A URL drops `.` and `..` segments, percent-encoded or not,
-/// so `..` would address the collection itself and a DELETE would remove it.
+/// `collections/{c}/documents/{id}`. `..` would address the collection itself, and a DELETE
+/// would remove it.
 fn document_path(collection: &str, id: &str) -> Result<String, Error> {
-    if matches!(id, "." | "..") {
-        return Err(Error::UnaddressableId(id.to_string()));
-    }
-    Ok(collection_path(
-        collection,
-        &format!("/documents/{}", segment(id)),
-    ))
+    addressable(id)?;
+    collection_path(collection, &format!("/documents/{}", segment(id)))
 }
 
 impl Client {
     async fn search_raw(&self, collection: &str, pairs: &[(&str, &str)]) -> Result<RawPage, Error> {
-        let path = collection_path(collection, "/documents/search");
+        let path = collection_path(collection, "/documents/search")?;
         let body = self.get_ok(None, &path, Some(&encode_query(pairs))).await?;
         serde_json::from_str(&body).map_err(Error::Decode)
     }
@@ -196,7 +191,7 @@ impl Client {
         collection: &str,
         document: &Value,
     ) -> Result<Value, Error> {
-        let path = collection_path(collection, "/documents");
+        let path = collection_path(collection, "/documents")?;
         self.write_document(crate::Method::POST, &path, None, Some(document))
             .await
     }
@@ -207,7 +202,7 @@ impl Client {
         collection: &str,
         document: &Value,
     ) -> Result<Value, Error> {
-        let path = collection_path(collection, "/documents");
+        let path = collection_path(collection, "/documents")?;
         let query = encode_query(&[("action", "upsert")]);
         self.write_document(crate::Method::POST, &path, Some(&query), Some(document))
             .await
@@ -241,7 +236,7 @@ impl Client {
         body: Option<&Value>,
         count_key: &str,
     ) -> Result<u64, Error> {
-        let path = collection_path(collection, "/documents");
+        let path = collection_path(collection, "/documents")?;
         let query = encode_query(pairs);
         let text = self
             .write(None, method, &path, Some(&query), body, Some(LONG_TIMEOUT))
@@ -289,7 +284,7 @@ impl Client {
         collection: &str,
         filter_by: &str,
     ) -> Result<String, Error> {
-        let path = collection_path(collection, "/documents/export");
+        let path = collection_path(collection, "/documents/export")?;
         let query = encode_query(&[("filter_by", filter_by)]);
         match self
             .call(

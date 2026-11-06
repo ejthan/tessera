@@ -9,7 +9,7 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 pub struct IdBatches {
     /// ``id:[`a`,`b`]`` filters, each at most `max_bytes` once percent-encoded.
     pub filters: Vec<String>,
-    /// Ids `filter_by` cannot name exactly; these go one by one.
+    /// Ids that are not [`filter_safe`]; these go one by one.
     pub single: Vec<String>,
 }
 
@@ -18,10 +18,13 @@ fn encoded_len(s: &str) -> usize {
     utf8_percent_encode(s, NON_ALPHANUMERIC).map(str::len).sum()
 }
 
-/// Whether an `id:[...]` filter would miss `id` or hit others: a backtick cannot be quoted,
-/// `*` matches every document, and the server trims ids, so `a ` means the document `a`.
-fn needs_its_own_request(id: &str) -> bool {
-    id.contains(['`', '*']) || id.trim() != id
+/// Whether `id` may stand in an `id:[...]` list with others. An allowlist, because the server
+/// is no exact matcher: a backtick cannot be quoted, `*` matches every document, ids are
+/// trimmed, and a trailing backslash breaks the quoting so the filter deletes bystanders, all
+/// with status 200. Anything else takes the slower document endpoint.
+pub fn filter_safe(id: &str) -> bool {
+    let listed = |c: char| c.is_ascii_alphanumeric() || "-_.:@+".contains(c);
+    id.chars().all(listed) && id.chars().any(|c| c != '.')
 }
 
 /// Groups `ids` in order into filters of at most `max_bytes` after percent-encoding.
@@ -39,7 +42,12 @@ pub fn id_batches(ids: &[String], max_bytes: usize) -> IdBatches {
         }
     };
     for id in ids {
-        if needs_its_own_request(id) {
+        // No document URL can hold these, so each gets a filter with nothing else in it.
+        if matches!(id.as_str(), "." | "..") {
+            out.filters.push(format!("{OPEN}`{id}`]"));
+            continue;
+        }
+        if !filter_safe(id) {
             out.single.push(id.clone());
             continue;
         }
@@ -70,7 +78,7 @@ mod tests {
     use super::*;
 
     fn ids(n: usize) -> Vec<String> {
-        (0..n).map(|i| format!("doc {i}")).collect()
+        (0..n).map(|i| format!("doc-{i}")).collect()
     }
 
     #[test]
@@ -80,8 +88,8 @@ mod tests {
 
     #[test]
     fn ids_are_backtick_quoted() {
-        let b = id_batches(&["a".into(), "b,c".into()], 1000);
-        assert_eq!(b.filters, vec!["id:[`a`,`b,c`]"]);
+        let b = id_batches(&["a".into(), "b:c".into()], 1000);
+        assert_eq!(b.filters, vec!["id:[`a`,`b:c`]"]);
     }
 
     #[test]
@@ -92,11 +100,24 @@ mod tests {
     }
 
     #[test]
-    fn ids_a_filter_would_not_match_exactly_go_to_single() {
-        // `*` matches every document, and the server trims ids in a filter, so `keep1 ` would
-        // delete `keep1` and leave itself.
+    fn only_listed_characters_join_a_filter() {
+        for id in ["a", "Z9", "a-b_c", "a.b", "a:b", "a@b", "a+b", ".a", "a."] {
+            assert!(filter_safe(id), "{id}");
+        }
         let odd = [
-            "*", " * ", "a*", "*a", "keep1 ", " lead", "trail ", "  ", "tab\t", "\nx",
+            "", ".", "..", "...", "*", " * ", "a*", "keep1 ", " lead", "  ", "a b", "a`b", "a\\",
+            "\\", "\\\\", "a\\b", "b,c", "a]", "é", "tab\t", "a/b", "a%b",
+        ];
+        for id in odd {
+            assert!(!filter_safe(id), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn ids_a_filter_could_get_wrong_go_to_single() {
+        // ``id:[`a\`,`b,keep,c`]`` deletes `keep` and `c`, and neither named id.
+        let odd = [
+            "*", "keep1 ", " lead", "  ", "a\\", "\\", "b,keep,c", "a b", "...", "",
         ];
         let mut all: Vec<String> = odd.map(String::from).to_vec();
         all.push("plain".into());
@@ -106,9 +127,9 @@ mod tests {
     }
 
     #[test]
-    fn inner_spaces_and_dots_stay_in_filters() {
-        let b = id_batches(&["a b".into(), ".".into(), "..".into()], 1000);
-        assert_eq!(b.filters, vec!["id:[`a b`,`.`,`..`]"]);
+    fn dot_ids_have_no_url_and_get_a_filter_of_their_own() {
+        let b = id_batches(&["a".into(), ".".into(), "..".into(), "b".into()], 1000);
+        assert_eq!(b.filters, vec!["id:[`.`]", "id:[`..`]", "id:[`a`,`b`]"]);
         assert!(b.single.is_empty());
     }
 

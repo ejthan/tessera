@@ -389,6 +389,24 @@ async fn a_missing_or_non_numeric_count_is_a_decode_error() {
 }
 
 #[tokio::test]
+async fn dot_collections_never_reach_the_server() {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = Client::new(&[&server.uri()], "k".to_string().into(), Default::default()).unwrap();
+    for name in ["", ".", ".."] {
+        let refused = |e: &Error| matches!(e, Error::UnaddressableId(n) if n == name);
+        assert!(refused(&client.delete_collection(name).await.unwrap_err()));
+        assert!(refused(&client.document(name, "a").await.unwrap_err()));
+        let filtered = client.delete_by_filter(name, "id:[`a`]").await;
+        assert!(refused(&filtered.unwrap_err()));
+    }
+}
+
+#[tokio::test]
 async fn dot_ids_never_reach_the_server() {
     let server = MockServer::start().await;
     Mock::given(wiremock::matchers::any())
@@ -397,7 +415,7 @@ async fn dot_ids_never_reach_the_server() {
         .mount(&server)
         .await;
     let client = Client::new(&[&server.uri()], "k".to_string().into(), Default::default()).unwrap();
-    for id in [".", ".."] {
+    for id in ["", ".", ".."] {
         let refused = |e: &Error| matches!(e, Error::UnaddressableId(i) if i == id);
         assert!(refused(&client.document("c", id).await.unwrap_err()));
         assert!(refused(&client.delete_document("c", id).await.unwrap_err()));
