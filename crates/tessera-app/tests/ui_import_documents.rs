@@ -20,7 +20,9 @@ use tessera_app::views::jobs::import_dialog::DocumentImportDialog;
 use tessera_client::{Collection, DirtyValues, ImportAction};
 use tessera_core::documents::validate::{DocIssue, IssueSeverity};
 use tessera_core::profile::Profile;
+use tessera_core::schema::{FieldDraft, FieldType};
 use tessera_core::transfer::CLIPBOARD_LIMIT;
+use tessera_core::transfer::infer::{InferNote, InferredSchema};
 use tessera_core::transfer::preview::{Preview, PreviewError, PreviewRow};
 use tessera_core::transfer::source::{Format, ReadError, Source};
 
@@ -539,4 +541,359 @@ async fn every_control_shows_its_shortcut(cx: &mut TestAppContext) {
             .unwrap();
         assert!(button.contains(&kbd.center()), "{id}");
     }
+}
+
+/// A schema proposal with `n` and a field that may be a `geopoint`.
+fn inferred() -> InferredSchema {
+    InferredSchema {
+        fields: vec![
+            FieldDraft::new("title", FieldType::String),
+            FieldDraft::new("place", FieldType::FloatArray),
+        ],
+        nested: false,
+        notes: vec![
+            InferNote::MaybeGeopoint("place".into()),
+            InferNote::MixedTypes("title".into()),
+        ],
+        sampled: 42,
+    }
+}
+
+impl Fixture {
+    /// A dialog on `path`'s name with `count` estimated documents.
+    fn start_dialog(&self, cx: &mut TestAppContext, count: u64) -> Entity<DocumentImportDialog> {
+        *self.fake.preview.lock().unwrap() = Some(Ok(preview(count)));
+        self.open_bytes(cx, "{}\n")
+    }
+
+    /// The dialog with "New collection…" chosen on a file named `catalog (1).jsonl`.
+    async fn new_target(
+        &self,
+        cx: &mut TestAppContext,
+    ) -> (tempfile::TempDir, Entity<DocumentImportDialog>) {
+        *self.fake.infer.lock().unwrap() = Some(Ok(inferred()));
+        let (dir, path) = temp_file("catalog (1).jsonl", b"{}\n");
+        let dialog = self.open(cx, None, Some(Source::File(path)));
+        self.wait_for_source(cx).await;
+        self.update(cx, &dialog, |d, window, cx| d.pick_new(window, cx));
+        settle(cx);
+        (dir, dialog)
+    }
+
+    fn update<R>(
+        &self,
+        cx: &mut TestAppContext,
+        dialog: &Entity<DocumentImportDialog>,
+        f: impl FnOnce(
+            &mut DocumentImportDialog,
+            &mut gpui_kit::Window,
+            &mut gpui_kit::Context<DocumentImportDialog>,
+        ) -> R,
+    ) -> R {
+        let dialog = dialog.clone();
+        let result = self.act(cx, |window, cx| dialog.update(cx, |d, cx| f(d, window, cx)));
+        cx.run_until_parked();
+        result
+    }
+
+    fn set_action(&self, cx: &mut TestAppContext, action: &str) {
+        self.click(cx, &format!("transfer.import.action.{action}"));
+    }
+
+    fn started(&self) -> usize {
+        self.fake.imports.lock().unwrap().len()
+    }
+
+    fn start(&self, cx: &mut TestAppContext) {
+        self.click(cx, "transfer.import.start");
+        settle(cx);
+    }
+
+    fn unlock(&self, cx: &mut TestAppContext) {
+        cx.update(|cx| self.conn.update(cx, |c, cx| c.unlock(cx)));
+        cx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+async fn create_on_local_starts_without_a_dialog(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.start_dialog(cx, 5000);
+    f.start(cx);
+    assert_eq!(f.started(), 1);
+}
+
+#[gpui_kit::test]
+async fn create_on_prod_confirms_with_focus_on_cancel(cx: &mut TestAppContext) {
+    let f = connected_as(cx, true).await;
+    f.unlock(cx);
+    f.start_dialog(cx, 5);
+    f.start(cx);
+    assert_eq!(f.started(), 0);
+    assert_eq!(
+        f.act(cx, |window, _| window.find("confirm.cancel").focused()),
+        Some(true)
+    );
+    f.click(cx, "confirm.ok");
+    settle(cx);
+    assert_eq!(f.started(), 1);
+    wait_for_element(cx, f.handle, "transfer.import.start".into(), false).await;
+}
+
+#[gpui_kit::test]
+async fn upsert_under_1000_confirms(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.start_dialog(cx, 1000);
+    f.set_action(cx, "upsert");
+    f.start(cx);
+    assert!(f.has(cx, "confirm.ok"));
+    assert!(!f.has(cx, "danger.input"));
+    assert_eq!(f.started(), 0);
+    f.click(cx, "confirm.ok");
+    settle(cx);
+    assert_eq!(f.started(), 1);
+}
+
+#[gpui_kit::test]
+async fn upsert_over_1000_types_the_name(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.start_dialog(cx, 1001);
+    f.set_action(cx, "upsert");
+    f.start(cx);
+    assert!(f.has(cx, "danger.input"));
+    assert_eq!(f.started(), 0);
+    f.act(cx, |window, cx| {
+        fill(window, "danger.input", "books", cx);
+        window.click("danger.ok".to_string(), cx);
+    });
+    settle(cx);
+    assert_eq!(f.started(), 1);
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    wait_for_element(cx, f.handle, "transfer.import.start".into(), false).await;
+}
+
+#[gpui_kit::test]
+async fn update_on_prod_types_the_name(cx: &mut TestAppContext) {
+    let f = connected_as(cx, true).await;
+    f.unlock(cx);
+    f.start_dialog(cx, 5);
+    f.set_action(cx, "update");
+    f.start(cx);
+    assert!(f.has(cx, "danger.input"));
+    assert_eq!(f.started(), 0);
+}
+
+#[gpui_kit::test]
+async fn new_collection_on_local_starts_without_a_dialog(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    f.start(cx);
+    assert!(!f.has(cx, "confirm.ok"));
+    assert_eq!(f.started(), 1);
+}
+
+#[gpui_kit::test]
+async fn new_collection_on_prod_confirms(cx: &mut TestAppContext) {
+    let f = connected_as(cx, true).await;
+    f.unlock(cx);
+    let _new = f.new_target(cx).await;
+    f.start(cx);
+    assert!(f.has(cx, "confirm.ok"));
+    let body = f.text(cx, "confirm.body").unwrap();
+    assert!(
+        body.contains("Creates the collection catalog__1_"),
+        "{body}"
+    );
+    assert!(f.backend.creates.lock().unwrap().is_empty());
+    f.click(cx, "confirm.ok");
+    settle(cx);
+    assert_eq!(f.backend.creates.lock().unwrap().len(), 1);
+    assert_eq!(f.started(), 1);
+}
+
+#[gpui_kit::test]
+async fn cancelling_the_confirmation_sends_nothing(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.start_dialog(cx, 10);
+    f.set_action(cx, "upsert");
+    f.start(cx);
+    f.click(cx, "confirm.cancel");
+    settle(cx);
+    assert_eq!(f.started(), 0);
+    assert!(f.has(cx, "transfer.import.start"), "the dialog stays");
+}
+
+#[gpui_kit::test]
+async fn consequences_name_count_and_collection(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.start_dialog(cx, 10);
+    f.set_action(cx, "upsert");
+    f.start(cx);
+    let body = f.text(cx, "confirm.body").unwrap();
+    assert!(body.contains("Imports into books on staging-eu."), "{body}");
+    assert!(
+        body.contains("From the clipboard, about 10 documents."),
+        "{body}"
+    );
+    assert!(body.contains("same id are replaced"), "{body}");
+    assert!(body.contains("already imported stay"), "{body}");
+}
+
+#[gpui_kit::test]
+async fn new_shows_the_inferred_fields_and_notes(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    let fields = f.text(cx, "transfer.infer.fields").unwrap();
+    assert!(fields.contains("title"), "{fields}");
+    assert!(fields.contains("place"), "{fields}");
+    let note = f.text(cx, "transfer.infer.note.1").unwrap();
+    assert!(note.contains("title"), "{note}");
+    assert!(f.text(cx, "transfer.infer.sampled").unwrap().contains("42"));
+}
+
+#[gpui_kit::test]
+async fn new_proposes_a_safe_name(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let (_dir, dialog) = f.new_target(cx).await;
+    assert_eq!(cx.read(|cx| dialog.read(cx).new_name(cx)), "catalog__1_");
+    f.act(cx, |window, cx| {
+        fill(window, "transfer.import.new_name", "", cx)
+    });
+    cx.run_until_parked();
+    assert!(f.has(cx, "transfer.import.name_error"));
+    assert!(f.start_disabled(cx));
+}
+
+#[gpui_kit::test]
+async fn update_is_disabled_for_new(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let dialog = f.start_dialog(cx, 10);
+    f.set_action(cx, "update");
+    *f.fake.infer.lock().unwrap() = Some(Ok(inferred()));
+    f.update(cx, &dialog, |d, window, cx| d.pick_new(window, cx));
+    settle(cx);
+    assert!(f.disabled(cx, "transfer.import.action.update"));
+    assert!(f.disabled(cx, "transfer.import.action.emplace"));
+    assert!(f.has(cx, "transfer.import.no_update_new"));
+    f.start(cx);
+    assert_eq!(
+        f.fake.imports.lock().unwrap()[0].params.action,
+        ImportAction::Create
+    );
+}
+
+#[gpui_kit::test]
+async fn nothing_is_created_before_start(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    f.click(cx, "transfer.import.edit_schema");
+    f.click(cx, "schema.submit");
+    settle(cx);
+    f.click(cx, "transfer.import.cancel");
+    settle(cx);
+    assert!(f.backend.creates.lock().unwrap().is_empty());
+    assert_eq!(f.started(), 0);
+}
+
+#[gpui_kit::test]
+async fn start_creates_then_imports(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    f.start(cx);
+    let creates = f.backend.creates.lock().unwrap();
+    assert_eq!(creates.len(), 1);
+    assert_eq!(creates[0]["name"], "catalog__1_");
+    assert_eq!(creates[0]["fields"][0]["name"], "title");
+    assert_eq!(f.fake.imports.lock().unwrap()[0].collection, "catalog__1_");
+}
+
+#[gpui_kit::test]
+async fn create_failure_stays_in_the_dialog(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    *f.backend.create_error.lock().unwrap() = Some((409, "already exists".into()));
+    f.start(cx);
+    let error = f.text(cx, "transfer.import.create_error").unwrap();
+    assert!(error.contains("already exists"), "{error}");
+    assert_eq!(f.started(), 0);
+    assert!(f.has(cx, "transfer.import.start"));
+}
+
+#[gpui_kit::test]
+async fn use_geopoint_changes_the_draft(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    let before = f.previews();
+    f.click(cx, "transfer.infer.use_geopoint.place");
+    settle(cx);
+    assert!(!f.has(cx, "transfer.infer.use_geopoint.place"));
+    assert_eq!(f.previews(), before + 1);
+    let previews = f.fake.previews.lock().unwrap();
+    let schema = previews.last().unwrap().2.as_ref().unwrap();
+    let place = schema.fields.iter().find(|x| x.name == "place").unwrap();
+    assert_eq!(place.r#type, "geopoint");
+}
+
+#[gpui_kit::test]
+async fn edit_schema_opens_pick_mode(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    f.click(cx, "transfer.import.edit_schema");
+    assert_eq!(
+        f.act(cx, |window, _| window
+            .find("schema.submit")
+            .label()
+            .map(str::to_string))
+            .as_deref(),
+        Some("Use schema")
+    );
+}
+
+#[gpui_kit::test]
+async fn pick_mode_sends_nothing(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let (_dir, dialog) = f.new_target(cx).await;
+    f.click(cx, "transfer.import.edit_schema");
+    f.act(cx, |window, cx| fill(window, "schema.name", "renamed", cx));
+    cx.run_until_parked();
+    f.click(cx, "schema.submit");
+    settle(cx);
+    assert!(!f.has(cx, "schema.submit"), "closed");
+    assert!(f.backend.creates.lock().unwrap().is_empty());
+    assert_eq!(cx.read(|cx| dialog.read(cx).new_name(cx)), "renamed");
+}
+
+#[gpui_kit::test]
+async fn escape_closes_only_the_schema_dialog(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    f.click(cx, "transfer.import.edit_schema");
+    f.press(cx, "escape");
+    settle(cx);
+    assert!(!f.has(cx, "schema.submit"));
+    assert!(f.has(cx, "transfer.import.start"));
+}
+
+#[gpui_kit::test]
+async fn invalid_draft_cannot_be_picked(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    f.click(cx, "transfer.import.edit_schema");
+    f.act(cx, |window, cx| fill(window, "schema.name", "", cx));
+    cx.run_until_parked();
+    assert!(f.disabled(cx, "schema.submit"));
+    f.click(cx, "schema.submit");
+    assert!(f.has(cx, "schema.submit"), "stays open");
+}
+
+#[gpui_kit::test]
+async fn read_only_profile_can_edit_schema_without_unlocking(cx: &mut TestAppContext) {
+    let f = connected_as(cx, true).await;
+    let _new = f.new_target(cx).await;
+    f.click(cx, "transfer.import.edit_schema");
+    f.click(cx, "schema.submit");
+    settle(cx);
+    assert!(!f.has(cx, "schema.submit"));
+    assert!(!f.has(cx, "danger.input"));
+    assert!(f.has(cx, "transfer.import.start"));
 }

@@ -298,7 +298,7 @@ impl SchemaDialog {
         let d = &review.diff;
         let name = match &self.mode {
             Mode::Edit(old) => old.name.as_str(),
-            Mode::Create => "",
+            Mode::Create | Mode::Pick(_) => "",
         };
         let theme = cx.theme();
         let (success, danger, warning, muted, fg, mono) = (
@@ -467,7 +467,7 @@ impl SchemaDialog {
     pub(super) fn render_progress(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let total = match &self.mode {
             Mode::Edit(old) => old.num_documents,
-            Mode::Create => 0,
+            Mode::Create | Mode::Pick(_) => 0,
         };
         let (validated, altered) = self
             .progress
