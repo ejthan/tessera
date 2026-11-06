@@ -442,6 +442,7 @@ Jobs, API stats and saved queries get a docs link where a page exists, in the pa
 |---|---|---|
 | ⌥⌘0 / Ctrl+Alt+0 | Ops tab | global |
 | ⌥⌘B / Ctrl+Alt+B | Backup tab | global |
+| ⌘1, ⌘2, ⌘3, ⌘4, ⌘S | Snapshot, Compact, Clear cache, Vote, Apply | Ops tab |
 | ⌘, / Ctrl+, | Settings | global |
 | ⌘1, ⌘2 | Backup, Restore | Backup tab |
 | ⌘O | Choose a backup | Backup tab |
