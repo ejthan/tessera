@@ -12,12 +12,14 @@ use std::sync::{Arc, Mutex};
 
 use secrecy::SecretString;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use tessera_client::{Alias, Client, ClientOptions, Collection, ItemSet, SetKind, StopwordSet};
 use tessera_core::backup::archive::{read_manifest, unpack, verify};
 use tessera_core::backup::format::{FORMAT, Manifest, ManifestCollection};
 use tessera_core::backup::restore::{
-    Loaded, RestoreBlock, RestoreError, RestoreJob, RestoreOutcome, RestorePlan, RestoreRow,
-    RestoreView, RestoreWarning, RowFailure, RowKind, RowResult, RowState, load, plan, run_restore,
+    Loaded, RestoreBlock, RestoreError, RestoreJob, RestoreOutcome, RestorePlan, RestoreProgress,
+    RestoreRow, RestoreView, RestoreWarning, RowFailure, RowKind, RowResult, RowState, load, plan,
+    run_restore,
 };
 use tessera_core::backup::run::{
     BackupError, BackupOutcome, BackupPlan, BackupStep, BackupTarget, BackupWarning,
@@ -439,6 +441,30 @@ async fn a_part_folder_left_by_a_quit_is_refused_and_named() {
 }
 
 #[tokio::test]
+async fn a_part_file_of_an_archive_is_refused_before_any_export() {
+    let root = tempfile::tempdir().unwrap();
+    let part = root.path().join("b.tar.zst.part");
+    fs::write(&part, b"keep").unwrap();
+    let (server, client) = serve(shop_fake()).await;
+
+    let outcome = backup(
+        client,
+        &["books"],
+        BackupTarget::Archive(root.path().join("b.tar.zst")),
+    )
+    .await;
+
+    assert!(
+        matches!(&outcome.end, JobEnd::Failed(BackupError::Exists(p)) if *p == part),
+        "{:?}",
+        outcome.end
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests.iter().any(|r| r.url.path().ends_with("export")));
+    assert_eq!(fs::read(part).unwrap(), b"keep");
+}
+
+#[tokio::test]
 async fn an_unknown_collection_stops_the_run() {
     let root = tempfile::tempdir().unwrap();
     let (_server, client) = serve(shop_fake()).await;
@@ -557,6 +583,7 @@ const KEY: &str = "sk-live-do-not-keep";
 const OTHER_KEY: &str = "other-do-not-keep";
 const EXTRA_KEY: &str = "extra-do-not-keep";
 const META_KEY: &str = "metadata-do-not-keep";
+const SET_KEY: &str = "set-do-not-keep";
 
 fn all_bytes(dir: &Path, out: &mut Vec<u8>) {
     for entry in fs::read_dir(dir).unwrap() {
@@ -580,6 +607,7 @@ fn secret_fake() -> Fake {
         collections: vec![json!({
             "name": "embedded",
             "num_documents": 1,
+            "curation_sets": ["cur"],
             "metadata": {"api_key": META_KEY},
             "voice_query_model": {"model_config": {"token": EXTRA_KEY}},
             "fields": [
@@ -594,6 +622,11 @@ fn secret_fake() -> Fake {
                 }},
             ],
         })],
+        curation_sets: vec![json!({"name": "cur", "items": [{
+            "id": "i",
+            "rule": {"query": "kept in the set", "match": "exact"},
+            "metadata": {"api_key": SET_KEY},
+        }]})],
         documents: HashMap::from([("embedded".to_string(), "{\"id\":\"1\"}\n".to_string())]),
         ..Fake::default()
     }
@@ -624,12 +657,22 @@ async fn a_backup_holds_no_provider_key() {
         };
         let mut bytes = Vec::new();
         all_bytes(&folder, &mut bytes);
-        for secret in [KEY, OTHER_KEY, EXTRA_KEY, META_KEY] {
+        for secret in [KEY, OTHER_KEY, EXTRA_KEY, META_KEY, SET_KEY] {
             assert!(!holds(&bytes, secret), "{secret}");
         }
         assert!(holds(&bytes, "openai/text-embedding-3-small"));
         let manifest = read_manifest(&folder).unwrap();
-        assert_eq!(manifest.collections[0].blanked_secrets, 4);
+        assert_eq!(manifest.collections[0].blanked_secrets, 3);
+        assert!(holds(&bytes, "kept in the set"));
+        assert!(
+            outcome
+                .warnings
+                .contains(&BackupWarning::BlankedSetSecrets {
+                    kind: SetKind::Curation,
+                    name: "cur".into(),
+                    count: 1,
+                })
+        );
         assert!(outcome.warnings.contains(&BackupWarning::BlankedSecrets {
             collection: "embedded".into(),
             count: 4,
@@ -645,17 +688,19 @@ async fn a_restore_of_blanked_keys_says_so_and_blocks_the_collection() {
     backup(client, &["embedded"], BackupTarget::Folder(target.clone())).await;
 
     let manifest = read_manifest(&target).unwrap();
-    let loaded = load(&target, &manifest).unwrap();
+    let backup = verify(&target, &manifest, &JobControl::default()).unwrap();
+    let loaded = load(&backup).unwrap();
     let got = plan(&manifest, &loaded, &RestoreView::default());
 
+    // The fourth blank is in `metadata`, which the collection does not need.
     assert_eq!(
-        got.rows[0].state,
-        RowState::Blocked(RestoreBlock::BlankSecrets(4))
+        state(&got, RowKind::Collection, "embedded"),
+        RowState::Blocked(RestoreBlock::BlankSecrets(3))
     );
     assert_eq!(got.order, Vec::<String>::new());
 }
 
-/// A backup of the given parts on disk, without digests: `run_restore` starts after `verify`.
+/// A backup of the given parts on disk. Its manifest lists no file, so `verify` passes it.
 struct Backup {
     _dir: tempfile::TempDir,
     folder: PathBuf,
@@ -720,8 +765,7 @@ impl Backup {
         let aliases = self.loaded.aliases.iter();
         let aliases = aliases.map(|a| (RowKind::Alias, a.name.clone()));
         RestoreJob {
-            folder: self.folder.clone(),
-            manifest: self.manifest.clone(),
+            backup: verify(&self.folder, &self.manifest, &JobControl::default()).unwrap(),
             loaded: self.loaded.clone(),
             ticked: rows
                 .into_iter()
@@ -915,6 +959,7 @@ async fn a_failed_import_stops_before_the_next_collection_and_the_aliases() {
         RowResult::Failed(RowFailure::Lines {
             failed: 2,
             unconfirmed: 0,
+            first_error: Some("refused".into()),
         })
     );
     assert_eq!(
@@ -1257,9 +1302,21 @@ fn plan_blocks_a_name_listed_twice() {
     assert_eq!(got.rows[0].state, RowState::New);
     assert_eq!(
         got.rows[1].state,
-        RowState::Blocked(RestoreBlock::CollectionExists)
+        RowState::Blocked(RestoreBlock::DuplicateName)
     );
     assert_eq!(got.order, ["books"]);
+}
+
+#[tokio::test]
+async fn a_name_listed_twice_does_not_read_as_a_name_that_appeared() {
+    let mut backup = backup_of(vec![schema("books"), schema("books")], Loaded::default());
+    backup.manifest.collections[1].name = "books".into();
+    let (_server, client) = serve(Fake::default()).await;
+
+    let outcome = restore(client, backup.job(false)).await;
+
+    assert_finished(&outcome.end);
+    assert_eq!(outcome.to_delete, ["books"]);
 }
 
 #[test]
@@ -1392,6 +1449,139 @@ fn a_cycle_keeps_manifest_order_and_warns() {
 }
 
 #[test]
+fn what_waits_for_a_cycle_comes_after_it_and_is_no_member() {
+    let backup = backup_of(
+        vec![
+            referencing("dependent", "x"),
+            referencing("x", "y"),
+            referencing("y", "x"),
+        ],
+        Loaded::default(),
+    );
+    let got = backup.plan(&RestoreView::default());
+    assert_eq!(got.order, ["x", "y", "dependent"]);
+    assert_eq!(
+        got.warnings,
+        [RestoreWarning::ReferenceCycle(vec!["x".into(), "y".into()])]
+    );
+}
+
+#[test]
+fn a_long_chain_behind_a_cycle_stays_in_order() {
+    // Two that reference each other and a chain 20,000 deep behind them.
+    let count = 20_000;
+    let name = |i: usize| format!("c{i}");
+    let target = |i: usize| match i {
+        0 => 1,
+        1 => 0,
+        i => i - 1,
+    };
+    let schemas = (0..count)
+        .rev()
+        .map(|i| referencing(&name(i), &name(target(i))));
+    let backup = backup_of(schemas.collect(), Loaded::default());
+    let got = backup.plan(&RestoreView::default());
+    let at: HashMap<&str, usize> = got
+        .order
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+    for i in 2..count {
+        assert!(at[name(i - 1).as_str()] < at[name(i).as_str()], "{i}");
+    }
+}
+
+#[tokio::test]
+async fn an_alias_a_dependent_references_is_written_before_its_import() {
+    let backup = backup_of(
+        vec![referencing("books", "people"), schema("authors")],
+        Loaded {
+            aliases: vec![alias("people", "authors"), alias("later", "books")],
+            ..Loaded::default()
+        },
+    );
+    let (server, client) = serve(Fake::default()).await;
+    let (tx, rx) = watch::channel(Default::default());
+
+    let outcome = run_restore(client, backup.job(false), JobControl::default(), tx).await;
+
+    assert_finished(&outcome.end);
+    assert_eq!(
+        writes(&server).await,
+        [
+            "POST /collections",
+            "POST /collections/authors/documents/import",
+            "POST /collections",
+            "PUT /aliases/people",
+            "POST /collections/books/documents/import",
+            "PUT /aliases/later",
+        ]
+    );
+    let last: RestoreProgress = rx.borrow().clone();
+    assert_eq!((last.done, last.total), (4, 4));
+}
+
+#[tokio::test]
+async fn a_blank_in_metadata_alone_does_not_block() {
+    let fake = Fake {
+        collections: vec![json!({
+            "name": "plain",
+            "num_documents": 0,
+            "metadata": {"api_key": META_KEY},
+            "fields": [field("title")],
+        })],
+        ..Fake::default()
+    };
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("b");
+    let (_server, client) = serve(fake).await;
+    backup(client, &["plain"], BackupTarget::Folder(target.clone())).await;
+
+    let manifest = read_manifest(&target).unwrap();
+    let verified = verify(&target, &manifest, &JobControl::default()).unwrap();
+    let loaded = load(&verified).unwrap();
+    let got = plan(&manifest, &loaded, &RestoreView::default());
+
+    assert_eq!(state(&got, RowKind::Collection, "plain"), RowState::New);
+}
+
+#[tokio::test]
+async fn an_alias_that_stays_is_not_written_early() {
+    let backup = backup_of(
+        vec![referencing("books", "people"), schema("authors")],
+        Loaded {
+            aliases: vec![alias("people", "authors")],
+            ..Loaded::default()
+        },
+    );
+    let mut job = backup.job(false);
+    job.ticked.remove(&(RowKind::Alias, "people".to_string()));
+    let (server, client) = serve(Fake::default()).await;
+
+    restore(client, job).await;
+
+    assert!(!writes(&server).await.iter().any(|w| w.contains("aliases")));
+}
+
+#[tokio::test]
+async fn done_reaches_total_with_rows_that_stay_and_rows_left_out() {
+    let backup = backup_of(vec![schema("books")], resources());
+    let mut job = backup.job(false);
+    // Its target `books` is not restored now, so the alias is left out at run time.
+    job.ticked
+        .remove(&(RowKind::Collection, "books".to_string()));
+    let (_server, client) = serve(differing()).await;
+    let (tx, rx) = watch::channel(Default::default());
+
+    let outcome = run_restore(client, job, JobControl::default(), tx).await;
+
+    assert_finished(&outcome.end);
+    let last: RestoreProgress = rx.borrow().clone();
+    assert_eq!(last.done, last.total);
+}
+
+#[test]
 fn an_alias_with_no_target_is_left_out_and_named() {
     let backup = backup_of(
         Vec::new(),
@@ -1443,7 +1633,8 @@ async fn load_reads_a_backup_and_names_from_the_manifest_win() {
     let mut manifest = read_manifest(&target).unwrap();
 
     manifest.collections[0].name = "renamed".into();
-    let loaded = load(&target, &manifest).unwrap();
+    let backup = verify(&target, &manifest, &JobControl::default()).unwrap();
+    let loaded = load(&backup).unwrap();
 
     assert_eq!(loaded.schemas[0].name, "renamed");
     assert_eq!(loaded.aliases, [alias("shop", "books")]);
@@ -1458,11 +1649,22 @@ async fn load_refuses_a_schema_that_is_no_schema() {
     let target = root.path().join("b");
     let (_server, client) = serve(shop_fake()).await;
     backup(client, &["books"], BackupTarget::Folder(target.clone())).await;
-    let manifest = read_manifest(&target).unwrap();
+    let mut manifest = read_manifest(&target).unwrap();
     fs::write(target.join("collections/0001.schema.json"), b"[1]").unwrap();
+    let file = manifest
+        .files
+        .iter_mut()
+        .find(|f| f.path == "collections/0001.schema.json")
+        .unwrap();
+    file.bytes = 3;
+    file.sha256 = Sha256::digest(b"[1]")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let backup = verify(&target, &manifest, &JobControl::default()).unwrap();
 
     assert!(matches!(
-        load(&target, &manifest),
+        load(&backup),
         Err(tessera_core::backup::restore::LoadError::Bad { .. })
     ));
 }
@@ -1474,12 +1676,11 @@ async fn a_backup_restores_into_an_empty_server() {
     let (_server, source) = serve(shop_fake()).await;
     backup(source, &["books"], BackupTarget::Folder(target.clone())).await;
     let manifest = read_manifest(&target).unwrap();
-    verify(&target, &manifest, &JobControl::default()).unwrap();
-    let loaded = load(&target, &manifest).unwrap();
+    let backup = verify(&target, &manifest, &JobControl::default()).unwrap();
+    let loaded = load(&backup).unwrap();
     let rows = plan(&manifest, &loaded, &RestoreView::default()).rows;
     let job = RestoreJob {
-        folder: target,
-        manifest,
+        backup,
         loaded,
         ticked: rows.into_iter().map(|r| (r.kind, r.name)).collect(),
         replace: false,

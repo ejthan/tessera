@@ -17,8 +17,11 @@
 use std::path::Path;
 
 use secrecy::SecretString;
-use serde_json::Value;
-use tessera_client::{Alias, Client, ClientOptions, ItemSet, SetKind, StopwordSet};
+use serde_json::{Value, json};
+use tessera_client::{
+    Alias, Client, ClientOptions, DirtyValues, ImportAction, ImportParams, ItemSet, SetKind,
+    StopwordSet,
+};
 use tessera_core::backup::archive::{read_manifest, unpack, verify};
 use tessera_core::backup::restore::{RestoreJob, RestoreView, RowState, load, plan, run_restore};
 use tessera_core::backup::run::{BackupPlan, BackupTarget, run_backup};
@@ -119,8 +122,8 @@ async fn round_trip(from: &Client, to: &Client, backup: BackupTarget, folder: &P
         BackupTarget::Folder(_) => read_manifest(folder).unwrap(),
         BackupTarget::Archive(path) => unpack(path, folder, &control).unwrap(),
     };
-    verify(folder, &manifest, &control).unwrap();
-    let loaded = load(folder, &manifest).unwrap();
+    let verified = verify(folder, &manifest, &control).unwrap();
+    let loaded = load(&verified).unwrap();
     let view = RestoreView::read(to).await.unwrap();
     assert!(
         view.collections.is_empty(),
@@ -134,8 +137,7 @@ async fn round_trip(from: &Client, to: &Client, backup: BackupTarget, folder: &P
     );
 
     let job = RestoreJob {
-        folder: folder.to_path_buf(),
-        manifest,
+        backup: verified,
         loaded,
         ticked: shown.rows.into_iter().map(|r| (r.kind, r.name)).collect(),
         replace: false,
@@ -212,4 +214,92 @@ async fn a_backup_round_trips_into_a_second_server() {
         &scratch,
     )
     .await;
+}
+
+/// The server answers 400 "Referenced collection `authors` not found." to an import while the
+/// alias is missing, so the alias cannot wait for the end of a restore.
+#[tokio::test]
+#[ignore = "needs two Typesense servers"]
+async fn a_reference_through_an_alias_is_restored() {
+    let (from, to) = (source(), target());
+    let names = ["live_alias_authors", "live_alias_books"];
+    let alias = "live_alias_people";
+    for name in names {
+        from.delete_collection(name).await.ok();
+    }
+    from.delete_alias(alias).await.ok();
+    from.create_collection(&json!({
+        "name": names[0],
+        "fields": [{"name": "name", "type": "string"}],
+    }))
+    .await
+    .unwrap();
+    from.upsert_alias(alias, names[0]).await.unwrap();
+    from.create_collection(&json!({
+        "name": names[1],
+        "fields": [
+            {"name": "title", "type": "string"},
+            {"name": "author_id", "type": "string", "reference": format!("{alias}.id")},
+        ],
+    }))
+    .await
+    .unwrap();
+    let import = |name: &'static str, body: &'static str| {
+        let client = from.clone();
+        async move {
+            let params = ImportParams {
+                action: ImportAction::Create,
+                batch_size: 10,
+                dirty_values: DirtyValues::CoerceOrReject,
+            };
+            client.import_batch(name, &params, body).await.unwrap()
+        }
+    };
+    import(names[0], "{\"id\":\"1\",\"name\":\"a\"}\n").await;
+    import(
+        names[1],
+        "{\"id\":\"1\",\"title\":\"t\",\"author_id\":\"1\"}\n",
+    )
+    .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("b");
+    let plan_b = BackupPlan {
+        // The dependent first, so only the order of the plan can save it.
+        collections: vec![names[1].to_string(), names[0].to_string()],
+        target: BackupTarget::Folder(folder.clone()),
+    };
+    let (tx, _rx) = watch::channel(Default::default());
+    let outcome = run_backup(from.clone(), plan_b, JobControl::default(), tx).await;
+    assert!(matches!(outcome.end, JobEnd::Finished), "{:?}", outcome.end);
+
+    let control = JobControl::default();
+    let manifest = read_manifest(&folder).unwrap();
+    let backup = verify(&folder, &manifest, &control).unwrap();
+    let loaded = load(&backup).unwrap();
+    let view = RestoreView::read(&to).await.unwrap();
+    let rows = plan(&manifest, &loaded, &view).rows;
+    let job = RestoreJob {
+        backup,
+        loaded,
+        ticked: rows.into_iter().map(|r| (r.kind, r.name)).collect(),
+        replace: false,
+        batch_size: 1000,
+    };
+    let (tx, _rx) = watch::channel(Default::default());
+    let restored = run_restore(to.clone(), job, control, tx).await;
+    assert!(
+        matches!(restored.end, JobEnd::Finished),
+        "{:?} {:?}",
+        restored.end,
+        restored.rows
+    );
+    assert_eq!(to.collection(names[1]).await.unwrap().num_documents, 1);
+    assert_eq!(to.aliases().await.unwrap()[0].collection_name, names[0]);
+
+    for name in names {
+        from.delete_collection(name).await.ok();
+    }
+    from.delete_alias(alias).await.ok();
+    empty(&to).await;
 }

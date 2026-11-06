@@ -202,14 +202,17 @@ pub fn pack(folder: &Path, target: &Path, cancel: &JobControl) -> Result<(), Arc
     let mut guard = PartGuard(Some(&part));
 
     let mut builder = tar::Builder::new(zstd::stream::write::Encoder::new(file, LEVEL)?);
-    let paths = std::iter::once(MANIFEST).chain(manifest.files.iter().map(|f| f.path.as_str()));
-    for path in paths {
+    let listed = manifest
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), Some(f.bytes)));
+    for (path, declared) in std::iter::once((MANIFEST, None)).chain(listed) {
         stop_check(cancel)?;
         let source = File::open(folder.join(path))?;
         // A tar header states the size, so a file that changed since it was hashed stops here.
         let bytes = source.metadata()?.len();
-        if let Some(file) = manifest.files.iter().find(|f| f.path == path) {
-            same_size(bytes, file.bytes, path)?;
+        if let Some(declared) = declared {
+            same_size(bytes, declared, path)?;
         }
         let reader = Stoppable {
             inner: source.take(bytes),
@@ -360,9 +363,33 @@ pub(super) fn digest(path: &Path, cancel: &JobControl) -> Result<(u64, String), 
     Ok((total, hex))
 }
 
+/// A folder that [`verify`] passed, with its manifest. Only `verify` makes one, so nothing can
+/// be loaded or restored from a folder that was not checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verified {
+    folder: PathBuf,
+    manifest: Manifest,
+}
+
+impl Verified {
+    /// The folder.
+    pub fn folder(&self) -> &Path {
+        &self.folder
+    }
+
+    /// Its manifest.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+}
+
 /// Checks each listed file of `folder`: a regular file, then its size, then its digest. A file
 /// the manifest does not list is ignored.
-pub fn verify(folder: &Path, manifest: &Manifest, cancel: &JobControl) -> Result<(), ArchiveError> {
+pub fn verify(
+    folder: &Path,
+    manifest: &Manifest,
+    cancel: &JobControl,
+) -> Result<Verified, ArchiveError> {
     // A folder comes from anywhere too: a link would read a file of this machine into a restore.
     if fs::symlink_metadata(folder.join(COLLECTIONS)).is_ok_and(|m| m.is_symlink()) {
         return Err(ArchiveError::NotRegular(COLLECTIONS.to_string()));
@@ -383,7 +410,10 @@ pub fn verify(folder: &Path, manifest: &Manifest, cancel: &JobControl) -> Result
             return Err(ArchiveError::Digest(file.path.clone()));
         }
     }
-    Ok(())
+    Ok(Verified {
+        folder: folder.to_path_buf(),
+        manifest: manifest.clone(),
+    })
 }
 
 #[cfg(test)]

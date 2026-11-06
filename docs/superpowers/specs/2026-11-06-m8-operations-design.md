@@ -232,12 +232,12 @@ Blocking, called through `spawn_blocking`.
 ```rust
 pub fn pack(folder: &Path, target: &Path, cancel: &JobControl) -> Result<(), ArchiveError>;
 pub fn unpack(archive: &Path, into: &Path, cancel: &JobControl) -> Result<Manifest, ArchiveError>;
-pub fn verify(folder: &Path, manifest: &Manifest, cancel: &JobControl) -> Result<(), ArchiveError>;
+pub fn verify(folder: &Path, manifest: &Manifest, cancel: &JobControl) -> Result<Verified, ArchiveError>;
 ```
 
 - `pack` writes `manifest.json` first, then the files in manifest order, as regular entries with mode 0600 and mtime 0, through `zstd` level 3 into `<target>.part` with mode 0600, then syncs and renames. A symbolic link as target is refused, as for exports. Stopping removes the part file.
 - `unpack` reads entry by entry and never calls `Entry::unpack`. The first entry must be `manifest.json`, at most 64 MiB. Every further entry must be a regular file, its exact path must be in `manifest.files`, and each path comes once. It copies at most the declared `bytes` plus one to a file created in `into` with `create_new`, and more than declared is an error. So traversal, links, device entries and a decompression bomb all end before they cost disk beyond the declared total. A check of free disk space is not done: the write fails with the system's message.
-- `verify` hashes each file with `sha2` through a 64 KiB buffer and compares size and digest.
+- `verify` hashes each file with `sha2` through a 64 KiB buffer and compares size and digest. It returns `Verified`, which nothing else makes: `load` and `RestoreJob` take that, so a folder cannot be loaded or restored unchecked.
 
 ### 5.4 Backup (`backup/run.rs`)
 
@@ -260,6 +260,8 @@ Steps, in order:
 
 Warnings: unstored fields (lost, as in D64), blanked secrets, dictionaries used and not included, a reference to a collection not selected, a count that moved, a missing set.
 
+Schemas and set items pass the same scrub: all of `model_config` but its plain keys, and a key named like a secret at any depth, because `metadata` is free form and 30.2 stores `{"api_key": "…"}` on a curation item. `blanked_secrets` in the manifest counts only what the collection needs to embed, so a blank in `metadata` warns and does not block a restore. Each JSON file stays within the 64 MiB a restore reads, and a stale `<target>.part` stops the run before the first export.
+
 Stopping removes the partial folder or archive. Nothing on the server changes, so a backup needs no unlock.
 
 ### 5.5 Restore (`backup/restore.rs`, D91)
@@ -278,9 +280,9 @@ pub async fn run_restore(client: Client, job: RestoreJob, control: JobControl, p
 Order of writes:
 
 1. Stopword sets, then synonym sets, then curation sets. `New` is written. `Differs` is written only with Replace on; otherwise it stays and is named.
-2. Collections by `order`: referenced ones first (Kahn over `reference` targets within the backup, by collection name and by aliases in the backup). A cycle keeps its members in manifest order and adds a warning, since an import with a missing target fails line by line and shows in the report.
-3. A collection's documents with `run_import`: `ImportAction::Create`, `DirtyValues::CoerceOrReject`, `batch_size` from settings, `ReadOptions::new(Format::Jsonl)`.
-4. Aliases, last, so a client moves only when the data is there. An alias whose target was not restored and does not exist is left out and named. A name that is a collection on the server is left out and named, since the collection would hide it.
+2. Collections by `order`: referenced ones first (Kahn over `reference` targets within the backup, by collection name and by aliases in the backup). A cycle comes after what it needs and before what needs it, and adds a warning that names its members, since an import with a missing target fails line by line and shows in the report.
+3. A collection's documents with `run_import`: `ImportAction::Create`, `DirtyValues::CoerceOrReject`, `batch_size` from settings, `ReadOptions::new(Format::Jsonl)`. Before the import, the ticked aliases its `reference` fields name and whose target stands are written: the server answers 400 "Referenced collection `authors` not found." to an import until such an alias exists (measured on 30.2), so a reference through an alias could otherwise never be restored.
+4. The other aliases, last, so a client moves only when the data is there. An alias whose target was not restored and does not exist is left out and named. A name that is a collection on the server is left out and named, since the collection would hide it.
 
 After each import, `ImportOutcome.count` is compared with the manifest's `documents`, not with the file's line count alone. A difference or any failed line marks the row and ends the run after that collection, because later collections may reference it. What was done stays and is listed. The run never deletes anything. Before a retry, the list names what to delete.
 

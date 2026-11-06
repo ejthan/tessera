@@ -16,8 +16,8 @@ use url::Url;
 
 use super::archive::{ArchiveError, create_private, create_private_dir, digest, pack};
 use super::format::{
-    ALIASES, COLLECTIONS, CURATION_SETS, FORMAT, MANIFEST, Manifest, ManifestCollection,
-    ManifestFile, STOPWORDS, SYNONYM_SETS,
+    ALIASES, COLLECTIONS, CURATION_SETS, FORMAT, MANIFEST, MANIFEST_LIMIT, Manifest,
+    ManifestCollection, ManifestFile, STOPWORDS, SYNONYM_SETS,
 };
 use crate::redact;
 use crate::schema::SchemaDraft;
@@ -114,6 +114,15 @@ pub enum BackupWarning {
         /// How many.
         count: usize,
     },
+    /// Values under secret-named keys of a set's items, which the backup does not hold.
+    BlankedSetSecrets {
+        /// Its kind.
+        kind: SetKind,
+        /// Its name.
+        name: String,
+        /// How many.
+        count: usize,
+    },
     /// Stemming dictionaries in use, which a backup does not hold.
     Dictionaries {
         /// The collection.
@@ -168,6 +177,9 @@ pub enum BackupError {
         /// What happened.
         source: TransferError,
     },
+    /// A JSON file over the limit a restore reads.
+    #[error("{0} is too large")]
+    TooLarge(String),
     /// Packing or hashing.
     #[error(transparent)]
     Archive(ArchiveError),
@@ -289,13 +301,44 @@ fn scrub(value: &mut Value) -> usize {
     }
 }
 
-/// A schema as a backup holds it, and how many credentials were left out.
-fn backup_schema(collection: &Collection) -> (Value, usize) {
+/// [`scrub`] on each `metadata` object at any depth.
+fn scrub_metadata(value: &mut Value) -> usize {
+    match value {
+        Value::Object(map) => map
+            .iter_mut()
+            .map(|(key, child)| {
+                if key == "metadata" {
+                    scrub(child)
+                } else {
+                    scrub_metadata(child)
+                }
+            })
+            .sum(),
+        Value::Array(items) => items.iter_mut().map(scrub_metadata).sum(),
+        _ => 0,
+    }
+}
+
+/// A schema as a backup holds it.
+struct BackupSchema {
+    schema: Value,
+    /// Credentials the collection needs, so it cannot be restored as it stands.
+    credentials: usize,
+    /// Values blanked in free-form `metadata`, which nothing on the server reads.
+    metadata: usize,
+}
+
+fn backup_schema(collection: &Collection) -> BackupSchema {
     let mut draft = SchemaDraft::from_collection(collection);
     let blanked = draft.blank_secrets();
     let mut schema = draft.to_json();
+    let metadata = scrub_metadata(&mut schema);
     let more = scrub(&mut schema);
-    (schema, blanked + more)
+    BackupSchema {
+        schema,
+        credentials: blanked + more,
+        metadata,
+    }
 }
 
 fn unstored_fields(collection: &Collection) -> Vec<String> {
@@ -319,7 +362,8 @@ pub fn backup_warnings(
                 fields,
             });
         }
-        let (_, count) = backup_schema(collection);
+        let schema = backup_schema(collection);
+        let count = schema.credentials + schema.metadata;
         if count > 0 {
             warnings.push(BackupWarning::BlankedSecrets {
                 collection: name(),
@@ -395,6 +439,11 @@ fn prepare(target: &BackupTarget) -> Result<Workspace, BackupError> {
     if std::fs::symlink_metadata(path).is_ok() {
         return Err(BackupError::Exists(path.clone()));
     }
+    // Here, not at the end of an export that may take hours.
+    let part = part_path(path);
+    if std::fs::symlink_metadata(&part).is_ok() {
+        return Err(BackupError::Exists(part));
+    }
     let workspace = match target {
         BackupTarget::Folder(path) => {
             let dir = part_path(path);
@@ -429,10 +478,15 @@ async fn write_file(path: PathBuf, bytes: Vec<u8>) -> Result<(), BackupError> {
 
 async fn write_json(dir: &Path, name: &str, value: &impl Serialize) -> Result<(), BackupError> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| BackupError::Io(e.to_string()))?;
+    // A restore refuses more, so such a backup could never be read.
+    if bytes.len() as u64 > MANIFEST_LIMIT {
+        return Err(BackupError::TooLarge(name.to_string()));
+    }
     write_file(dir.join(name), bytes).await
 }
 
-/// The sets of `kind` that `selected` attach, and a warning for each one the server lacks.
+/// The sets of `kind` that `selected` attach, scrubbed, because an item's `metadata` is free
+/// form, and a warning for each one the server lacks or that lost a value.
 fn attached_sets(
     kind: SetKind,
     sets: &[ItemSet],
@@ -458,7 +512,18 @@ fn attached_sets(
         }
     }
     let wanted = |s: &&ItemSet| names.contains(&s.name.as_str());
-    sets.iter().filter(wanted).cloned().collect()
+    let mut attached: Vec<ItemSet> = sets.iter().filter(wanted).cloned().collect();
+    for set in &mut attached {
+        let count = set.items.iter_mut().map(scrub).sum();
+        if count > 0 {
+            warnings.push(BackupWarning::BlankedSetSecrets {
+                kind,
+                name: set.name.clone(),
+                count,
+            });
+        }
+    }
+    attached
 }
 
 /// One backup run: its inputs, and what it reports.
@@ -514,7 +579,11 @@ impl Run<'_> {
         file: u32,
         dir: &Path,
     ) -> Result<ManifestCollection, Halt> {
-        let (schema, blanked_secrets) = backup_schema(collection);
+        let BackupSchema {
+            schema,
+            credentials: blanked_secrets,
+            ..
+        } = backup_schema(collection);
         let mut entry = ManifestCollection {
             file,
             name: collection.name.clone(),
@@ -718,6 +787,32 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn metadata_is_counted_apart_from_credentials() {
+        let collection: Collection = serde_json::from_value(json!({
+            "name": "c",
+            "metadata": {"api_key": "a", "nested": {"client_secret": "b"}},
+            "fields": [{"name": "e", "type": "float[]", "embed": {"model_config": {
+                "model_name": "m",
+                "api_key": "c",
+            }}}]
+        }))
+        .unwrap();
+        let got = backup_schema(&collection);
+        assert_eq!((got.credentials, got.metadata), (1, 2));
+    }
+
+    #[tokio::test]
+    async fn a_file_a_restore_would_refuse_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let too_long = "x".repeat(MANIFEST_LIMIT as usize + 1);
+
+        let got = write_json(dir.path(), ALIASES, &too_long).await;
+
+        assert!(matches!(got, Err(BackupError::TooLarge(name)) if name == ALIASES));
+        assert!(!dir.path().join(ALIASES).exists());
+    }
 
     #[test]
     fn scrub_keeps_what_holds_no_credential() {

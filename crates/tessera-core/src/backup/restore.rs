@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::de::DeserializeOwned;
 use tessera_client::{
@@ -14,6 +14,7 @@ use tessera_client::{
 };
 use tokio::sync::watch;
 
+use super::archive::Verified;
 use super::format::{
     ALIASES, CURATION_SETS, MANIFEST_LIMIT, Manifest, ManifestCollection, STOPWORDS, SYNONYM_SETS,
 };
@@ -91,7 +92,8 @@ fn read_list<T: DeserializeOwned>(
 }
 
 /// Reads what `plan` needs from a folder that passed `verify`. Blocking.
-pub fn load(folder: &Path, manifest: &Manifest) -> Result<Loaded, LoadError> {
+pub fn load(backup: &Verified) -> Result<Loaded, LoadError> {
+    let (folder, manifest) = (backup.folder(), backup.manifest());
     let mut schemas = Vec::with_capacity(manifest.collections.len());
     for entry in &manifest.collections {
         let path = entry.schema_path();
@@ -169,6 +171,8 @@ pub enum RestoreBlock {
     RequiredUnstored(Vec<String>),
     /// The schema holds the mask, which must not be sent.
     Mask,
+    /// The manifest lists this name twice, and this row is the second.
+    DuplicateName,
 }
 
 /// How a row compares with the server.
@@ -301,8 +305,64 @@ fn reference_target(reference: &str) -> &str {
     reference.split('.').next().unwrap_or(reference)
 }
 
+/// `unplaced` so that what waits for a cycle comes after it: the reverse of a depth-first
+/// post-order along `dependents`, without recursion because a manifest can chain 100,000 names.
+fn after_their_targets(unplaced: &[usize], dependents: &[Vec<usize>]) -> Vec<usize> {
+    let mut seen = vec![false; dependents.len()];
+    let mut order = Vec::with_capacity(unplaced.len());
+    for &root in unplaced {
+        if std::mem::replace(&mut seen[root], true) {
+            continue;
+        }
+        let mut stack = vec![(root, 0)];
+        while let Some((node, next)) = stack.last_mut() {
+            match dependents[*node].get(*next) {
+                Some(&dependent) => {
+                    *next += 1;
+                    if !std::mem::replace(&mut seen[dependent], true) {
+                        stack.push((dependent, 0));
+                    }
+                }
+                None => {
+                    order.push(*node);
+                    stack.pop();
+                }
+            }
+        }
+    }
+    order.reverse();
+    order
+}
+
+/// `unplaced` without what only waits for a cycle and is no part of one: nothing there waits
+/// for it. Something between two cycles stays, which only adds a name to a warning.
+fn in_cycles(
+    unplaced: &[usize],
+    dependents: &[Vec<usize>],
+    targets: &[Vec<usize>],
+) -> HashSet<usize> {
+    let mut waited_for: Vec<usize> = dependents.iter().map(Vec::len).collect();
+    let mut free: Vec<usize> = unplaced
+        .iter()
+        .copied()
+        .filter(|&i| waited_for[i] == 0)
+        .collect();
+    let mut cycle: HashSet<usize> = unplaced.iter().copied().collect();
+    while let Some(i) = free.pop() {
+        cycle.remove(&i);
+        for &target in &targets[i] {
+            waited_for[target] -= 1;
+            if waited_for[target] == 0 && cycle.contains(&target) {
+                free.push(target);
+            }
+        }
+    }
+    cycle
+}
+
 /// The names of `drafts`, referenced ones first (Kahn), by name and through the backup's
-/// aliases, and the members of a cycle, which keep their order at the end.
+/// aliases, and the members of a cycle, which come after what they need and before what needs
+/// them.
 fn reference_order(drafts: &[&SchemaDraft], aliases: &[Alias]) -> (Vec<String>, Vec<String>) {
     let at: HashMap<&str, usize> = drafts
         .iter()
@@ -317,6 +377,7 @@ fn reference_order(drafts: &[&SchemaDraft], aliases: &[Alias]) -> (Vec<String>, 
     };
     let mut waits_for = vec![0; drafts.len()];
     let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); drafts.len()];
+    let mut all_targets: Vec<Vec<usize>> = vec![Vec::new(); drafts.len()];
     for (i, draft) in drafts.iter().enumerate() {
         let targets: HashSet<usize> = draft
             .fields
@@ -325,9 +386,10 @@ fn reference_order(drafts: &[&SchemaDraft], aliases: &[Alias]) -> (Vec<String>, 
             .filter(|&target| target != i)
             .collect();
         waits_for[i] = targets.len();
-        for target in targets {
+        for &target in &targets {
             dependents[target].push(i);
         }
+        all_targets[i] = targets.into_iter().collect();
     }
     let mut queue: VecDeque<usize> = (0..drafts.len()).filter(|&i| waits_for[i] == 0).collect();
     let mut placed = vec![false; drafts.len()];
@@ -342,12 +404,12 @@ fn reference_order(drafts: &[&SchemaDraft], aliases: &[Alias]) -> (Vec<String>, 
             }
         }
     }
-    let cycle: Vec<String> = (0..drafts.len())
-        .filter(|&i| !placed[i])
-        .map(|i| drafts[i].name.clone())
-        .collect();
-    order.extend(cycle.iter().cloned());
-    (order, cycle)
+    let unplaced: Vec<usize> = (0..drafts.len()).filter(|&i| !placed[i]).collect();
+    let cycle = in_cycles(&unplaced, &dependents, &all_targets);
+    let rest = after_their_targets(&unplaced, &dependents);
+    order.extend(rest.into_iter().map(|i| drafts[i].name.clone()));
+    let members = unplaced.into_iter().filter(|i| cycle.contains(i));
+    (order, members.map(|i| drafts[i].name.clone()).collect())
 }
 
 /// The sets `draft` attaches that are not `known`.
@@ -476,8 +538,16 @@ pub fn plan(manifest: &Manifest, loaded: &Loaded, server: &RestoreView) -> Resto
     taken.extend(server.aliases.iter().map(|a| a.name.as_str()));
 
     let mut open: Vec<&SchemaDraft> = Vec::new();
+    let mut listed = HashSet::new();
     for (entry, draft) in manifest.collections.iter().zip(&loaded.schemas) {
-        let state = match block(entry, draft, &taken) {
+        // A hostile manifest can list a name twice, and the second would meet the first.
+        let twice = !listed.insert(entry.name.as_str());
+        let found = if twice {
+            Some(RestoreBlock::DuplicateName)
+        } else {
+            block(entry, draft, &taken)
+        };
+        let state = match found {
             Some(block) => RowState::Blocked(block),
             None => {
                 open.push(draft);
@@ -494,8 +564,6 @@ pub fn plan(manifest: &Manifest, loaded: &Loaded, server: &RestoreView) -> Resto
             }
         };
         rows.push(row(RowKind::Collection, &entry.name, state));
-        // A hostile manifest can list a name twice, and the second would meet the first.
-        taken.insert(entry.name.as_str());
     }
     let (order, cycle) = reference_order(&open, &loaded.aliases);
     if !cycle.is_empty() {
@@ -527,9 +595,7 @@ pub fn plan(manifest: &Manifest, loaded: &Loaded, server: &RestoreView) -> Resto
 #[derive(Debug, Clone)]
 pub struct RestoreJob {
     /// The verified backup.
-    pub folder: PathBuf,
-    /// Its manifest.
-    pub manifest: Manifest,
+    pub backup: Verified,
     /// Its JSON files.
     pub loaded: Loaded,
     /// The rows the user left ticked.
@@ -587,6 +653,8 @@ pub enum RowFailure {
         failed: u64,
         /// Sent, and nobody knows.
         unconfirmed: u64,
+        /// The server's reason for the first refused line.
+        first_error: Option<String>,
     },
     /// Stopped on request, partway.
     Stopped,
@@ -667,7 +735,7 @@ fn is_resource(kind: RowKind) -> bool {
 }
 
 /// Why an import that ended cannot stand, compared with the manifest.
-fn import_failure(outcome: &ImportOutcome, documents: u64) -> Option<RowFailure> {
+fn import_failure(outcome: &ImportOutcome, documents: u64, stopped: bool) -> Option<RowFailure> {
     let progress = &outcome.progress;
     match &outcome.end {
         JobEnd::Stopped => Some(RowFailure::Stopped),
@@ -676,8 +744,11 @@ fn import_failure(outcome: &ImportOutcome, documents: u64) -> Option<RowFailure>
             Some(RowFailure::Lines {
                 failed: progress.failed,
                 unconfirmed: progress.unconfirmed,
+                first_error: progress.first_error.as_deref().map(str::to_string),
             })
         }
+        // A stop after the last batch ends the count, not the import: nothing says it differs.
+        JobEnd::Finished if stopped && outcome.count.is_none() => Some(RowFailure::Stopped),
         JobEnd::Finished => {
             let found = outcome.count.as_ref().map(|c| c.after);
             (found != Some(documents)).then_some(RowFailure::Count {
@@ -710,18 +781,23 @@ impl Run<'_> {
         self.job.ticked.contains(&(kind, name.to_string()))
     }
 
-    /// Whether to write row `at`, marking it when a difference stays.
-    fn take(&mut self, at: usize, row: &PlanRow) -> bool {
+    /// Whether the run means to write `row`.
+    fn writes(&self, row: &PlanRow) -> bool {
         let ticked = self.ticked(row.kind, &row.name);
         match row.state {
             RowState::New => ticked,
-            RowState::Differs if ticked && self.job.replace => true,
-            RowState::Differs => {
-                self.rows[at].result = RowResult::Kept;
-                false
-            }
+            RowState::Differs => ticked && self.job.replace,
             RowState::Same | RowState::Blocked(_) => false,
         }
+    }
+
+    /// Whether to write row `at`, marking it when a difference stays.
+    fn take(&mut self, at: usize, row: &PlanRow) -> bool {
+        let writes = self.writes(row);
+        if !writes && row.state == RowState::Differs {
+            self.rows[at].result = RowResult::Kept;
+        }
+        writes
     }
 
     fn mark(&mut self, at: usize, result: RowResult) {
@@ -746,6 +822,56 @@ impl Run<'_> {
         if !self.warnings.contains(&warning) {
             self.warnings.push(warning);
         }
+    }
+
+    /// The collections that stand now.
+    fn standing_collections(&self, view: &RestoreView) -> HashSet<String> {
+        let created = self.to_delete.iter();
+        view.collections.iter().chain(created).cloned().collect()
+    }
+
+    async fn write_alias(&mut self, at: usize, alias: &Alias) -> Result<(), Halt> {
+        self.stop_check()?;
+        match self
+            .client
+            .upsert_alias(&alias.name, &alias.collection_name)
+            .await
+        {
+            Ok(_) => {
+                self.mark(at, RowResult::Done);
+                Ok(())
+            }
+            Err(e) => Err(self.fail(at, RowFailure::Text(e.to_string()))),
+        }
+    }
+
+    /// Writes the aliases `draft` references whose target stands: a reference through an alias
+    /// finds nothing until the alias exists, so the import cannot wait for [`Self::aliases`].
+    async fn aliases_of(
+        &mut self,
+        draft: &SchemaDraft,
+        fresh: &RestorePlan,
+        view: &RestoreView,
+    ) -> Result<(), Halt> {
+        let job = self.job;
+        let linked = draft.fields.iter().filter(|f| !f.reference.is_empty());
+        let targets: HashSet<&str> = linked.map(|f| reference_target(&f.reference)).collect();
+        for (at, row) in fresh.rows.iter().enumerate() {
+            if row.kind != RowKind::Alias
+                || !targets.contains(row.name.as_str())
+                || self.rows[at].result == RowResult::Done
+                || !self.take(at, row)
+            {
+                continue;
+            }
+            let standing = self.standing_collections(view);
+            let standing: HashSet<&str> = standing.iter().map(String::as_str).collect();
+            let found = job.loaded.aliases.iter().find(|a| a.name == row.name);
+            if let Some(alias) = found.filter(|a| alias_left_out(a, &standing).is_none()) {
+                self.write_alias(at, alias).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn write_resource(&self, row: &PlanRow) -> Result<(), tessera_client::Error> {
@@ -812,7 +938,7 @@ impl Run<'_> {
 
     async fn import(&self, entry: &ManifestCollection) -> ImportOutcome {
         let job = ImportJob {
-            source: Source::File(self.job.folder.join(entry.documents_path())),
+            source: Source::File(self.job.backup.folder().join(entry.documents_path())),
             options: ReadOptions::new(Format::Jsonl),
             collection: entry.name.clone(),
             params: ImportParams {
@@ -838,7 +964,12 @@ impl Run<'_> {
 
     /// Creates the collection and fills it. Only a collection this run created is imported
     /// into: a name that appeared meanwhile answers 409 here and stops the run.
-    async fn collection(&mut self, name: &str, view: &RestoreView) -> Result<(), Halt> {
+    async fn collection(
+        &mut self,
+        name: &str,
+        fresh: &RestorePlan,
+        view: &RestoreView,
+    ) -> Result<(), Halt> {
         let job = self.job;
         let Some(at) = self
             .rows
@@ -847,7 +978,7 @@ impl Run<'_> {
         else {
             return Ok(());
         };
-        let found = job.manifest.collections.iter().zip(&job.loaded.schemas);
+        let found = (job.backup.manifest().collections.iter()).zip(&job.loaded.schemas);
         let Some((entry, draft)) = found.into_iter().find(|(c, _)| c.name == name) else {
             return Ok(());
         };
@@ -861,39 +992,38 @@ impl Run<'_> {
             return Err(self.fail(at, RowFailure::Text(e.to_string())));
         }
         self.to_delete.push(name.to_string());
+        self.aliases_of(&draft, fresh, view).await?;
         let outcome = self.import(entry).await;
-        if let Some(failure) = import_failure(&outcome, entry.documents) {
+        let stopped = self.stop_check().is_err();
+        if let Some(failure) = import_failure(&outcome, entry.documents, stopped) {
             return Err(self.fail(at, failure));
         }
         self.mark(at, RowResult::Done);
         Ok(())
     }
 
-    /// Last, so a client moves only when the data is there.
+    /// Last, so a client moves only when the data is there. Those a reference needs are out
+    /// already, see [`Self::aliases_of`].
     async fn aliases(&mut self, fresh: &RestorePlan, view: &RestoreView) -> Result<(), Halt> {
-        let created = self.to_delete.clone();
-        let mut standing: HashSet<&str> = view.collections.iter().map(String::as_str).collect();
-        standing.extend(created.iter().map(String::as_str));
+        let job = self.job;
+        let standing = self.standing_collections(view);
+        let standing: HashSet<&str> = standing.iter().map(String::as_str).collect();
         for (at, row) in fresh.rows.iter().enumerate() {
-            if row.kind != RowKind::Alias || !self.take(at, row) {
+            if row.kind != RowKind::Alias
+                || self.rows[at].result == RowResult::Done
+                || !self.take(at, row)
+            {
                 continue;
             }
-            let Some(alias) = self.job.loaded.aliases.iter().find(|a| a.name == row.name) else {
+            let Some(alias) = job.loaded.aliases.iter().find(|a| a.name == row.name) else {
                 continue;
             };
             if let Some(warning) = alias_left_out(alias, &standing) {
                 self.warn(warning);
+                self.progress.send_modify(|p| p.total -= 1);
                 continue;
             }
-            self.stop_check()?;
-            match self
-                .client
-                .upsert_alias(&alias.name, &alias.collection_name)
-                .await
-            {
-                Ok(_) => self.mark(at, RowResult::Done),
-                Err(e) => return Err(self.fail(at, RowFailure::Text(e.to_string()))),
-            }
+            self.write_alias(at, alias).await?;
         }
         Ok(())
     }
@@ -903,7 +1033,7 @@ impl Run<'_> {
         // would answer 409 too, but by then the sets would have changed.
         let view = RestoreView::read(self.client).await?;
         let job = self.job;
-        let fresh = plan(&job.manifest, &job.loaded, &view);
+        let fresh = plan(job.backup.manifest(), &job.loaded, &view);
         self.rows = fresh
             .rows
             .iter()
@@ -914,7 +1044,7 @@ impl Run<'_> {
             })
             .collect();
         self.warnings = fresh.warnings.clone();
-        let total = self.rows.len() as u64;
+        let total = fresh.rows.iter().filter(|r| self.writes(r)).count() as u64;
         self.progress.send_modify(|p| p.total = total);
         let taken: Vec<String> = fresh
             .rows
@@ -948,7 +1078,7 @@ impl Run<'_> {
         for name in &fresh.order {
             if self.ticked(RowKind::Collection, name) {
                 self.stop_check()?;
-                self.collection(name, &view).await?;
+                self.collection(name, &fresh, &view).await?;
             }
         }
 
@@ -984,5 +1114,34 @@ pub async fn run_restore(
         rows: run.rows,
         to_delete: run.to_delete,
         warnings: run.warnings,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::transfer::report::Report;
+
+    #[tokio::test]
+    async fn a_stop_after_the_last_batch_is_a_stop() {
+        let outcome = ImportOutcome {
+            end: JobEnd::Finished,
+            progress: ImportProgress::default(),
+            report: Arc::new(Report::new().await.unwrap()),
+            stopped_at_line: None,
+            count: None,
+        };
+        assert_eq!(import_failure(&outcome, 2, true), Some(RowFailure::Stopped));
+        assert_eq!(
+            import_failure(&outcome, 2, false),
+            Some(RowFailure::Count {
+                expected: 2,
+                found: None,
+            })
+        );
     }
 }
