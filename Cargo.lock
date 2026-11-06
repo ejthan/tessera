@@ -7514,8 +7514,10 @@ dependencies = [
 name = "tessera-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "csv",
  "directories",
+ "hmac 0.13.0",
  "insta",
  "jiff",
  "keyring",
@@ -7524,6 +7526,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "tessera-client",
  "thiserror 2.0.21",
