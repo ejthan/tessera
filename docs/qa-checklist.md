@@ -5,10 +5,12 @@ What only a person, another OS or a workflow run can prove. Nothing here has bee
 ## 1. Before anything
 
 - [ ] Decide D32 in `docs/spec.md` §16: should delete and update by query also refuse a predicate that happens to match everything? **Pass:** the decision is recorded there. Machine: ____ Result: ____
-- [ ] Run every `live_*` target on 30.0 and on 30.2 on the last commit, except `live_builtin_model`. M8 could not rerun them on later commits, and M9 ran only what its Task 13 report lists. **Pass:** no failure on either version. Machine: ____ Result: ____
-- [ ] Run the cluster test on the last commit (`docs/building.md`, Cluster tests). **Pass:** all four tests pass. Machine: ____ Result: ____
+- [x] Run every `live_*` target on 30.0 and on 30.2 on the last commit, except `live_builtin_model`. M8 could not rerun them on later commits, and M9 ran only what its Task 13 report lists. **Pass:** no failure on either version. Machine: Apple M3 Max, macOS 27.0.1. Result: on commit `6ed55b1`, 87 passed on 30.0 and 87 on 30.2, in the full run; see the record below.
+- [x] Run the cluster test on the last commit (`docs/building.md`, Cluster tests). **Pass:** all four tests pass. Machine: Apple M3 Max, macOS 27.0.1. Result: on commit `6ed55b1`, 4 passed on a 3-node 30.2 cluster.
 
-Record: on 2026-11-07, on the tree of the commit `chore: prepare 1.0.0`, every `live_*` target passed on 30.2, 87 tests, except `live_builtin_model`, which did not run. The stub tests of `live_ai` returned early without `TESSERA_IT_STUB_HOST`. Not run: 30.0 and the cluster, so the two steps above stay open.
+Record: on 2026-11-07, on commit `6ed55b1` (the code of this release; later commits change only documents), every `live_*` target passed on 30.0 and on 30.2, 87 tests on each, except `live_builtin_model`, which did not run because it downloads a model. `TESSERA_IT_STUB_HOST=host.docker.internal` was set, so the stub tests of `live_ai` ran, and `TESSERA_IT_ANALYTICS=1`. No real provider was called. The four tests of the cluster target passed on a 3-node 30.2 cluster, with the two stop/start tests really stopping ts3, in a separate compose project. The cluster did not run on 30.0. `live_operations` and the restore target of `live_backup` ran on throwaway containers, as did every target on 30.0.
+
+One intermittent failure: the first `live_admin` run on 30.2, on a dev server just started, failed `live_rule_crud` and `live_put_clears_the_tag_and_the_meta_fields` with a client timeout on `POST /analytics/rules`. The server log has a 10-second gap between its two analytics persist lines at that moment. It did not come back in two reruns, in a run right after restarting the server, in the full 30.2 run above or on 30.0. The cause is not proved.
 
 ## 2. Performance
 
