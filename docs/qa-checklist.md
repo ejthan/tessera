@@ -4,7 +4,7 @@ What only a person, another OS or a workflow run can prove. Nothing here has bee
 
 ## 1. Before anything
 
-- [ ] Decide D32 in `docs/spec.md` §16: should delete and update by query also refuse a predicate that happens to match everything? **Pass:** the decision is recorded there. Machine: ____ Result: ____
+- [x] Decide D32 in `docs/spec.md` §16: should delete and update by query also refuse a predicate that happens to match everything? **Pass:** the decision is recorded there. Result: recorded on 2026-11-07, predicates that match all stay allowed; the maintainer can reverse it.
 - [x] Run every `live_*` target on 30.0 and on 30.2 on the last commit, except `live_builtin_model`. M8 could not rerun them on later commits, and M9 ran only what its Task 13 report lists. **Pass:** no failure on either version. Machine: Apple M3 Max, macOS 27.0.1. Result: on commit `6ed55b1`, 87 passed on 30.0 and 87 on 30.2, in the full run; see the record below.
 - [x] Run the cluster test on the last commit (`docs/building.md`, Cluster tests). **Pass:** all four tests pass. Machine: Apple M3 Max, macOS 27.0.1. Result: on commit `6ed55b1`, 4 passed on a 3-node 30.2 cluster.
 
