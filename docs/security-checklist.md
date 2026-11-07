@@ -19,6 +19,7 @@ One row per point, with its proof: a test, a CI job or a file. Status is **Prove
 | No telemetry; connections only to configured nodes and, opt-in, GitHub | Proved | `crates/tessera-client/tests/network.rs::only_two_places_build_an_http_client`, `crates/tessera-client/tests/update.rs::sends_a_user_agent_and_no_key`, `::follows_no_redirect`, `crates/tessera-app/tests/ui_settings.rs::the_update_check_is_off_and_sends_nothing`, `::turning_the_check_on_sends_nothing_until_a_start` |
 | `cargo deny` in CI | Proved | Job `lint` in `.github/workflows/ci.yml`, `deny.toml`. Locally on 2026-11-07: advisories, bans, licenses and sources ok |
 | `SECURITY.md` with the process and 7 days | Proved | `SECURITY.md` |
+| `release.yml` holds no secret but `GITHUB_TOKEN` | Proved | `grep -n 'secrets\.' .github/workflows/release.yml` finds nothing, and `github.token` stands only on the `gh` steps of `publish`, which runs nothing from the repository. The workflow has never run |
 
 ## Zeroization: the exceptions of design §8.2
 

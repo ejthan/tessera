@@ -7503,7 +7503,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7529,7 +7529,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-client"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "futures",
  "percent-encoding",
@@ -7549,7 +7549,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.23.1",
  "csv",
@@ -7580,7 +7580,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-widgets"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -9594,7 +9594,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "png 0.18.1",

@@ -2,7 +2,7 @@
 
 A fast, native desktop client for [Typesense](https://typesense.org), written in Rust with [GPUI Kit](https://gpui-kit.com). Tessera aims to cover the whole Typesense admin API: collections, documents, search, synonyms, curation, keys and cluster operations, with safeguards for production clusters.
 
-**Status:** nothing has been released yet. All milestones of [`docs/spec.md`](docs/spec.md) are implemented on feature branches. Their checks on screen and on other systems are still open.
+**Status:** prepared for 1.0, and nothing has been released yet. All milestones of [`docs/spec.md`](docs/spec.md) are implemented on feature branches. What only a person, another OS or a workflow run can prove is still open, see [`docs/qa-checklist.md`](docs/qa-checklist.md).
 
 Tessera is not affiliated with or endorsed by Typesense, Inc.
 
