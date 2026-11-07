@@ -17,6 +17,7 @@ pub mod search;
 pub mod settings;
 pub mod state;
 pub mod transfer;
+pub mod ui_budget;
 pub mod views;
 
 use std::io::BufRead;
@@ -108,6 +109,7 @@ pub fn run(launch: Launch) -> Result<(), String> {
     let handle = runtime.handle().clone();
 
     gpui_kit::application().run(move |cx| {
+        tessera_core::ui_thread::mark();
         cx.set_global(connection::ConnectorGlobal(connection::tokio_connector(
             handle.clone(),
         )));

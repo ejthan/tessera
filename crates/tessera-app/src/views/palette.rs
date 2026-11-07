@@ -21,6 +21,7 @@ use uuid::Uuid;
 use super::env_badge;
 use crate::actions::action_label;
 use crate::state::AppState;
+use crate::ui_budget::span;
 
 /// Width of the dialog.
 const WIDTH: f32 = 560.;
@@ -206,6 +207,7 @@ fn entries(
 
 impl CommandPalette {
     fn query_changed(&mut self, query: &str, cx: &mut Context<Self>) {
+        let _budget = span("palette.rank");
         let all = self.entries.iter().enumerate().collect();
         let ranked = rank(query, all, |(_, e)| e.label.as_ref(), PALETTE_LIMIT);
         self.shown = ranked.into_iter().map(|(i, _)| i).collect();

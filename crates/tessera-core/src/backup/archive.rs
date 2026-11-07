@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 use super::format::{COLLECTIONS, MANIFEST, MANIFEST_LIMIT, Manifest, ManifestProblem};
 use crate::transfer::JobControl;
+use crate::ui_thread::assert_off;
 
 /// The zstd level of an archive.
 const LEVEL: i32 = 3;
@@ -188,6 +189,7 @@ fn tar_header(bytes: u64) -> tar::Header {
 /// Writes the backup in `folder` to `target` as `.tar.zst`, the manifest first, then the files
 /// in manifest order. The target appears only when complete, and a stop leaves nothing.
 pub fn pack(folder: &Path, target: &Path, cancel: &JobControl) -> Result<(), ArchiveError> {
+    assert_off("archive::pack");
     if fs::symlink_metadata(target).is_ok_and(|m| m.is_symlink()) {
         return Err(ArchiveError::SymlinkTarget(target.to_path_buf()));
     }
@@ -275,6 +277,7 @@ fn copy_capped(
 /// end before they cost disk beyond the declared total. What was written stays in `into`, which
 /// the caller removes.
 pub fn unpack(archive: &Path, into: &Path, cancel: &JobControl) -> Result<Manifest, ArchiveError> {
+    assert_off("archive::unpack");
     let decoder = zstd::stream::read::Decoder::new(File::open(archive)?)?;
     let mut tar = tar::Archive::new(decoder);
     // Raw, because otherwise the crate reads GNU long names and pax headers into memory whole
@@ -390,6 +393,7 @@ pub fn verify(
     manifest: &Manifest,
     cancel: &JobControl,
 ) -> Result<Verified, ArchiveError> {
+    assert_off("archive::verify");
     // A folder comes from anywhere too: a link would read a file of this machine into a restore.
     if fs::symlink_metadata(folder.join(COLLECTIONS)).is_ok_and(|m| m.is_symlink()) {
         return Err(ArchiveError::NotRegular(COLLECTIONS.to_string()));

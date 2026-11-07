@@ -27,6 +27,7 @@ pub mod settings;
 pub mod stemming;
 pub mod store;
 pub mod transfer;
+pub mod ui_thread;
 
 use semver::{Prerelease, Version};
 

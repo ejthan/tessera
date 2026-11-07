@@ -35,6 +35,7 @@ use crate::connection::{
     Connected, ConnectionState, ConnectorGlobal, client_options, error_text, update_error_text,
 };
 use crate::runtime::Tokio;
+use crate::ui_budget::span;
 use crate::views::status_bar;
 
 /// Where the update check stands.
@@ -682,6 +683,7 @@ impl AppState {
                 }
                 if this
                     .update(cx, |s, cx| {
+                        let _budget = span("log.drain");
                         batch.into_iter().for_each(|e| s.log.push(e));
                         cx.notify();
                     })

@@ -12,6 +12,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::profile::Profile;
+use crate::ui_thread::assert_off;
 
 /// Schema version written by this build.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -125,6 +126,7 @@ pub(crate) fn load_migrated<T: Default + Serialize + DeserializeOwned>(
     version: u32,
     migrations: &[Migration],
 ) -> Result<T, StoreError> {
+    assert_off("store::load_migrated");
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
@@ -192,6 +194,7 @@ pub fn private_dir(dir: &Path) -> std::io::Result<()> {
 
 /// Writes `bytes` via a synced temporary file and a rename, creating parent directories.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    assert_off("store::write_atomic");
     if let Some(parent) = path.parent() {
         private_dir(parent)?;
     }
