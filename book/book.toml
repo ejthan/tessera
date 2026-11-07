@@ -1,0 +1,7 @@
+[book]
+title = "Tessera"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../target/book"

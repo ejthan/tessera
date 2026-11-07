@@ -2,9 +2,19 @@
 
 A fast, native desktop client for [Typesense](https://typesense.org), written in Rust with [GPUI Kit](https://gpui-kit.com). Tessera aims to cover the whole Typesense admin API: collections, documents, search, synonyms, curation, keys and cluster operations, with safeguards for production clusters.
 
-**Status:** pre-alpha. Milestones M1 and M2 are complete: Tessera manages saved connections with keys in the OS keychain, logs every request it sends, and shows an overview of each server or cluster with live node status, metrics and API stats, and browses and edits collections. The document browser (M3) is implemented on its feature branches; its 200k-row scroll speed (NF2) has not been measured yet. Search, the raw console and the command palette (M4) are implemented on feature branches too, with their checks on screen still open, see [`docs/building.md`](docs/building.md). Import and export of documents with a jobs panel and schema inference from a file (M5) are implemented on a feature branch; the import of 1,000,000 documents stays far below the 300 MB limit in the headless measurement (NF3), and the run through the window is still open. Aliases with a reindex assistant, synonym and curation sets with test panels, stopwords and presets (M6) are implemented on feature branches; their live client and core tests pass on 30.0 and 30.2, and their checks on screen are still open. API keys with the scoped key generator, analytics rules, stemming dictionaries, conversation and NL search models with test panels, and auto-embedding fields in the schema form (M7) are implemented on feature branches; their live client and core tests pass on 30.0 and 30.2, AI against a local stub, so no real provider has been tried yet, and their checks on screen are still open. Server operations, backup and restore, settings with a saved layout, log files with masked keys, migrations and a security checklist (M8) are implemented on feature branches; their views are covered by UI tests with fakes, and their live tests on the last commit and checks on screen are still open. See [`docs/spec.md`](docs/spec.md) for the full plan.
+**Status:** nothing has been released yet. All milestones of [`docs/spec.md`](docs/spec.md) are implemented on feature branches. Their checks on screen and on other systems are still open.
 
 Tessera is not affiliated with or endorsed by Typesense, Inc.
+
+## Install
+
+There is no published release and no installer to download yet. A release's installers are built by CI, on each OS, and so far only the macOS arm64 `.app` and `.dmg` have been built, locally. Until a release exists, build from source as described under [Building](#building).
+
+A macOS build is ad-hoc signed and not notarized, so a downloaded copy needs `xattr -cr /Applications/Tessera.app`. The details per format are in the user guide.
+
+## User guide
+
+The guide is an [mdBook](https://rust-lang.github.io/mdBook/) in [`book/`](book/src/SUMMARY.md). Read its pages there, or build it with `mdbook build book`, which writes to `target/book/`.
 
 ## Connecting
 
