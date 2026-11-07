@@ -4,6 +4,7 @@
 
 mod governance;
 mod i18n;
+mod icons;
 mod nf3;
 mod seed;
 
@@ -15,6 +16,7 @@ const USAGE: &str = "usage: cargo xtask seed --url <url> [--key <key>] [--reset]
                        [--app-baseline-mb <n>] [--limit-mb <n>] [--keep-file <path>]
        cargo xtask i18n
        cargo xtask governance
+       cargo xtask icons
        cargo xtask dco <base>";
 
 fn main() -> ExitCode {
@@ -24,6 +26,7 @@ fn main() -> ExitCode {
         Some("nf3") => nf3_task(&args[1..]),
         Some("i18n") => i18n_task(),
         Some("governance") => governance_task(),
+        Some("icons") => icons_task(),
         Some("dco") => dco_task(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
@@ -106,6 +109,16 @@ fn governance_task() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+fn icons_task() -> ExitCode {
+    match icons::run(root()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
     }
 }
 

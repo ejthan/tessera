@@ -26,6 +26,7 @@ jiff = "=0.2.39"
 keyring = "=4.2.0"
 lsp-types = "=0.97.0"
 percent-encoding = "=2.3.2"
+png = "=0.18.1"
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json", "http2", "charset", "stream"] }
 rust-i18n = "=4.2.4"
 # Only for telling TLS failures apart; must stay the version reqwest uses.

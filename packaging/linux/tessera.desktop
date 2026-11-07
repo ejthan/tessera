@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Tessera
+Comment=Native desktop client for Typesense
+Exec=tessera
+Icon=tessera
+Type=Application
+Categories=Development;
+StartupWMClass=tessera

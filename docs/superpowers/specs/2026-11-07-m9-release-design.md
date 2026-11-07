@@ -289,8 +289,10 @@ Generates, from code, a 4×4 mosaic of rounded squares in five fixed colors, int
 ### 8.4 `cargo xtask dist`
 
 ```
-cargo xtask dist [--skip-build]
+cargo xtask dist
 ```
+
+The tool has no flag to skip its build hook, and the hook does nothing when the binary is fresh, so `dist` takes no option.
 
 1. Find `cargo-packager` (and `cargo-generate-rpm` on Linux) on `PATH` or in `target/tools/bin`. Missing: print the exact install command and exit 1. It never installs anything by itself.
 2. Set `MACOSX_DEPLOYMENT_TARGET=13.0` on macOS. **packager:** set `CI=true` for the `dmg` step, which passes `--skip-jenkins` to the `create-dmg` script, so no Finder automation is asked for.
@@ -299,7 +301,7 @@ cargo xtask dist [--skip-build]
 5. Check NF5 on `target/release/tessera[.exe]`: below 41,943,040 bytes.
 6. Copy the packages into `target/dist/`, and write `SHA256SUMS` in `sha256sum` format, sorted, through `sha2`.
 
-`formats_for`, `package_names`, and `sha256sums` are pure and tested. **packager** names: `Tessera_<v>_aarch64.dmg`, `Tessera_<v>_x64.dmg`, `tessera_<v>_x64_en-US.msi`, `tessera_<v>_amd64.deb`, `tessera_<v>_x86_64.AppImage`.
+`formats_for`, `package_names`, and `sha256sums` are pure and tested. **packager** names: `Tessera_<v>_aarch64.dmg`, `Tessera_<v>_x64.dmg`, `tessera_<v>_x64_en-US.msi`, `tessera_<v>_amd64.deb`, `tessera_<v>_x86_64.AppImage`. `cargo-generate-rpm` names `tessera-<v>-1.x86_64.rpm`, with `name = "tessera"` in its metadata, in `target/generate-rpm/`.
 
 ### 8.5 `cargo xtask release-notes <version>`
 
@@ -311,7 +313,7 @@ Prints the section of `CHANGELOG.md` for `<version>`, from its `## [` heading to
 
 `[package.metadata.packager]` in `crates/tessera-app/Cargo.toml`, not a `Packager.toml`. **packager:** only metadata configs get defaults for `version`, `out_dir`, `binaries_dir` and `binaries`, and a file config would have to repeat them. `product-name = "Tessera"`, `identifier = "org.tessera.Tessera"`, which matches the data directory, a `before-packaging-command` that builds with `--locked`, `icons`, `resources`, category, `macos.minimum-system-version = "13.0"`, `macos.signing-identity = "-"`, `deb.depends`.
 
-Open points Task 9 settles on the real tool, each with a check: whether relative paths in metadata resolve against the crate or the working directory; the kebab-case keys of nested tables; the category's spelling.
+Settled on the installed 0.11.8 in Task 9. Before it reads any path, the tool changes into the directory of the crate's `Cargo.toml`, so `icons` and `resources` start with `../../`, and `before-packaging-command` runs from the crate. Nested tables accept the kebab-case keys `minimum-system-version` and `signing-identity`. The category is `DeveloperTool`. The `.deb` writes `authors` as its `Maintainer` line, and the crate has none, so the config sets `authors = ["Tessera contributors"]`. `--skip-jenkins` needs `CI` to be exactly `true`.
 
 ### 9.2 License in packages
 

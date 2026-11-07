@@ -74,6 +74,16 @@ pub fn check(root: &Path) -> Vec<String> {
         problems
             .push("the product name in app.title is missing or holds \"Typesense\"".to_string());
     }
+    // A manifest that cannot be read is also reported with the others below.
+    let app_manifest = read("crates/tessera-app/Cargo.toml").unwrap_or_default();
+    if section_value(&app_manifest, "package.metadata.packager", "product-name")
+        .is_none_or(|v| v.contains("Typesense"))
+    {
+        problems.push(
+            "the packaging product-name of tessera-app is missing or holds \"Typesense\""
+                .to_string(),
+        );
+    }
 
     for dir in ["crates", "xtask"] {
         let files = rust_files(&root.join(dir)).unwrap_or_else(|e| {
@@ -118,6 +128,18 @@ pub fn check(root: &Path) -> Vec<String> {
         }
     }
     problems
+}
+
+/// The string `key` in the `[section]` table of `manifest`.
+pub fn section_value<'a>(manifest: &'a str, section: &str, key: &str) -> Option<&'a str> {
+    let (_, rest) = manifest.split_once(&format!("[{section}]"))?;
+    rest.lines()
+        .map(str::trim)
+        .take_while(|line| !line.starts_with('['))
+        .find_map(|line| {
+            let (name, value) = line.split_once('=')?;
+            (name.trim() == key).then(|| value.trim().trim_matches('"'))
+        })
 }
 
 /// The text of `path`. A read error is a problem and yields nothing.
@@ -248,6 +270,11 @@ mod tests {
             "[package]\nname = \"tessera-core\"\nversion.workspace = true\n\n\
              [dependencies]\nanyhow.workspace = true\nserde = { workspace = true }\n\
              local = \"1\"\n",
+        );
+        write(
+            root,
+            "crates/tessera-app/Cargo.toml",
+            "[package.metadata.packager]\nproduct-name = \"Tessera\"\n",
         );
         write(
             root,
@@ -448,6 +475,21 @@ mod tests {
         let en = format!("app.title: \"Tessera for Typesense\"\nwelcome.trademark: \"{notice}\"\n");
         write(dir.path(), "assets/locales/en.yml", &en);
         one_problem(&dir, "product name");
+    }
+
+    #[test]
+    fn a_packaged_name_with_typesense_or_none_is_a_problem() {
+        let manifests = [
+            "[package.metadata.packager]\nproduct-name = \"Typesense Studio\"\n",
+            "[package.metadata.packager]\nidentifier = \"x\"\n",
+            "[package.metadata.packager]\n[other]\nproduct-name = \"Tessera\"\n",
+            "[package]\nname = \"tessera-app\"\n",
+        ];
+        for manifest in manifests {
+            let dir = valid();
+            write(dir.path(), "crates/tessera-app/Cargo.toml", manifest);
+            one_problem(&dir, "packaging product-name");
+        }
     }
 
     #[test]
