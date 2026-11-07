@@ -651,6 +651,7 @@ impl SearchForm {
                 h_flex()
                     .id("search.param.query_by")
                     .test_support()
+                    // i18n-ok: Typesense parameter name
                     .aria_label("query_by")
                     .flex_wrap()
                     .gap_1()
@@ -681,6 +682,7 @@ impl SearchForm {
                 div()
                     .id("search.param.filter_by")
                     .test_support()
+                    // i18n-ok: Typesense parameter name
                     .aria_label("filter_by")
                     .child(self.filter.clone()),
             )

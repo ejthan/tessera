@@ -63,6 +63,10 @@ Fills the server with `books` (10,000 documents, with the alias `books_current` 
 
 It also adds the curation set `books_curation`, the stopword set `en_common`, the preset `books_fantasy`, the search-only key described `tessera-seed-search`, of which it prints only the id and the first characters, the `popular_queries` rule `books_popular` from `books` to `books_queries`, and the stemming dictionary `seed_plurals` with three words. `--reset` removes these too.
 
+## Checks
+
+`cargo xtask i18n` fails with `file:line: what` when `en.yml` and `de.yml` differ in keys or `%{…}` placeholders, when a literal `t!("key")` has no entry, or when a letter-bearing literal sits in a UI position in `tessera-app` or `tessera-widgets`. `// i18n-ok: <reason>` on that line or the line above lets one through, and the reason is required. A German value equal to the English one needs its key in `xtask/i18n-same.txt`.
+
 ## Tests
 
 ```bash
