@@ -32,7 +32,9 @@ use tessera_app::relevance::{
 use tessera_app::runtime::Tokio;
 use tessera_app::search::{MultiAnswer, SearchAnswer, SearchBackend, SearchBackendGlobal};
 use tessera_app::state::AppState;
-use tessera_app::transfer::{FileStamp, TransferBackend, TransferBackendGlobal, file_stamp};
+use tessera_app::transfer::{
+    FileStamp, OpenedBackup, TransferBackend, TransferBackendGlobal, file_stamp,
+};
 use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::root::RootView;
 use tessera_client::{
@@ -40,7 +42,11 @@ use tessera_client::{
     DocumentQuery, Error, Health, ItemSet, KeyAccess, Metrics, ModelKind, NewKey, NodeClient,
     Origin, SchemaChange, SetKind, Stats, StopwordSet,
 };
-use tessera_core::backup::restore::{RestoreJob, RestoreOutcome, RestoreProgress};
+use tessera_core::backup::archive::{ArchiveError, Verified, verify};
+use tessera_core::backup::format::Manifest;
+use tessera_core::backup::restore::{
+    LoadError, Loaded, RestoreJob, RestoreOutcome, RestorePlan, RestoreProgress, RestoreView, plan,
+};
 use tessera_core::backup::run::{BackupOutcome, BackupPlan, BackupProgress};
 use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
@@ -850,6 +856,16 @@ pub struct FakeTransfer {
     pub backups: Mutex<Vec<BackupPlan>>,
     /// `restore` calls.
     pub restores: Mutex<Vec<RestoreJob>>,
+    /// What `open_backup` answers; `None` holds it open.
+    pub open_answer: Mutex<Option<OpenedBackup>>,
+    /// `open_backup` calls.
+    pub opened_paths: Mutex<Vec<PathBuf>>,
+    /// What `load_backup` answers; `None` is an empty backup.
+    pub load_answer: Mutex<Option<Result<Loaded, LoadError>>>,
+    /// The server `plan_backup` compares with.
+    pub server: Mutex<RestoreView>,
+    /// `discard_temp` calls.
+    pub discarded: Mutex<Vec<PathBuf>>,
     /// `save_report` calls: the path and whether only failed lines.
     pub saves: Mutex<Vec<(PathBuf, bool)>>,
 }
@@ -1053,6 +1069,58 @@ impl TransferBackend for FakeTransferBackend {
     fn path_taken(&self, path: PathBuf) -> tessera_app::collections::BoxFuture<bool> {
         let taken = std::fs::symlink_metadata(path).is_ok();
         Box::pin(async move { taken })
+    }
+
+    fn open_backup(
+        &self,
+        path: PathBuf,
+        _: JobControl,
+    ) -> tessera_app::collections::BoxFuture<OpenedBackup> {
+        self.0.opened_paths.lock().unwrap().push(path);
+        let answer = self.0.open_answer.lock().unwrap().clone();
+        Box::pin(async move {
+            match answer {
+                Some(answer) => answer,
+                None => std::future::pending().await,
+            }
+        })
+    }
+
+    fn verify_backup(
+        &self,
+        folder: PathBuf,
+        manifest: Manifest,
+        control: JobControl,
+    ) -> tessera_app::collections::BoxFuture<Result<Verified, ArchiveError>> {
+        let answer = verify(&folder, &manifest, &control);
+        Box::pin(async move { answer })
+    }
+
+    fn load_backup(
+        &self,
+        _: Verified,
+    ) -> tessera_app::collections::BoxFuture<Result<Loaded, LoadError>> {
+        let answer = self.0.load_answer.lock().unwrap().clone();
+        Box::pin(async move { answer.unwrap_or_else(|| Ok(Loaded::default())) })
+    }
+
+    fn plan_backup(
+        &self,
+        _: Client,
+        backup: Verified,
+        loaded: Loaded,
+    ) -> tessera_app::collections::BoxFuture<Result<RestorePlan, Error>> {
+        let view = self.0.server.lock().unwrap().clone();
+        let answer = plan(backup.manifest(), &loaded, &view);
+        Box::pin(async move { Ok(answer) })
+    }
+
+    fn discard_temp(&self, temp: Arc<tempfile::TempDir>) {
+        self.0
+            .discarded
+            .lock()
+            .unwrap()
+            .push(temp.path().to_path_buf());
     }
 
     fn save_report(

@@ -970,6 +970,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_RESOURCES[8], OpenAi, None),
         KeyBinding::new(OPEN_RESOURCES[9], OpenOperations, None),
         KeyBinding::new(OPEN_BACKUP, OpenBackup, None),
+        KeyBinding::new(OPEN_SAVED, PickImportFile, Some(RESOURCES)),
+        KeyBinding::new(STOP_WAITING, StopWaiting, Some(RESOURCES)),
         KeyBinding::new(SAVE, SaveResource, Some(STEMMING_DIALOG)),
         KeyBinding::new(SAVE, SaveResource, Some(STEMMING_INPUT)),
         KeyBinding::new(OPEN_SAVED, PickImportFile, Some(STEMMING_DIALOG)),

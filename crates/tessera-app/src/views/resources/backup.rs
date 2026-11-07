@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The Backup tab: which collections to write where. The run is a job, so it goes on with the
-//! tab closed (D90).
+//! The Backup tab: which collections to write where, and a switch to the Restore view. The run
+//! is a job, so it goes on with the tab closed (D90).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::radio::{Radio, RadioGroup};
+use gpui_kit::component::tab::TabBar;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
-    Action, App, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
+    Action, App, AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
     prelude::*,
 };
@@ -18,12 +19,105 @@ use jiff::Zoned;
 use rust_i18n::t;
 use tessera_core::backup::run::{BackupPlan, BackupTarget, BackupWarning, backup_warnings};
 
+use super::restore::RestoreForm;
 use super::{notice, row_button};
-use crate::actions::SaveResource;
+use crate::actions::{PickImportFile, RESOURCES, SaveResource, ShowDocuments, ShowSchema};
 use crate::connection::ConnectionState;
 use crate::jobs::JobsGlobal;
 use crate::transfer::TransferBackendGlobal;
+use crate::views::dock::view_tab;
 use crate::views::overview::grouped;
+
+/// The Backup tab: ⌘1 writes a backup, ⌘2 restores one, as the AI tab switches.
+pub struct BackupView {
+    form: Entity<BackupForm>,
+    restore: Entity<RestoreForm>,
+    on_restore: bool,
+}
+
+impl BackupView {
+    /// The tab of `connection`.
+    pub fn new(connection: Entity<ConnectionState>, cx: &mut Context<Self>) -> Self {
+        Self {
+            form: cx.new(|cx| BackupForm::new(connection.clone(), cx)),
+            restore: cx.new(|cx| RestoreForm::new(connection, cx)),
+            on_restore: false,
+        }
+    }
+
+    /// The Restore view.
+    pub fn restore(&self) -> &Entity<RestoreForm> {
+        &self.restore
+    }
+
+    fn show(&mut self, on_restore: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_restore = on_restore;
+        self.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Actions with no target now, for [`gated`](crate::actions::gated).
+    pub fn gates(&self, cx: &App) -> Vec<(bool, &'static dyn Action)> {
+        if self.on_restore {
+            self.restore.read(cx).gates(cx)
+        } else {
+            let mut gates = self.form.read(cx).gates(cx);
+            gates.push((true, &PickImportFile));
+            gates
+        }
+    }
+}
+
+impl Focusable for BackupView {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if self.on_restore {
+            self.restore.read(cx).focus_handle(cx)
+        } else {
+            self.form.read(cx).focus_handle(cx)
+        }
+    }
+}
+
+impl Render for BackupView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = if self.on_restore {
+            self.restore.clone().into_any_element()
+        } else {
+            self.form.clone().into_any_element()
+        };
+        v_flex()
+            .size_full()
+            .on_action(cx.listener(|this, _: &ShowDocuments, window, cx| {
+                this.show(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowSchema, window, cx| {
+                this.show(true, window, cx);
+            }))
+            .child(
+                TabBar::new("backup.views")
+                    .underline()
+                    .selected_index(usize::from(self.on_restore))
+                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                        this.show(*ix == 1, window, cx);
+                    }))
+                    .child(view_tab(
+                        "backup.view.backup",
+                        t!("backup.view.backup").to_string().into(),
+                        &ShowDocuments,
+                        RESOURCES,
+                        window,
+                    ))
+                    .child(view_tab(
+                        "backup.view.restore",
+                        t!("backup.view.restore").to_string().into(),
+                        &ShowSchema,
+                        RESOURCES,
+                        window,
+                    )),
+            )
+            .child(div().flex_1().min_h_0().child(current))
+    }
+}
 
 /// The sentence for a warning of a backup.
 pub(crate) fn warning_text(warning: &BackupWarning) -> String {

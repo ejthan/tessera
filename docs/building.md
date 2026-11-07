@@ -116,6 +116,20 @@ context = "Workbench"
 
 A control shows the chord that is bound now. A bad entry is skipped and named above the tabs, and the others apply. A file that does not parse, or has a field the format does not know, changes nothing: the default shortcuts stay, and the line above the tabs names the place. `escape` cannot be bound, because it closes every dialog. An unbound action stays reachable from its control and the palette.
 
+## Manual checks of operations and backup (M8)
+
+Nothing here has been done yet: the views are covered by UI tests with fakes and the engines by live tests. Start the dev server, and for a restore a second, throwaway one: `docker run --rm -d --name t302 -p 18208:8108 --tmpfs /data typesense/typesense:30.2 --data-dir /data --api-key=xyz --enable-cors=false`. Stop it afterwards.
+
+1. The Ops tab, ⌥⌘0 (Ctrl+Alt+0): the picker names each node with its role, a bad snapshot path says why, and each row shows its result with the node and the time.
+2. On the cluster (`docker compose -f dev/docker-compose.yml --profile cluster up -d ts1 ts2 ts3`, and afterwards `--profile cluster rm -sf ts1 ts2 ts3` and `docker volume rm dev_ts1-data dev_ts2-data dev_ts3-data`, never `down`): with the Overview tab closed, the leader's vote button is disabled, a vote on a follower says that the election started, and within 10 seconds the picker shows the new leader and the old one can vote again.
+3. The transport banner on an `http://` remote profile: ⌥⌘X (Ctrl+Alt+X) and the button open the profile.
+4. The Backup tab, ⌥⌘B (Ctrl+Alt+B): the checkboxes, All and the format radio in light and in dark, the warnings for a selection, and Start (⌘↩), which opens the save dialog. A name that exists is refused under the form.
+5. A backup of the seeded collections to a folder and to a `.tar.zst`: the row in Jobs shows step, collection and numbers, it goes on with the tab closed, and Stop leaves nothing at the target.
+6. ⌘2, Choose… (⌘O) with that archive into the second server: each stage shows, every row says New, the plan names what it warns of, and Start asks with counts. Afterwards the rows show their results and the collections hold the same counts.
+7. The same backup again into the same server: collections are blocked with the reason, sets read Same, and a changed stopword set reads Differs until Replace, which asks for the profile's name.
+8. A backup of a collection with an embedding key: the row stays blocked and names the two files to use. Follow that text by hand once: create the collection with its keys, then import the JSON Lines file.
+9. A read-only profile: a backup needs no unlock, and a restore unlocks first.
+
 ## Manual checks of keys, analytics and AI (M7)
 
 Nothing here has been done yet: the views are covered by UI tests with fakes and the client and core by live tests, and none of it has been looked at. Run against the dev server after `cargo run -p xtask -- seed --url http://localhost:18108 --key xyz --reset`. For the analytics steps the server needs its flags: recreate it once with `TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d`, the volume stays. Record the result in the PR description.

@@ -897,6 +897,13 @@ impl JobsPanel {
                 notes.push(note("jobs.export_mismatch".into(), text.to_string(), false));
             }
         }
+        if let Some(JobOutcome::Restore(outcome)) = &job.outcome
+            && !outcome.to_delete.is_empty()
+        {
+            let names = outcome.to_delete.join(", ");
+            let text = t!("restore.to_delete", names = names).to_string();
+            notes.push(note("restore.job_to_delete".into(), text, false));
+        }
         if matches!(job.kind, JobKind::Import | JobKind::Restore) {
             let text = t!("jobs.stay_note").to_string();
             notes.push(note("jobs.stay_note".into(), text, false));

@@ -18,6 +18,7 @@ pub mod name_dialog;
 pub mod operations;
 pub mod presets;
 pub mod reindex;
+pub mod restore;
 pub mod scoped_keys;
 pub mod set_file;
 pub mod sets;
@@ -49,7 +50,7 @@ use tessera_widgets::confirm_danger::{self, DangerOptions};
 use self::ai::AiView;
 use self::aliases::AliasesView;
 use self::analytics::AnalyticsView;
-use self::backup::BackupForm;
+use self::backup::BackupView;
 use self::keys::KeysView;
 use self::operations::OperationsView;
 use self::presets::PresetsView;
@@ -81,8 +82,8 @@ pub enum ResourceView {
     Ai(Entity<AiView>),
     /// See [`OperationsView`].
     Operations(Entity<OperationsView>),
-    /// See [`BackupForm`].
-    Backup(Entity<BackupForm>),
+    /// See [`BackupView`].
+    Backup(Entity<BackupView>),
 }
 
 impl ResourceView {
@@ -123,7 +124,7 @@ impl ResourceView {
             ResourceKind::Operations => {
                 Self::Operations(cx.new(|cx| OperationsView::new(connection, window, cx)))
             }
-            ResourceKind::Backup => Self::Backup(cx.new(|cx| BackupForm::new(connection, cx))),
+            ResourceKind::Backup => Self::Backup(cx.new(|cx| BackupView::new(connection, cx))),
         }
     }
 

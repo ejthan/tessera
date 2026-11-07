@@ -17,11 +17,17 @@ use std::sync::Arc;
 use tessera_app::actions::ToggleJobs;
 use tessera_app::jobs::{JobKind, JobStatus, Jobs, JobsGlobal};
 use tessera_app::state::{AppState, ResourceKind};
-use tessera_client::{Collection, SetKind};
+use tessera_client::{Collection, SetKind, StopwordSet};
+use tessera_core::backup::archive::ArchiveError;
+use tessera_core::backup::format::{FORMAT, Manifest, ManifestCollection, ManifestProblem};
+use tessera_core::backup::restore::{
+    Loaded, RestoreError, RestoreOutcome, RestoreRow, RestoreView, RowFailure, RowKind, RowResult,
+};
 use tessera_core::backup::run::{
     BackupOutcome, BackupProgress, BackupStep, BackupTarget, BackupWarning,
 };
 use tessera_core::profile::Profile;
+use tessera_core::schema::SchemaDraft;
 use tessera_core::transfer::JobEnd;
 use uuid::Uuid;
 
@@ -32,6 +38,7 @@ struct Fixture {
     state: Entity<AppState>,
     jobs: Entity<Jobs>,
     fake: Arc<FakeTransfer>,
+    data: Arc<FakeData>,
     id: Uuid,
     _rt: tokio::runtime::Runtime,
 }
@@ -60,7 +67,7 @@ fn collections() -> Vec<Collection> {
 
 impl Fixture {
     async fn with(cx: &mut TestAppContext, read_only: bool) -> Self {
-        fake_backend(cx, Some((collections(), Vec::new())));
+        let data = fake_backend(cx, Some((collections(), Vec::new())));
         fake_documents(cx);
         install_search_fake(cx);
         fake_admin(cx);
@@ -88,6 +95,7 @@ impl Fixture {
             state,
             jobs,
             fake,
+            data,
             id,
             _rt: rt,
         }
@@ -305,4 +313,333 @@ async fn a_read_only_connection_needs_no_unlock(cx: &mut TestAppContext) {
         let connection = f.state.read(cx).connection(f.id, cx).unwrap();
         assert!(connection.read(cx).writes_locked());
     });
+}
+
+// The Restore view.
+
+/// A folder that `verify` passes, a manifest of `names` and their schemas.
+struct BackupFiles {
+    _dir: tempfile::TempDir,
+}
+
+impl Fixture {
+    /// The backend answers with a backup of `names`, on a server that holds `server`.
+    fn offer(&self, names: &[&str], blanked: &[&str], server: RestoreView) -> BackupFiles {
+        let dir = tempfile::tempdir().unwrap();
+        let entries: Vec<ManifestCollection> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| ManifestCollection {
+                file: i as u32 + 1,
+                name: name.to_string(),
+                documents: 7,
+                unstored: Vec::new(),
+                blanked_secrets: usize::from(blanked.contains(name)),
+                dictionaries: Vec::new(),
+            })
+            .collect();
+        let schemas = names.iter().map(|name| {
+            SchemaDraft::from_value(&json!({"name": name, "fields": [
+                {"name": "t", "type": "string"},
+            ]}))
+            .unwrap()
+        });
+        let manifest = Manifest {
+            format: FORMAT,
+            created_at: 0,
+            tessera_version: "0".into(),
+            server_version: "30.2".into(),
+            collections: entries,
+            files: Vec::new(),
+        };
+        *self.fake.open_answer.lock().unwrap() =
+            Some(Ok((dir.path().to_path_buf(), manifest, None)));
+        *self.fake.load_answer.lock().unwrap() = Some(Ok(Loaded {
+            schemas: schemas.collect(),
+            stopwords: vec![StopwordSet {
+                id: "s".into(),
+                stopwords: vec!["a".into()],
+                locale: None,
+            }],
+            ..Loaded::default()
+        }));
+        *self.fake.server.lock().unwrap() = server;
+        BackupFiles { _dir: dir }
+    }
+
+    /// Opens the Restore view and chooses a backup.
+    fn choose(&self, cx: &mut TestAppContext) {
+        self.click(cx, "backup.view.restore");
+        self.click(cx, "restore.choose");
+        cx.simulate_path_prompt_response(|_| Some(vec![PathBuf::from("/tmp/b.tar.zst")]));
+        self.settle(cx);
+    }
+
+    fn restores(&self) -> usize {
+        self.fake.restores.lock().unwrap().len()
+    }
+
+    fn fill(&self, cx: &mut TestAppContext, id: &str, text: &str) {
+        self.settle(cx);
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            fill(window, id, text, cx);
+        })
+        .unwrap();
+        self.settle(cx);
+    }
+}
+
+fn differing() -> RestoreView {
+    RestoreView {
+        stopwords: vec![StopwordSet {
+            id: "s".into(),
+            stopwords: vec!["other".into()],
+            locale: None,
+        }],
+        ..RestoreView::default()
+    }
+}
+
+#[gpui_kit::test]
+async fn the_views_and_choose_answer_their_keys(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    assert!(!f.has(cx, "restore.choose"));
+    let press = |f: &Fixture, cx: &mut TestAppContext, keys: &str| {
+        cx.update_window(f.handle.into(), |_, window, cx| window.press(keys, cx))
+            .unwrap();
+        f.settle(cx);
+    };
+    press(&f, cx, key("cmd-2", "ctrl-2"));
+    assert!(f.has(cx, "restore.choose"));
+    assert!(!f.has(cx, "backup.start"));
+    press(&f, cx, key("cmd-o", "ctrl-o"));
+    cx.simulate_path_prompt_response(|_| Some(vec![PathBuf::from("/tmp/b.tar.zst")]));
+    f.settle(cx);
+    assert_eq!(f.fake.opened_paths.lock().unwrap().len(), 1);
+    press(&f, cx, key("cmd-1", "ctrl-1"));
+    assert!(f.has(cx, "backup.start"));
+}
+
+#[gpui_kit::test]
+async fn a_blocked_collection_cannot_be_ticked(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let server = RestoreView {
+        collections: vec!["books".into()],
+        ..RestoreView::default()
+    };
+    let _files = f.offer(&["books", "fresh"], &[], server);
+    f.choose(cx);
+    assert!(
+        f.label(cx, "restore.row.Collection.books")
+            .contains("server")
+    );
+    assert!(!f.has(cx, "restore.row.Collection.books.tick"));
+    assert!(f.has(cx, "restore.row.Collection.fresh.tick"));
+}
+
+#[gpui_kit::test]
+async fn blanked_keys_say_plainly_what_the_user_has_to_do(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["embedded"], &["embedded"], RestoreView::default());
+    f.choose(cx);
+    let text = f.label(cx, "restore.row.Collection.embedded");
+    assert!(text.contains("stays blocked"), "{text}");
+    assert!(text.contains("no way to enter"), "{text}");
+    assert!(text.contains("collections/0001.schema.json"), "{text}");
+    assert!(text.contains("collections/0001.jsonl"), "{text}");
+    assert!(!f.has(cx, "restore.row.Collection.embedded.tick"));
+}
+
+#[gpui_kit::test]
+async fn replace_off_keeps_a_differing_row(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], differing());
+    f.choose(cx);
+    f.click(cx, "restore.row.Stopwords.s.tick");
+    f.click(cx, "restore.start");
+    f.click(cx, "confirm.ok");
+    let jobs = f.fake.restores.lock().unwrap();
+    assert!(!jobs[0].replace);
+    assert!(
+        !jobs[0]
+            .ticked
+            .contains(&(RowKind::Stopwords, "s".to_string()))
+    );
+}
+
+#[gpui_kit::test]
+async fn replace_ticks_what_differs_and_needs_the_name(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], differing());
+    f.choose(cx);
+    f.click(cx, "restore.replace");
+    f.click(cx, "restore.start");
+    assert!(f.has(cx, "danger.input"), "a replace is typed");
+    f.click(cx, "danger.ok");
+    assert_eq!(f.restores(), 0);
+    let name = cx.read(|cx| {
+        let connection = f.state.read(cx).connection(f.id, cx).unwrap();
+        connection.read(cx).profile.name.clone()
+    });
+    f.fill(cx, "danger.input", &name);
+    f.click(cx, "danger.ok");
+    let jobs = f.fake.restores.lock().unwrap();
+    assert!(jobs[0].replace);
+    assert!(
+        jobs[0]
+            .ticked
+            .contains(&(RowKind::Stopwords, "s".to_string()))
+    );
+}
+
+#[gpui_kit::test]
+async fn a_plain_restore_counts_what_it_does_and_cancel_writes_nothing(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    f.choose(cx);
+    f.click(cx, "restore.start");
+    assert!(!f.has(cx, "danger.input"));
+    assert!(f.has(cx, "confirm.ok"));
+    f.click(cx, "confirm.cancel");
+    assert_eq!(f.restores(), 0);
+    assert!(!f.has(cx, "confirm.ok"));
+}
+
+#[gpui_kit::test]
+async fn read_only_unlocks_first_and_prod_is_typed(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, true).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    f.choose(cx);
+    f.click(cx, "restore.start");
+    assert!(f.has(cx, "danger.input"), "the unlock dialog opens");
+    assert_eq!(f.restores(), 0);
+    f.fill(cx, "danger.input", "prod-ch");
+    f.click(cx, "danger.ok");
+    assert!(f.has(cx, "danger.input"), "prod asks for the name as well");
+    assert_eq!(f.restores(), 0);
+    f.fill(cx, "danger.input", "prod-ch");
+    f.click(cx, "danger.ok");
+    assert_eq!(f.restores(), 1);
+}
+
+#[gpui_kit::test]
+async fn a_bad_manifest_shows_inline_in_full(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    *f.fake.open_answer.lock().unwrap() =
+        Some(Err(ArchiveError::Manifest(ManifestProblem::Format(9))));
+    f.choose(cx);
+    assert!(f.label(cx, "restore.error").contains("format 9"));
+    assert!(!f.has(cx, "restore.start"));
+}
+
+#[gpui_kit::test]
+async fn a_stage_shows_and_stop_ends_it(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    f.choose(cx);
+    assert!(f.label(cx, "restore.stage").contains("Unpacking"));
+    f.click(cx, "restore.stop");
+    assert!(!f.has(cx, "restore.stage"));
+    assert!(f.has(cx, "restore.choose"));
+}
+
+#[gpui_kit::test]
+async fn the_job_survives_the_tab_and_the_tab_shows_what_it_did(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    f.choose(cx);
+    f.click(cx, "restore.start");
+    f.click(cx, "confirm.ok");
+    let job = cx.read(|cx| f.jobs.read(cx).jobs()[0].id);
+    let outcome = || RestoreOutcome {
+        end: JobEnd::Failed(RestoreError::Row {
+            kind: RowKind::Collection,
+            name: "fresh".into(),
+        }),
+        rows: vec![RestoreRow {
+            kind: RowKind::Collection,
+            name: "fresh".into(),
+            result: RowResult::Failed(RowFailure::Lines {
+                failed: 2,
+                unconfirmed: 0,
+                first_error: Some("Referenced collection not found.".into()),
+            }),
+        }],
+        to_delete: vec!["fresh".into()],
+        warnings: Vec::new(),
+    };
+    f.fake.finish_restore(job, outcome());
+    f.settle(cx);
+    let text = f.label(cx, "restore.result.Collection.fresh");
+    assert!(text.contains("Referenced collection not found."), "{text}");
+    assert!(f.label(cx, "restore.to_delete").contains("fresh"));
+
+    f.click(cx, "restore.start");
+    f.click(cx, "confirm.ok");
+    let job = cx.read(|cx| f.jobs.read(cx).jobs()[1].id);
+    f.close_tab(cx);
+    assert!(!f.has(cx, "restore.start"));
+    cx.read(|cx| assert!(f.jobs.read(cx).jobs()[1].is_running()));
+    f.fake.finish_restore(job, outcome());
+    f.settle(cx);
+    cx.read(|cx| {
+        let status = &f.jobs.read(cx).jobs()[1].status;
+        assert!(
+            matches!(status, JobStatus::Failed(t) if t.contains("not found")),
+            "{status:?}"
+        );
+    });
+}
+
+#[gpui_kit::test]
+async fn a_new_choice_lets_go_of_the_old_temp_directory(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    let temp = Arc::new(tempfile::tempdir().unwrap());
+    let path = temp.path().to_path_buf();
+    if let Some(Ok(answer)) = f.fake.open_answer.lock().unwrap().as_mut() {
+        answer.2 = Some(temp);
+    }
+    f.choose(cx);
+    assert!(f.has(cx, "restore.start"));
+    f.click(cx, "restore.choose");
+    cx.simulate_path_prompt_response(|_| Some(vec![PathBuf::from("/tmp/other")]));
+    f.settle(cx);
+    assert_eq!(f.fake.discarded.lock().unwrap().as_slice(), [path]);
+}
+
+#[gpui_kit::test]
+async fn closing_the_tab_lets_go_of_the_temp_directory(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    let temp = Arc::new(tempfile::tempdir().unwrap());
+    let path = temp.path().to_path_buf();
+    if let Some(Ok(answer)) = f.fake.open_answer.lock().unwrap().as_mut() {
+        answer.2 = Some(temp);
+    }
+    f.choose(cx);
+    assert!(f.has(cx, "restore.start"));
+    f.close_tab(cx);
+    assert_eq!(f.fake.discarded.lock().unwrap().as_slice(), [path]);
+}
+
+#[gpui_kit::test]
+async fn the_collection_list_reloads_after_a_restore(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    f.choose(cx);
+    f.click(cx, "restore.start");
+    f.click(cx, "confirm.ok");
+    let job = cx.read(|cx| f.jobs.read(cx).jobs()[0].id);
+    let lists = *f.data.lists.lock().unwrap();
+    f.fake.finish_restore(
+        job,
+        RestoreOutcome {
+            end: JobEnd::Finished,
+            rows: Vec::new(),
+            to_delete: Vec::new(),
+            warnings: Vec::new(),
+        },
+    );
+    f.settle(cx);
+    assert!(*f.data.lists.lock().unwrap() > lists);
 }

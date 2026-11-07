@@ -8,11 +8,17 @@ use std::time::SystemTime;
 
 use gpui_kit::Global;
 use rust_i18n::t;
+use tempfile::TempDir;
 use tessera_client::{Client, Collection};
-use tessera_core::backup::archive::ArchiveError;
-use tessera_core::backup::format::ManifestProblem;
-use tessera_core::backup::restore::{RestoreJob, RestoreOutcome, RestoreProgress, run_restore};
-use tessera_core::backup::run::{BackupOutcome, BackupPlan, BackupProgress, run_backup};
+use tessera_core::backup::archive::{ArchiveError, Verified, read_manifest, unpack, verify};
+use tessera_core::backup::format::{Manifest, ManifestProblem};
+use tessera_core::backup::restore::{
+    LoadError, Loaded, RestoreJob, RestoreOutcome, RestorePlan, RestoreProgress, RestoreView, load,
+    plan, run_restore,
+};
+use tessera_core::backup::run::{
+    BackupOutcome, BackupPlan, BackupProgress, TEMP_PREFIX, run_backup,
+};
 use tessera_core::transfer::export::{ExportJob, ExportOutcome, ExportProgress, run_export};
 use tessera_core::transfer::import::{ImportJob, ImportOutcome, ImportProgress, run_import};
 use tessera_core::transfer::infer::{InferredSchema, infer_schema};
@@ -24,6 +30,20 @@ use tokio::runtime::Handle;
 use tokio::sync::watch;
 
 use crate::collections::{BoxFuture, TokioBackend};
+
+/// What [`TransferBackend::open_backup`] answers.
+pub type OpenedBackup = Result<(PathBuf, Manifest, Option<Arc<TempDir>>), ArchiveError>;
+
+/// See [`TransferBackend::open_backup`]. Blocks.
+fn open_blocking(path: PathBuf, control: &JobControl) -> OpenedBackup {
+    if std::fs::metadata(&path)?.is_dir() {
+        let manifest = read_manifest(&path)?;
+        return Ok((path, manifest, None));
+    }
+    let temp = tempfile::Builder::new().prefix(TEMP_PREFIX).tempdir()?;
+    let manifest = unpack(&path, temp.path(), control)?;
+    Ok((temp.path().to_path_buf(), manifest, Some(Arc::new(temp))))
+}
 
 /// Size and mtime, which tell that a file changed since it was read.
 pub type FileStamp = (u64, Option<SystemTime>);
@@ -95,6 +115,32 @@ pub trait TransferBackend: Send + Sync {
 
     /// Whether anything stands at `path`, a link that leads nowhere too.
     fn path_taken(&self, path: PathBuf) -> BoxFuture<bool>;
+
+    /// The manifest of a folder, or of an archive it unpacks into a private temp directory.
+    /// Answers the folder to go on with, and the temp directory if there is one.
+    fn open_backup(&self, path: PathBuf, control: JobControl) -> BoxFuture<OpenedBackup>;
+
+    /// Checks every file of a backup.
+    fn verify_backup(
+        &self,
+        folder: PathBuf,
+        manifest: Manifest,
+        control: JobControl,
+    ) -> BoxFuture<Result<Verified, ArchiveError>>;
+
+    /// Reads the JSON files of a checked backup.
+    fn load_backup(&self, backup: Verified) -> BoxFuture<Result<Loaded, LoadError>>;
+
+    /// Compares a backup with the server.
+    fn plan_backup(
+        &self,
+        client: Client,
+        backup: Verified,
+        loaded: Loaded,
+    ) -> BoxFuture<Result<RestorePlan, tessera_client::Error>>;
+
+    /// Deletes `temp` off this thread once nothing else holds it.
+    fn discard_temp(&self, temp: Arc<TempDir>);
 
     /// Saves `report` to `path`, or with `failed_only` the failed lines; how many lines.
     fn save_report(
@@ -189,6 +235,48 @@ impl TransferBackend for TokioBackend {
             // Unknown counts as taken: a backup never replaces anything.
             read.await.unwrap_or(true)
         })
+    }
+
+    fn open_backup(&self, path: PathBuf, control: JobControl) -> BoxFuture<OpenedBackup> {
+        self.run(async move {
+            let open = tokio::task::spawn_blocking(move || open_blocking(path, &control));
+            open.await.map_err(|e| ArchiveError::Io(e.to_string()))?
+        })
+    }
+
+    fn verify_backup(
+        &self,
+        folder: PathBuf,
+        manifest: Manifest,
+        control: JobControl,
+    ) -> BoxFuture<Result<Verified, ArchiveError>> {
+        self.run(async move {
+            let check = tokio::task::spawn_blocking(move || verify(&folder, &manifest, &control));
+            check.await.map_err(|e| ArchiveError::Io(e.to_string()))?
+        })
+    }
+
+    fn load_backup(&self, backup: Verified) -> BoxFuture<Result<Loaded, LoadError>> {
+        self.run(async move {
+            let read = tokio::task::spawn_blocking(move || load(&backup));
+            read.await.map_err(|e| LoadError::Io(e.to_string()))?
+        })
+    }
+
+    fn plan_backup(
+        &self,
+        client: Client,
+        backup: Verified,
+        loaded: Loaded,
+    ) -> BoxFuture<Result<RestorePlan, tessera_client::Error>> {
+        self.run(async move {
+            let view = RestoreView::read(&client).await?;
+            Ok(plan(backup.manifest(), &loaded, &view))
+        })
+    }
+
+    fn discard_temp(&self, temp: Arc<TempDir>) {
+        self.0.spawn_blocking(move || drop(temp));
     }
 
     fn save_report(
@@ -296,6 +384,22 @@ mod tests {
     use tessera_core::transfer::source::Format;
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_folder_needs_a_manifest_and_an_archive_must_be_one() {
+        let backend = tokio_backend(Handle::current());
+        let dir = tempfile::tempdir().unwrap();
+        let control = JobControl::default();
+
+        let folder = backend
+            .open_backup(dir.path().to_path_buf(), control.clone())
+            .await;
+        assert!(matches!(folder, Err(ArchiveError::Missing(name)) if name == "manifest.json"));
+
+        let garbage = dir.path().join("b.tar.zst");
+        std::fs::write(&garbage, "no archive").unwrap();
+        assert!(backend.open_backup(garbage, control).await.is_err());
+    }
 
     #[tokio::test]
     async fn preview_and_infer_read_off_the_workers() {
