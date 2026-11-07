@@ -134,6 +134,14 @@ jobs:
           TESSERA_IT_KEY: xyz
           TESSERA_IT_ANALYTICS: "1"
           TESSERA_IT_STUB_HOST: host.docker.internal
+      - run: cargo test -p tessera-client --test live_relevance --locked -- --ignored
+        env:
+          TESSERA_IT_URL: http://localhost:8108
+          TESSERA_IT_KEY: xyz
+      - run: cargo test -p tessera-core --test live_export --test live_raw --test live_transfer --locked -- --ignored
+        env:
+          TESSERA_IT_URL: http://localhost:8108
+          TESSERA_IT_KEY: xyz
 
   build:
     strategy:

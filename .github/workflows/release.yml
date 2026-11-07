@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Packages GPUI needs on Ubuntu 24.04, as in ci.yml, and FUSE for the AppImage tools.
+  LINUX_DEPS: >-
+    gcc g++ clang libfontconfig-dev libwayland-dev libwebkit2gtk-4.1-dev
+    libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev
+    vulkan-validationlayers libvulkan1 libfuse2t64
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            name: macos-arm64
+          - os: macos-15-intel
+            name: macos-x64
+          - os: ubuntu-24.04
+            name: linux-x64
+          - os: windows-2025
+            name: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - if: runner.os == 'Linux'
+        run: |
+          # shellcheck disable=SC2086 # the package list is meant to split into words
+          sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
+      - uses: Swatinem/rust-cache@v2.9.3
+      - run: cargo install cargo-packager --locked --version 0.11.8
+      - if: runner.os == 'Linux'
+        run: cargo install cargo-generate-rpm --locked --version 0.21.1
+      - run: cargo xtask dist
+      - if: runner.os == 'Linux'
+        run: ldd target/release/tessera
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: tessera-${{ matrix.name }}
+          path: target/dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          path: artifacts
+      - name: Flatten the packages and join the checksums
+        run: |
+          mkdir packages
+          find artifacts -type f ! -name SHA256SUMS -exec mv -t packages {} +
+          find artifacts -type f -name SHA256SUMS -exec cat {} + | sort -k2 > packages/SHA256SUMS
+      - name: Publish the tag
+        if: github.ref_type == 'tag'
+        run: |
+          cargo xtask release-notes "${GITHUB_REF_NAME#v}" > notes.md
+          gh release create "$GITHUB_REF_NAME" --notes-file notes.md packages/*
+      - name: Replace the nightly pre-release
+        if: github.ref_type != 'tag'
+        run: |
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly --prerelease --title Nightly \
+            --notes "Built from $GITHUB_SHA. Ad-hoc signed, not notarized." \
+            --target "$GITHUB_SHA" packages/*

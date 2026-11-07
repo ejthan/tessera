@@ -30,6 +30,17 @@ signing-identity = "-"
 [package.metadata.packager.deb]
 depends = ["libfontconfig1", "libxkbcommon0", "libxkbcommon-x11-0", "libxcb1", "libvulkan1"]
 
+# Source paths are from the workspace root, the first place cargo-generate-rpm looks.
+[package.metadata.generate-rpm]
+name = "tessera"
+assets = [
+    { source = "target/release/tessera", dest = "/usr/bin/tessera", mode = "755" },
+    { source = "packaging/linux/tessera.desktop", dest = "/usr/share/applications/", mode = "644" },
+    { source = "assets/icons/app/256.png", dest = "/usr/share/icons/hicolor/256x256/apps/tessera.png", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/doc/tessera/", mode = "644", doc = true },
+    { source = "THIRD_PARTY_NOTICES.md", dest = "/usr/share/doc/tessera/", mode = "644", doc = true },
+]
+
 [[bin]]
 name = "tessera"
 path = "src/main.rs"
