@@ -1,5 +1,6 @@
 _version: 1
 app.title: "Tessera"
+titlebar.search: "Alles durchsuchen"
 titlebar.no_connection: "Keine Verbindung"
 status.not_connected: "Nicht verbunden"
 status.connected: "Verbunden · %{name} · v%{version} · %{role} · %{node} · %{ms} ms"

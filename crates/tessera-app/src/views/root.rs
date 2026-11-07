@@ -5,10 +5,12 @@
 use std::time::Duration;
 
 use gpui_kit::base::{Root, TestSupportExt as _};
+use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{
     DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, PaneRef, PanelId, panel_handle,
 };
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
 };
@@ -19,6 +21,7 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use tessera_core::layout::{BottomTab, Layout};
+use uuid::Uuid;
 
 use super::connect_dialog::ConnectDialog;
 use super::dock::{
@@ -46,6 +49,8 @@ use crate::state::{
 
 /// Tallest the list of `keymap.toml` errors gets before it scrolls.
 const KEYMAP_ERRORS_HEIGHT: f32 = 96.;
+/// Widest the connection's name gets in the title bar.
+const TITLE_WIDTH: f32 = 240.;
 /// How long a layout change must stand before it is saved.
 const LAYOUT_SAVE_DELAY: Duration = Duration::from_millis(500);
 
@@ -303,6 +308,84 @@ impl RootView {
     pub fn show_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reveal(self.jobs_id(), window, cx);
         cx.notify();
+    }
+
+    /// The title bar's path to the active tab; empty without a connection tab. The last crumb
+    /// has no target.
+    fn crumbs(&self, cx: &App) -> Vec<(SharedString, Option<CrumbTarget>)> {
+        let Some(tab) = self
+            .active
+            .and_then(|id| connection_tab(self.dock.read(cx), id))
+        else {
+            return Vec::new();
+        };
+        let connection = tab.connection(cx);
+        let profile = &connection.read(cx).profile;
+        let id = profile.id;
+        let (section, target, item) = match tab.kind(cx) {
+            Kind::Overview => ("sidebar.overview".to_string(), None, None),
+            Kind::Collections => ("sidebar.collections".to_string(), None, None),
+            Kind::Collection(name) => (
+                "sidebar.collections".to_string(),
+                Some(CrumbTarget::Collections(id)),
+                Some(name),
+            ),
+            Kind::Search => ("sidebar.search".to_string(), None, None),
+            Kind::Console => ("sidebar.console".to_string(), None, None),
+            Kind::Resource(kind) => (kind.title_key(), None, None),
+            Kind::Reindex(alias) => ("sidebar.aliases".to_string(), None, Some(alias)),
+        };
+        let mut crumbs = vec![
+            (
+                SharedString::from(profile.name.clone()),
+                Some(CrumbTarget::Overview(id)),
+            ),
+            (SharedString::from(t!(section).to_string()), target),
+        ];
+        crumbs.extend(item.map(|name| (SharedString::from(name), None)));
+        crumbs
+    }
+
+    /// The crumbs of the active tab, which shrink first when the title bar runs out of room.
+    fn breadcrumb(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let crumbs = self.crumbs(cx);
+        let path = crumbs.iter().map(|(text, _)| text.as_ref());
+        let path = SharedString::from(path.collect::<Vec<_>>().join(" / "));
+        let items = crumbs.into_iter().map(|(text, target)| {
+            let item = BreadcrumbItem::new(text).min_w_0().truncate();
+            match target {
+                Some(target) => item.on_click(cx.listener(move |this, _, window, cx| {
+                    this.follow_crumb(target, window, cx);
+                })),
+                None => item,
+            }
+        });
+        let items: Vec<_> = items.collect();
+        // Absolute: the kit's title bar never shrinks, so a child in flow would widen it.
+        div()
+            .flex_1()
+            .h_full()
+            .relative()
+            .when(!items.is_empty(), |el| {
+                el.child(
+                    h_flex()
+                        .id("titlebar.breadcrumb")
+                        .test_support()
+                        .aria_label(path)
+                        .absolute()
+                        .inset_0()
+                        .items_center()
+                        .overflow_hidden()
+                        .child(Breadcrumb::new().min_w_0().children(items)),
+                )
+            })
+    }
+
+    fn follow_crumb(&mut self, target: CrumbTarget, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            CrumbTarget::Overview(id) => self.open_tab(id, Kind::Overview, window, cx),
+            CrumbTarget::Collections(id) => self.open_tab(id, Kind::Collections, window, cx),
+        }
     }
 
     /// Opens the log on the newest failed request of the active connection, if it has one.
@@ -672,6 +755,13 @@ const REGIONS: [DockPlacement; 4] = [
     DockPlacement::Bottom,
 ];
 
+/// Where a crumb of the title bar leads.
+#[derive(Clone, Copy)]
+enum CrumbTarget {
+    Overview(Uuid),
+    Collections(Uuid),
+}
+
 /// The kinds of tab a connection has.
 #[derive(Clone, PartialEq)]
 enum Kind {
@@ -786,6 +876,7 @@ impl Render for RootView {
                 .unwrap_or_else(|| t!("titlebar.no_connection").to_string()),
         );
         let switcher = h_flex()
+            .flex_none()
             .gap_2()
             .items_center()
             .text_sm()
@@ -796,6 +887,9 @@ impl Render for RootView {
                     .test_support()
                     .aria_label(title.clone())
                     .text_color(theme.muted_foreground)
+                    // UX rule 1: a long name must not push the badge next to it away.
+                    .max_w(px(TITLE_WIDTH))
+                    .truncate()
                     .child(title),
             )
             .when_some(profile, |el, p| {
@@ -810,6 +904,7 @@ impl Render for RootView {
                     el.child(env_badge::lock("titlebar", unlocked, cx))
                 })
             });
+        let breadcrumb = self.breadcrumb(cx);
         let red = rgb(env_badge::PROD_RED);
         let state = self.state.read(cx);
         let can_search = state
@@ -929,17 +1024,42 @@ impl Render for RootView {
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(
-                TitleBar::new().child(switcher).child(
-                    Button::new("titlebar.settings")
-                        .ghost()
-                        .small()
-                        .mr_2()
-                        .icon(IconName::Settings)
-                        .accessibility_label(t!("settings.open").to_string())
-                        .tooltip_with_action(t!("settings.open").to_string(), &OpenSettings, None)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_settings(window, cx);
-                        })),
+                TitleBar::new().child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_3()
+                        .items_center()
+                        .child(switcher)
+                        .child(breadcrumb)
+                        .child(
+                            Button::new("titlebar.search")
+                                .outline()
+                                .small()
+                                .flex_none()
+                                .label(t!("titlebar.search").to_string())
+                                .children(Kbd::global_binding_for_action(&OpenPalette, window))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_palette(PaletteMode::All, window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("titlebar.settings")
+                                .ghost()
+                                .small()
+                                .flex_none()
+                                .mr_2()
+                                .icon(IconName::Settings)
+                                .accessibility_label(t!("settings.open").to_string())
+                                .tooltip_with_action(
+                                    t!("settings.open").to_string(),
+                                    &OpenSettings,
+                                    None,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_settings(window, cx);
+                                })),
+                        ),
                 ),
             )
             .when(!self.keymap_errors.is_empty(), |el| {
