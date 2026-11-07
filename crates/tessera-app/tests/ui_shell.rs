@@ -12,8 +12,9 @@ use gpui_kit::component::dock::{DockArea, DockPlacement, InsertTarget, NodeId, P
 use gpui_kit::test::{TestEventExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle, px};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tessera_app::actions::{Refresh, ToggleJobs, ToggleRequestLog, apply_keymap};
+use tessera_app::actions::{Refresh, ToggleJobs, ToggleKeyMask, ToggleRequestLog, apply_keymap};
 use tessera_app::state::AppState;
 use tessera_app::views::dock::OverviewPanel;
 use tessera_app::views::root::RootView;
@@ -468,7 +469,12 @@ fn welcome_offers_each_way_in(cx: &mut TestAppContext) {
     let handle = open(cx);
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        for id in ["welcome.add_connection", "welcome.import", "welcome.copy"] {
+        for id in [
+            "welcome.add_connection",
+            "welcome.import",
+            "welcome.copy",
+            "welcome.connect_local",
+        ] {
             assert!(window.find(id).visible(), "{id}");
         }
     })
@@ -960,6 +966,63 @@ async fn the_prod_badge_stays_at_the_smallest_window(cx: &mut TestAppContext) {
             "{badge:?} {search:?}"
         );
         assert!(window.find("titlebar.settings").bounds().origin.x < width);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn connect_to_it_fills_the_form_and_connects_to_nothing(cx: &mut TestAppContext) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    fake_connector(cx, move |_| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        Ok(server("30.2", true))
+    });
+    let (handle, state) = open_with_state(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("welcome.connect_local", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("connect.name").value(), Some("local"));
+        assert_eq!(
+            window.find("connect.node.0.host").value(),
+            Some("localhost")
+        );
+        assert_eq!(window.find("connect.node.0.port").value(), Some("8108"));
+        // The field is masked, so its value shows only with the mask off.
+        window.dispatch_action(Box::new(ToggleKeyMask), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("connect.key").value(), Some(""));
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("connect.name").is_none(), "dialog closed");
+    })
+    .unwrap();
+    assert!(cx.read(|cx| state.read(cx).profiles.is_empty()));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[gpui_kit::test]
+fn the_welcome_screen_shows_the_palette_and_settings_chords(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let line = label(window, "welcome.next");
+        for chord in [key("⌘K", "Ctrl+K"), key("⌘,", "Ctrl+,")] {
+            assert!(line.contains(chord), "{chord:?} missing in {line:?}");
+        }
     })
     .unwrap();
 }

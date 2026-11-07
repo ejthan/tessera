@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- The welcome screen goes one step further: Connect to it, below the Docker command, opens the connection form filled in for `http://localhost:8108`, environment local, with the key left for you to enter. Nothing connects until you do. A new line names the shortcuts of the palette and of settings.
 - Several windows: New window (⌥⌘N / Ctrl+Alt+N, also in the palette) opens a second window with the default layout. A connection lives in one window: opening it from another brings its window forward, and closing the window frees the connection for the others. Only the first window saves the layout, checks for updates and shows keymap errors, and an update or job toast shows in the active window alone. Closing the last window now quits on macOS too.
 - The title bar shows where you are: connection, section, and the collection or alias of a tab. The connection opens its overview, and the section of a collection tab opens the list. A Search everything field with its shortcut opens the palette. At the smallest window the path shrinks first, and the environment badge stays.
 - After a failed request the status bar links to it: Last failed request (⌥⌘R / Ctrl+Alt+R, also in the palette) opens the request log on the newest failure of the active connection, resets a filter that hid it, and selects it. Polling and other connections stay out, and the link goes when the entry leaves the log.

@@ -18,7 +18,7 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use super::collections_list::CollectionsList;
-use super::connect_dialog::ConnectDialog;
+use super::connect_dialog::{ConnectDialog, local_profile};
 use super::console::ConsoleView;
 use super::documents::DocumentsView;
 use super::import_dialog::ImportDialog;
@@ -1132,6 +1132,7 @@ impl Render for WelcomePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let add_state = self.state.clone();
         let import_state = self.state.clone();
+        let local_state = self.state.clone();
         let this = cx.entity();
         div()
             .track_focus(&self.focus_handle)
@@ -1142,6 +1143,10 @@ impl Render for WelcomePanel {
                 move |_, window, cx| ConnectDialog::open_new(add_state.clone(), None, window, cx),
                 move |_, window, cx| ImportDialog::open(import_state.clone(), window, cx),
                 move |_, _, cx| this.update(cx, |view, cx| view.copy_docker_command(cx)),
+                move |_, window, cx| {
+                    let local = Some((local_profile(), None));
+                    ConnectDialog::open_new(local_state.clone(), local, window, cx);
+                },
                 window,
                 cx,
             ))

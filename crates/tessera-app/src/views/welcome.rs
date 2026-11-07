@@ -7,28 +7,38 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
-    App, ClickEvent, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
-    prelude::*, px,
+    Action, App, AsKeystroke as _, ClickEvent, IntoElement, KeyContext, ParentElement as _,
+    SharedString, Styled as _, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
 
-use crate::actions::NewConnection;
+use crate::actions::{NewConnection, OpenPalette, OpenSettings};
 
 /// The Docker command shown on the welcome screen. Tessera never runs it.
 pub const DOCKER_COMMAND: &str = "docker run -p 8108:8108 -v \"$(pwd)/typesense-data:/data\" typesense/typesense:30.2 --data-dir /data --api-key=xyz";
 
+/// The global chord of `action`, as `Kbd` writes it.
+fn chord(action: &dyn Action, window: &Window) -> Option<String> {
+    let binding =
+        window.highest_precedence_binding_for_action_in_context(action, KeyContext::default())?;
+    Some(Kbd::format(binding.keystrokes().first()?.as_keystroke()))
+}
+
 /// Renders the welcome screen. `copied` swaps the Copy button's label; `load_error` explains
 /// why saved connections are missing.
+#[allow(clippy::too_many_arguments)] // Each is a plain value or a click handler of this screen.
 pub fn render(
     copied: bool,
     load_error: Option<String>,
     on_add: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_import: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_copy: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_local: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     window: &Window,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
+    let next = chord(&OpenPalette, window).zip(chord(&OpenSettings, window));
     let card = || {
         v_flex()
             .flex_1()
@@ -145,6 +155,38 @@ pub fn render(
                             .on_click(on_copy),
                     ),
             )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(
+                        Button::new("welcome.connect_local")
+                            .outline()
+                            .label(t!("welcome.connect_local").to_string())
+                            .on_click(on_local),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(t!("welcome.connect_local_hint").to_string()),
+                    ),
+            )
+            .when_some(next, |el, (palette, settings)| {
+                let text = SharedString::from(
+                    t!("welcome.next", palette = palette, settings = settings).to_string(),
+                );
+                el.child(
+                    div()
+                        .id("welcome.next")
+                        .test_support()
+                        .aria_label(text.clone())
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(text),
+                )
+            })
             .child(
                 div()
                     .text_xs()
