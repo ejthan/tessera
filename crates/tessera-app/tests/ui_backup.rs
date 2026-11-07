@@ -353,8 +353,7 @@ impl Fixture {
             collections: entries,
             files: Vec::new(),
         };
-        *self.fake.open_answer.lock().unwrap() =
-            Some(Ok((dir.path().to_path_buf(), manifest, None)));
+        *self.fake.open_answer.lock().unwrap() = Some(Ok((dir.path().to_path_buf(), manifest)));
         *self.fake.load_answer.lock().unwrap() = Some(Ok(Loaded {
             schemas: schemas.collect(),
             stopwords: vec![StopwordSet {
@@ -738,15 +737,35 @@ async fn the_plan_is_read_again_when_the_job_ends(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn rows_past_the_limit_are_counted_when_they_are_restored(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let names: Vec<String> = (0..1005).map(|i| format!("c{i}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    // The stopwords row comes first, so 1,000 of its 1,006 rows are drawn. A blocked row stays out.
+    let _files = f.offer(&names, &["c1004"], RestoreView::default());
+    f.choose(cx);
+    assert!(f.label(cx, "restore.rows_unseen").ends_with(": 5"));
+}
+
+#[gpui_kit::test]
+async fn an_archive_is_held_while_it_unpacks(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let temp = Arc::new(tempfile::tempdir().unwrap());
+    let path = temp.path().to_path_buf();
+    *f.fake.temp_answer.lock().unwrap() = Some(temp);
+    // No answer holds the unpack open.
+    f.choose(cx);
+    cx.read(|cx| assert_eq!(f.jobs.read(cx).held_temps(), [path]));
+}
+
+#[gpui_kit::test]
 async fn clear_cache_keeps_a_held_directory_and_reloads_the_lists(cx: &mut TestAppContext) {
     let relevance = fake_relevance(cx);
     let f = Fixture::with(cx, false).await;
     let _files = f.offer(&["fresh"], &[], RestoreView::default());
     let temp = Arc::new(tempfile::tempdir().unwrap());
     let path = temp.path().to_path_buf();
-    if let Some(Ok(answer)) = f.fake.open_answer.lock().unwrap().as_mut() {
-        answer.2 = Some(temp);
-    }
+    *f.fake.temp_answer.lock().unwrap() = Some(temp);
     f.choose(cx);
     let lists = *f.data.lists.lock().unwrap();
     cx.update_window(f.handle.into(), |_, window, cx| {
@@ -791,9 +810,7 @@ async fn a_new_choice_lets_go_of_the_old_temp_directory(cx: &mut TestAppContext)
     let _files = f.offer(&["fresh"], &[], RestoreView::default());
     let temp = Arc::new(tempfile::tempdir().unwrap());
     let path = temp.path().to_path_buf();
-    if let Some(Ok(answer)) = f.fake.open_answer.lock().unwrap().as_mut() {
-        answer.2 = Some(temp);
-    }
+    *f.fake.temp_answer.lock().unwrap() = Some(temp);
     f.choose(cx);
     assert!(f.has(cx, "restore.start"));
     f.click(cx, "restore.choose");
@@ -808,9 +825,7 @@ async fn closing_the_tab_lets_go_of_the_temp_directory(cx: &mut TestAppContext) 
     let _files = f.offer(&["fresh"], &[], RestoreView::default());
     let temp = Arc::new(tempfile::tempdir().unwrap());
     let path = temp.path().to_path_buf();
-    if let Some(Ok(answer)) = f.fake.open_answer.lock().unwrap().as_mut() {
-        answer.2 = Some(temp);
-    }
+    *f.fake.temp_answer.lock().unwrap() = Some(temp);
     f.choose(cx);
     assert!(f.has(cx, "restore.start"));
     f.close_tab(cx);

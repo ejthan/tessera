@@ -31,7 +31,9 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::admin::AdminBackendGlobal;
-use crate::connection::{Connected, ConnectionState, ConnectorGlobal, client_options, error_text};
+use crate::connection::{
+    Connected, ConnectionState, ConnectorGlobal, client_options, error_text, update_error_text,
+};
 use crate::runtime::Tokio;
 use crate::views::status_bar;
 
@@ -502,7 +504,7 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let check = match answer.await {
                 Err(Error::Http { status: 404, .. }) => UpdateCheck::NoRelease,
-                Err(e) => UpdateCheck::Failed(e.to_string()),
+                Err(e) => UpdateCheck::Failed(update_error_text(&e)),
                 Ok(tag) => match is_newer(&tag, env!("CARGO_PKG_VERSION")) {
                     Some(true) => UpdateCheck::Newer(tag),
                     Some(false) => UpdateCheck::Current,

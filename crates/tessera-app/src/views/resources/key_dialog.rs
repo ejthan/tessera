@@ -462,7 +462,7 @@ impl RevealDialog {
                 input: cx.new(|cx| {
                     InputState::new(window, cx)
                         .masked(true)
-                        .default_value(shown.as_str().to_string())
+                        .default_value(shown.as_str())
                 }),
                 value: created.value,
                 id: created.key.id,
@@ -500,8 +500,8 @@ impl RevealDialog {
     }
 
     fn copy(&mut self, cx: &mut Context<Self>) {
-        let value = Zeroizing::new(self.value.expose_secret().to_string());
-        cx.write_to_clipboard(ClipboardItem::new_string(value.as_str().to_string()));
+        let item = ClipboardItem::new_string(self.value.expose_secret().to_string());
+        cx.write_to_clipboard(item);
         self.copied = true;
         cx.notify();
         self.copy_reset = Some(cx.spawn(async move |this, cx| {

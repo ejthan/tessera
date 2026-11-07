@@ -1227,6 +1227,44 @@ fn unmet_follows_the_ticks() {
 }
 
 #[test]
+fn an_async_reference_needs_nothing() {
+    let child = json!({"name": "child", "fields": [
+        field("title"),
+        {"name": "other", "type": "string", "reference": "gone.id", "async_reference": true},
+    ]});
+    let got = backup_of(vec![child], Loaded::default()).plan(&RestoreView::default());
+    assert_eq!(got.needs, []);
+    assert_eq!(got.warnings, []);
+    let child = HashSet::from([(RowKind::Collection, "child".to_string())]);
+    assert_eq!(got.unmet(&child), Vec::new());
+}
+
+#[test]
+fn a_plain_reference_beside_an_async_one_still_needs_its_target() {
+    let child = json!({"name": "child", "fields": [
+        {"name": "late", "type": "string", "reference": "gone.id", "async_reference": true},
+        {"name": "now", "type": "string", "reference": "gone.id"},
+    ]});
+    let got = backup_of(vec![child], Loaded::default()).plan(&RestoreView::default());
+    assert_eq!(
+        got.warnings,
+        [RestoreWarning::MissingReference {
+            collection: "child".into(),
+            target: "gone".into(),
+        }]
+    );
+}
+
+#[test]
+fn a_child_without_documents_needs_nothing() {
+    let mut backup = backup_of(vec![referencing("child", "gone")], Loaded::default());
+    backup.manifest.collections[0].documents = 0;
+    let got = backup.plan(&RestoreView::default());
+    assert_eq!(got.needs, []);
+    assert_eq!(got.warnings, []);
+}
+
+#[test]
 fn a_reference_through_an_alias_needs_the_alias_and_its_target() {
     let aliases = Loaded {
         aliases: vec![alias("people", "parent")],

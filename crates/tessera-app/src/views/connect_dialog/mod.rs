@@ -189,7 +189,7 @@ impl ConnectDialog {
         let key = cx.new(|cx| {
             let input = InputState::new(window, cx)
                 .masked(true)
-                .default_value(key_text.as_str().to_string());
+                .default_value(key_text.as_str());
             if editing {
                 input.placeholder(t!("connect.key_keep").to_string())
             } else {

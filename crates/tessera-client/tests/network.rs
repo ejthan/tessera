@@ -58,13 +58,17 @@ fn only_two_places_build_an_http_client() {
 fn no_key_is_copied_into_a_plain_string() {
     let mut copies = Vec::new();
     for (name, code) in workspace() {
+        // A key is handled by these two as a zeroized string, and a copy of it is as bad.
+        let dialog = name.ends_with("connect_dialog/mod.rs") || name.ends_with("key_dialog.rs");
         let lines: Vec<&str> = code.lines().collect();
         for (i, line) in lines.iter().enumerate() {
             let before = i.checked_sub(1).map_or("", |i| lines[i]);
-            if line.contains("expose_secret().to_string()")
+            let exposed = line.contains("expose_secret().to_string()")
                 && !line.contains("Zeroizing::new")
                 && !before.contains("Zeroizing::new")
-            {
+                // The clipboard takes a `String`: an exception of docs/security-checklist.md.
+                && !line.contains("ClipboardItem::new_string");
+            if exposed || (dialog && line.contains(".as_str().to_string()")) {
                 copies.push(format!("{name}: {}", line.trim()));
             }
         }

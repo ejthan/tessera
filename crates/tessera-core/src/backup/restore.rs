@@ -527,7 +527,9 @@ fn needs_of(
 ) -> Vec<Need> {
     let collection = |name: &str| (RowKind::Collection, name.to_string());
     let on_server = |name: &str| server.collections.iter().any(|c| c == name);
-    let linked = draft.fields.iter().filter(|f| !f.reference.is_empty());
+    // An async reference lets a document in before its target exists (P9).
+    let linked = draft.fields.iter();
+    let linked = linked.filter(|f| !f.reference.is_empty() && !f.async_reference);
     let mut seen = HashSet::new();
     linked
         .map(|f| reference_target(&f.reference))
@@ -629,7 +631,10 @@ pub fn plan(manifest: &Manifest, loaded: &Loaded, server: &RestoreView) -> Resto
     let mut needs = Vec::new();
     for (entry, draft) in open_entries.iter().zip(&open) {
         collection_warnings(entry, draft, (&synonyms, &curations), server, &mut warnings);
-        needs.extend(needs_of(draft, &restorable, loaded, server));
+        // Only an imported line can fail on a missing target.
+        if entry.documents > 0 {
+            needs.extend(needs_of(draft, &restorable, loaded, server));
+        }
     }
     let (order, cycle) = reference_order(&open, &loaded.aliases);
     if !cycle.is_empty() {

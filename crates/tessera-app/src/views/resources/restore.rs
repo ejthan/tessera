@@ -212,8 +212,21 @@ impl RestoreForm {
         let backend = self.backend.clone();
         let profile = self.connection.read(cx).profile.clone();
         self.open_task = Some(cx.spawn(async move |this, cx| {
-            let opened = backend.open_backup(path, control.clone()).await;
-            let (folder, manifest, temp) = match opened {
+            let opened = async {
+                let temp = backend.backup_temp(path.clone()).await?;
+                // Held before the first byte lands in it, so Clear cache leaves it alone.
+                this.update(cx, |this, cx| {
+                    if let Some(temp) = &temp {
+                        let jobs = cx.global::<JobsGlobal>().0.clone();
+                        jobs.update(cx, |jobs, _| jobs.hold_temp(temp));
+                    }
+                    this.temp = temp.clone();
+                })
+                .ok();
+                backend.open_backup(path, temp, control.clone()).await
+            }
+            .await;
+            let (folder, manifest) = match opened {
                 Ok(opened) => opened,
                 Err(e) => {
                     let text = archive_error_text(&e).into();
@@ -227,14 +240,7 @@ impl RestoreForm {
                     cx.notify();
                 }
             };
-            let alive = this.update(cx, |this, cx| {
-                if let Some(temp) = &temp {
-                    let jobs = cx.global::<JobsGlobal>().0.clone();
-                    jobs.update(cx, |jobs, _| jobs.hold_temp(temp));
-                }
-                this.temp = temp;
-                stage(Stage::Verifying)(this, cx);
-            });
+            let alive = this.update(cx, stage(Stage::Verifying));
             if alive.is_err() {
                 return;
             }
@@ -657,6 +663,12 @@ impl Render for RestoreForm {
             .flat_map(|o| o.plan.rows.iter().take(ROW_LIMIT).cloned())
             .collect();
         let total = self.opened.as_ref().map_or(0, |o| o.plan.rows.len());
+        let unseen = self
+            .opened
+            .iter()
+            .flat_map(|o| o.plan.rows.iter().skip(ROW_LIMIT))
+            .filter(|r| self.ticked.contains(&(r.kind, r.name.clone())))
+            .count();
         let rows: Vec<_> = shown.iter().map(|row| self.plan_row(row, cx)).collect();
         let jobs = cx.global::<JobsGlobal>().0.read(cx);
         let job = self
@@ -741,6 +753,14 @@ impl Render for RestoreForm {
                     "restore.rows_limited",
                     text.to_string().into(),
                     muted,
+                ))
+            })
+            .when(unseen > 0, |el| {
+                let text = t!("restore.rows_unseen", count = grouped(unseen as u64));
+                el.child(notice(
+                    "restore.rows_unseen",
+                    text.to_string().into(),
+                    warning,
                 ))
             })
             .when(has_differs, |el| {

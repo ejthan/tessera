@@ -206,7 +206,7 @@ impl RootView {
                     this.save_layout_soon(cx);
                 }
             }),
-            // Dragging a dock's edge emits no `LayoutChanged`, so its last size is read here.
+            // Quitting drops a save still waiting out `LAYOUT_SAVE_DELAY`, so it is written here.
             cx.on_app_quit(|this, cx| {
                 let layout = this.current_layout(cx);
                 let changed = layout != this.state.read(cx).layout;

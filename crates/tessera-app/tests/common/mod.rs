@@ -856,6 +856,8 @@ pub struct FakeTransfer {
     pub backups: Mutex<Vec<BackupPlan>>,
     /// `restore` calls.
     pub restores: Mutex<Vec<RestoreJob>>,
+    /// What `backup_temp` answers.
+    pub temp_answer: Mutex<Option<Arc<tempfile::TempDir>>>,
     /// What `open_backup` answers; `None` holds it open.
     pub open_answer: Mutex<Option<OpenedBackup>>,
     /// `open_backup` calls.
@@ -1071,9 +1073,19 @@ impl TransferBackend for FakeTransferBackend {
         Box::pin(async move { taken })
     }
 
+    fn backup_temp(
+        &self,
+        _: PathBuf,
+    ) -> tessera_app::collections::BoxFuture<Result<Option<Arc<tempfile::TempDir>>, ArchiveError>>
+    {
+        let temp = self.0.temp_answer.lock().unwrap().take();
+        Box::pin(async move { Ok(temp) })
+    }
+
     fn open_backup(
         &self,
         path: PathBuf,
+        _: Option<Arc<tempfile::TempDir>>,
         _: JobControl,
     ) -> tessera_app::collections::BoxFuture<OpenedBackup> {
         self.0.opened_paths.lock().unwrap().push(path);

@@ -32,17 +32,29 @@ use tokio::sync::watch;
 use crate::collections::{BoxFuture, TokioBackend};
 
 /// What [`TransferBackend::open_backup`] answers.
-pub type OpenedBackup = Result<(PathBuf, Manifest, Option<Arc<TempDir>>), ArchiveError>;
+pub type OpenedBackup = Result<(PathBuf, Manifest), ArchiveError>;
 
-/// See [`TransferBackend::open_backup`]. Blocks.
-fn open_blocking(path: PathBuf, control: &JobControl) -> OpenedBackup {
-    if std::fs::metadata(&path)?.is_dir() {
-        let manifest = read_manifest(&path)?;
-        return Ok((path, manifest, None));
+/// See [`TransferBackend::backup_temp`]. Blocks.
+fn temp_blocking(path: &Path) -> Result<Option<Arc<TempDir>>, ArchiveError> {
+    if std::fs::metadata(path)?.is_dir() {
+        return Ok(None);
     }
     let temp = tempfile::Builder::new().prefix(TEMP_PREFIX).tempdir()?;
-    let manifest = unpack(&path, temp.path(), control)?;
-    Ok((temp.path().to_path_buf(), manifest, Some(Arc::new(temp))))
+    Ok(Some(Arc::new(temp)))
+}
+
+/// See [`TransferBackend::open_backup`]. Blocks.
+fn open_blocking(path: PathBuf, temp: Option<&TempDir>, control: &JobControl) -> OpenedBackup {
+    match temp {
+        Some(temp) => {
+            let manifest = unpack(&path, temp.path(), control)?;
+            Ok((temp.path().to_path_buf(), manifest))
+        }
+        None => {
+            let manifest = read_manifest(&path)?;
+            Ok((path, manifest))
+        }
+    }
 }
 
 /// Size and mtime, which tell that a file changed since it was read.
@@ -116,9 +128,18 @@ pub trait TransferBackend: Send + Sync {
     /// Whether anything stands at `path`, a link that leads nowhere too.
     fn path_taken(&self, path: PathBuf) -> BoxFuture<bool>;
 
-    /// The manifest of a folder, or of an archive it unpacks into a private temp directory.
-    /// Answers the folder to go on with, and the temp directory if there is one.
-    fn open_backup(&self, path: PathBuf, control: JobControl) -> BoxFuture<OpenedBackup>;
+    /// The private temp directory an archive at `path` unpacks into, `None` for a folder. Comes
+    /// before [`Self::open_backup`], so it can be held before anything lands in it.
+    fn backup_temp(&self, path: PathBuf) -> BoxFuture<Result<Option<Arc<TempDir>>, ArchiveError>>;
+
+    /// The manifest of a folder, or of an archive it unpacks into `temp`. Answers the folder to
+    /// go on with.
+    fn open_backup(
+        &self,
+        path: PathBuf,
+        temp: Option<Arc<TempDir>>,
+        control: JobControl,
+    ) -> BoxFuture<OpenedBackup>;
 
     /// Checks every file of a backup.
     fn verify_backup(
@@ -237,9 +258,22 @@ impl TransferBackend for TokioBackend {
         })
     }
 
-    fn open_backup(&self, path: PathBuf, control: JobControl) -> BoxFuture<OpenedBackup> {
+    fn backup_temp(&self, path: PathBuf) -> BoxFuture<Result<Option<Arc<TempDir>>, ArchiveError>> {
         self.run(async move {
-            let open = tokio::task::spawn_blocking(move || open_blocking(path, &control));
+            let make = tokio::task::spawn_blocking(move || temp_blocking(&path));
+            make.await.map_err(|e| ArchiveError::Io(e.to_string()))?
+        })
+    }
+
+    fn open_backup(
+        &self,
+        path: PathBuf,
+        temp: Option<Arc<TempDir>>,
+        control: JobControl,
+    ) -> BoxFuture<OpenedBackup> {
+        self.run(async move {
+            let open =
+                tokio::task::spawn_blocking(move || open_blocking(path, temp.as_deref(), &control));
             open.await.map_err(|e| ArchiveError::Io(e.to_string()))?
         })
     }
@@ -391,14 +425,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let control = JobControl::default();
 
-        let folder = backend
-            .open_backup(dir.path().to_path_buf(), control.clone())
-            .await;
+        let path = dir.path().to_path_buf();
+        assert!(backend.backup_temp(path.clone()).await.unwrap().is_none());
+        let folder = backend.open_backup(path, None, control.clone()).await;
         assert!(matches!(folder, Err(ArchiveError::Missing(name)) if name == "manifest.json"));
 
         let garbage = dir.path().join("b.tar.zst");
         std::fs::write(&garbage, "no archive").unwrap();
-        assert!(backend.open_backup(garbage, control).await.is_err());
+        let temp = backend.backup_temp(garbage.clone()).await.unwrap();
+        assert!(temp.is_some());
+        assert!(backend.open_backup(garbage, temp, control).await.is_err());
     }
 
     #[tokio::test]

@@ -26,8 +26,8 @@ One row per point, with its proof: a test, a CI job or a file. Status is **Prove
 |---|---|---|
 | `HeaderValue` per request | Accepted | Marked sensitive, held by `reqwest`, freed after the request. Not zeroized |
 | `InputState` of a masked input | Accepted | A rope in the kit, which has no hook. Zeroized text is copied into it, and that copy stays until the input goes |
-| `SharedString` on the way into an input | Accepted | `default_value` takes one, and `Arc<str>` is not zeroized |
-| `ClipboardItem` and the clipboard | Accepted | Copy is the user's own act; the item takes a `String`, and the system holds the value after it |
+| `SharedString` on the way into an input | Accepted | `default_value` takes one, built from the zeroized `&str` with no `String` between. It is not zeroized |
+| `ClipboardItem` and the clipboard | Accepted | Copy is the user's own act. The item takes a `String`, the one plain copy in `key_dialog.rs`, and the system holds the value after it |
 | The keychain's own buffers | Accepted | Inside `keyring` and the platform |
 
 ## Spec §7.1, acceptance
@@ -89,5 +89,5 @@ Typed means the name is typed, and default focus is on Cancel: `crates/tessera-a
 | A restore never writes to an existing collection, and reads the server again first | Proved | `crates/tessera-core/tests/backup_run.rs::a_refresh_that_finds_a_new_collection_writes_nothing`, `::a_conflict_on_create_imports_nothing`, `::documents_are_created_never_upserted` |
 | A blanked key blocks the collection | Proved | `crates/tessera-core/tests/backup_run.rs::a_restore_of_blanked_keys_says_so_and_blocks_the_collection` |
 | Only rows approved as Differs are replaced | Proved | `crates/tessera-core/tests/backup_run.rs::a_row_that_became_different_after_the_confirmation_stays` |
-| Clear cache leaves what is in use | Proved | `crates/tessera-app/tests/ui_backup.rs::clear_cache_keeps_a_held_directory_and_reloads_the_lists`, `crates/tessera-app/src/relevance.rs::only_old_copies_of_this_user_are_swept` |
+| Clear cache leaves what is in use | Proved | `crates/tessera-app/tests/ui_backup.rs::clear_cache_keeps_a_held_directory_and_reloads_the_lists`, `crates/tessera-app/tests/ui_backup.rs::an_archive_is_held_while_it_unpacks`, `crates/tessera-app/src/relevance.rs::only_old_copies_of_this_user_are_swept` |
 | A real backup restored into a real server, with a real provider | Manual | The round trip is `crates/tessera-core/tests/live_backup.rs`, not run on the last commit. A real provider and the checks on screen are in `docs/building.md` |
