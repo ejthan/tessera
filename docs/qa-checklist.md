@@ -17,12 +17,14 @@ One intermittent failure: the first `live_admin` run on 30.2, on a dev server ju
 - [ ] NF1: start a release build on an M1 and read `ready in N ms` in the log. **Pass:** under 1 s. Machine: ____ Result: ____
 - [ ] NF3 through the window: the steps under Import and export below. **Pass:** the peak stays below 300 MB. Machine: ____ Result: ____
 - [ ] NF4: walk a debug build through each flow with `RUST_LOG=tessera::nf4=warn`. **Pass:** no panic, and no such warning in a release build. Machine: ____ Result: ____
-- [ ] NF5: read the binary sizes of Linux, Windows and macOS x64 from the first `release.yml` run. **Pass:** each is below 41,943,040 bytes. Machine: ____ Result: ____
+- [ ] NF5: read the binary sizes of Linux, Windows and macOS x64 from the first `release.yml` run. **Pass:** each is below 41,943,040 bytes. So far only local Docker builds with `rust:1.99.1` and the `LINUX_DEPS` of `ci.yml`, not CI: Linux x86_64 40,088,944 bytes, emulated, and Linux aarch64 34,237,424 bytes. Windows and macOS x64 are open. Machine: ____ Result: ____
 - [ ] NF6: an idle window with polling paused, connected and not connected, read with `ps -o %cpu` or Task Manager. **Pass:** under 1% in both states. Machine: ____ Result: ____
 
 ### NF2: 200k rows at 60 fps
 
 Hardware: an Apple M1 or comparable machine, a release build, no other heavy load.
+
+D115 lowered the opt-level of `tessera-app`, `tessera-widgets`, `gpui-base` and `gpui-component` to `"s"` in release builds, and with it the LTO pass over the whole binary. Render performance has not been measured since, so this check has to run on a build with that profile, and on Linux too if a machine is at hand.
 
 - [ ] `TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d`, then `cargo xtask seed --url http://localhost:18108 --reset` (about 10 s for `products`). Machine: ____ Result: ____
 - [ ] `cargo run --release -p tessera-app --features frame-overlay`, connect to `localhost:18108` with key `xyz`, open `products`. Machine: ____ Result: ____

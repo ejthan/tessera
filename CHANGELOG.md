@@ -149,6 +149,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- The release profile aborts on panic (`panic = "abort"`), which keeps the Linux binary under the 40 MB limit (NF5).
+- The release profile aborts on panic (`panic = "abort"`).
+- The Linux binaries fit the 40 MiB limit (NF5, D115), with no feature dropped: dependencies off the hot paths build for size, `tessera-app`, `tessera-widgets`, `gpui-base` and `gpui-component` build at `opt-level = "s"`, and Linux links with packed relative relocations, which needs glibc 2.36. In local Docker builds, not CI, x86_64 went from 52,730,536 to 40,088,944 bytes and aarch64 from 45,312,936 to 34,237,424. The macOS arm64 binary went from 28,899,168 to 23,435,136 bytes. Scrolling performance (NF2) has not been measured on this profile.
 - Profiles are stored in `connections.json` without keys; keys are stored in the OS keychain.
 - The live tests use `http://localhost:18108` by default instead of port 8108. The dev server still starts on 8108 unless `TYPESENSE_PORT` is set.
