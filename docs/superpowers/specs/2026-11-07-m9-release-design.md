@@ -212,6 +212,8 @@ No change.
 
 For the welcome screen, connect dialog, overview, collections, documents, search, console, every `ResourceKind` tab, settings and palette: render a frame, walk `snapshots`, and fail on a visible snapshot whose role is interactive and whose `label` is `None` or empty, naming its path. Roles: Button, CheckBox, Switch, RadioButton, Tab, TextInput, ComboBox, Link. An input with a `placeholder` still needs a label. Fixes go at the site with `aria_label` or `accessibility_label`, through `t!`.
 
+The kit falls back to the placeholder as an input's label (`gpui-component-0.9.0/src/input/input.rs:741`), so a snapshot cannot tell the two apart and the audit does not see an input that has only a placeholder. Task 3 gave each such `Input` in the views an `aria_label` by reading the source. The skip list in the test holds what the kit draws and Tessera cannot name: the dock's tabs, close buttons, menu and toggles (`TabGroupSkin`), and the `Combobox` wrapper of the field picker, whose trigger button is named. The role list also takes `MultilineTextInput`, `PasswordInput` and `SearchInput`.
+
 ### 7.4 Budget spans (D103)
 
 `crates/tessera-app/src/ui_budget.rs`:

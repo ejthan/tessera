@@ -5,8 +5,8 @@
 
 use gpui_kit::component::table::{TableDelegate, TableState};
 use gpui_kit::component::theme::ThemeRegistry;
-use gpui_kit::component::{Size, Theme, ThemeMode};
-use gpui_kit::{App, Context, Global, Pixels, Window, px};
+use gpui_kit::component::{Size, Theme, ThemeColor, ThemeMode};
+use gpui_kit::{App, Context, Global, Hsla, Pixels, Window, px, rgb};
 use tessera_core::settings::{Density, Settings};
 
 /// The kit's font size, read before the first change.
@@ -79,12 +79,38 @@ fn apply_theme(name: &str, window: &mut Window, cx: &mut App) {
     }
 }
 
-/// Applies the theme, then the font size, which a theme file can set too.
+/// Raises the colors of the kit that miss WCAG AA, for text at 4.5:1 and for the focus ring
+/// at 3:1. `ui_a11y` measures each pair.
+pub fn aa_colors(colors: &mut ThemeColor, dark: bool) {
+    let hex = |value: u32| Hsla::from(rgb(value));
+    if dark {
+        colors.danger_foreground = hex(0x450a0a);
+        colors.success_foreground = hex(0x052e16);
+        colors.warning_foreground = hex(0x422006);
+    } else {
+        colors.muted_foreground = hex(0x525252);
+        colors.danger = hex(0xb91c1c);
+        colors.danger_hover = hex(0x991b1b);
+        colors.danger_foreground = hex(0xffffff);
+        colors.success = hex(0x15803d);
+        colors.success_foreground = hex(0xffffff);
+        colors.warning = hex(0xa16207);
+        colors.warning_foreground = hex(0xffffff);
+        colors.ring = hex(0x737373);
+    }
+}
+
+/// Applies the theme, then the font size, which a theme file can set too, and the contrast
+/// fixes. They need an update of their own: loading a theme replaces the colors.
 fn apply_appearance(settings: &Settings, window: &mut Window, cx: &mut App) {
     apply_theme(&settings.theme, window, cx);
     let kit = cx.global::<KitFontSize>().0;
     let size = settings.font_size.map_or(kit, |n| px(n as f32));
-    Theme::update(cx, |theme| theme.font_size = size);
+    Theme::update(cx, |theme| {
+        theme.font_size = size;
+        let dark = theme.mode.is_dark();
+        aa_colors(&mut theme.colors, dark);
+    });
 }
 
 /// Whether `name` leaves the mode to the system: `system`, or a theme that was removed.

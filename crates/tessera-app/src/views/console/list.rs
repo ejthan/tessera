@@ -141,6 +141,7 @@ impl ConsoleView {
             .child(
                 Input::new(&self.list.filter)
                     .id("console.history.filter")
+                    .aria_label(t!("search.queries.filter").to_string())
                     .small(),
             )
             .child(self.list_rows(cx))

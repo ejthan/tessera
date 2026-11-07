@@ -177,6 +177,7 @@ impl SearchWorkbench {
                 .ghost()
                 .small()
                 .icon(icon)
+                .accessibility_label(t!(key).to_string())
                 .tooltip(t!(key).to_string())
                 .disabled(count < 2 || blocked)
         };
