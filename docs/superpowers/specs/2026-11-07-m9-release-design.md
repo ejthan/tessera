@@ -297,7 +297,7 @@ The tool has no flag to skip its build hook, and the hook does nothing when the 
 1. Find `cargo-packager` (and `cargo-generate-rpm` on Linux) on `PATH` or in `target/tools/bin`. Missing: print the exact install command and exit 1. It never installs anything by itself.
 2. Set `MACOSX_DEPLOYMENT_TARGET=13.0` on macOS. **packager:** set `CI=true` for the `dmg` step, which passes `--skip-jenkins` to the `create-dmg` script, so no Finder automation is asked for.
 3. Run `cargo packager -p tessera-app --release --formats <formats_for(os)>`: macOS `app,dmg`, Linux `deb,appimage`, Windows `wix`. **packager:** the command downloads helpers on first use: the `create-dmg` script (pinned commit), WiX 3.11.2 (SHA-256 checked), and `linuxdeploy` and its plugins (the AppImage plugin from a moving `continuous` tag).
-4. Linux: `cargo generate-rpm`. Windows: `tar -a -c -f` makes the `.zip` of `tessera.exe`, `LICENSE`, `THIRD_PARTY_NOTICES.md`. Windows 10 and later ship `tar`, so no crate is needed.
+4. Linux: `cargo generate-rpm -p crates/tessera-app`. Windows: `tar -a -c -f` makes the `.zip` of `tessera.exe`, `LICENSE`, `THIRD_PARTY_NOTICES.md`. Windows 10 and later ship `tar`, so no crate is needed.
 5. Check NF5 on `target/release/tessera[.exe]`: below 41,943,040 bytes.
 6. Copy the packages into `target/dist/`, and write `SHA256SUMS` in `sha256sum` format, sorted, through `sha2`.
 

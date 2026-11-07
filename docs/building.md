@@ -262,6 +262,35 @@ Measured on the finished M5 branch (`b036c25`), release builds, Apple M3 Max wit
 All three passed every check against the 300 MB limit. The app's baseline from three smoke starts of `target/release/tessera` was 93.0 MB (the first, cold start), then 64.1 and 64.0 MB; the table uses the 93.0. This is macOS: the nightly job measures Linux, and the numbers above do not stand for it. The collections `tessera_nf3` and `tessera_nf3_cancel` were gone afterwards.
 
 
+## Packaging
+
+`cargo xtask dist` builds the packages of the OS it runs on into `target/dist/`, with `SHA256SUMS` beside them. Nothing it does uploads or publishes.
+
+| OS | Packages | Tools |
+|---|---|---|
+| macOS | `.app`, `.dmg` | `cargo-packager` |
+| Linux | `.deb`, AppImage, `.rpm` | `cargo-packager`, `cargo-generate-rpm` |
+| Windows | `.msi`, `.zip` | `cargo-packager`, the system `tar` |
+
+Install the tools first. `dist` finds them on `PATH` or in `target/tools/bin`, never installs them itself, and prints the line it misses:
+
+```bash
+cargo install cargo-packager --locked --version 0.11.8 --root target/tools
+cargo install cargo-generate-rpm --locked --version 0.21.1 --root target/tools
+```
+
+```bash
+cargo xtask dist
+```
+
+The first run of `cargo-packager` downloads helpers into its own cache: the `create-dmg` script on macOS, WiX on Windows, and `linuxdeploy` with its plugins on Linux. The AppImage plugin comes from a moving tag and has no checksum.
+
+On macOS, `dist` sets `MACOSX_DEPLOYMENT_TARGET=13.0` and `CI=true`, which keeps the `.dmg` step from automating Finder. The app is signed ad-hoc, with the identity `-` in `crates/tessera-app/Cargo.toml`. `dist` stops when the binary reaches 41,943,040 bytes (NF5).
+
+`cargo xtask icons` draws the placeholder icon into `assets/icons/app/`. The files are committed, so packaging does not need it. `cargo xtask release-notes <version>` prints that version's section of `CHANGELOG.md`, and fails if it has none.
+
+Only macOS arm64 has been built this way so far. The Linux and Windows paths compile here and have not run.
+
 ## Smoke start
 
 ```bash

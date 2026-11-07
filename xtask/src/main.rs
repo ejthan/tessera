@@ -2,6 +2,7 @@
 
 //! Developer tasks, run with `cargo xtask <task>`.
 
+mod dist;
 mod governance;
 mod i18n;
 mod icons;
@@ -17,6 +18,8 @@ const USAGE: &str = "usage: cargo xtask seed --url <url> [--key <key>] [--reset]
        cargo xtask i18n
        cargo xtask governance
        cargo xtask icons
+       cargo xtask dist
+       cargo xtask release-notes <version>
        cargo xtask dco <base>";
 
 fn main() -> ExitCode {
@@ -27,6 +30,8 @@ fn main() -> ExitCode {
         Some("i18n") => i18n_task(),
         Some("governance") => governance_task(),
         Some("icons") => icons_task(),
+        Some("dist") => dist_task(),
+        Some("release-notes") => release_notes_task(&args[1..]),
         Some("dco") => dco_task(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
@@ -117,6 +122,41 @@ fn icons_task() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn dist_task() -> ExitCode {
+    match dist::run(root()) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn release_notes_task(args: &[String]) -> ExitCode {
+    let [version] = args else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    let changelog = match std::fs::read_to_string(root().join("CHANGELOG.md")) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("error: CHANGELOG.md: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match dist::release_notes(&changelog, version) {
+        Some(notes) => {
+            print!("{notes}");
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("error: CHANGELOG.md has no section for {version}");
             ExitCode::FAILURE
         }
     }

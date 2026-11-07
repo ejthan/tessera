@@ -9601,6 +9601,7 @@ dependencies = [
  "reqwest",
  "secrecy",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "tessera-client",
  "tessera-core",
