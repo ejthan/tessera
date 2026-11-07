@@ -30,6 +30,7 @@ use tessera_client::Error;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::secrets::SecretError;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use self::form::{ADVANCED_ERRORS, FormErrors, FormValues};
 use self::node_rows::{NodeRow, RowRef};
@@ -181,13 +182,14 @@ impl ConnectDialog {
         });
         let timeout = input(profile.timeout_secs.to_string());
         let retries = input(profile.retries.to_string());
-        let key_text = key
-            .map(|k| k.expose_secret().to_string())
-            .unwrap_or_default();
+        let key_text = Zeroizing::new(
+            key.map(|k| k.expose_secret().to_string())
+                .unwrap_or_default(),
+        );
         let key = cx.new(|cx| {
             let input = InputState::new(window, cx)
                 .masked(true)
-                .default_value(key_text);
+                .default_value(key_text.as_str().to_string());
             if editing {
                 input.placeholder(t!("connect.key_keep").to_string())
             } else {

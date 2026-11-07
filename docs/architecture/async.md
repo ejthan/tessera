@@ -94,3 +94,22 @@ GPUI: throttle task ◀── watch ──────────────�
 - **Redraws.** Only the jobs panel observes `Jobs`. The root subscribes to `RunningChanged`, which fires when the count changes, and renders the count it keeps: reading `Jobs` in a render would redraw the window on every progress update.
 - **Reindex copy.** A reindex copies a collection as two ordinary jobs, an export to `documents.jsonl` in a private temp directory and then an import of that file, not as one stream from export into import. The server ends an export whose reader stalls for 50 to 70 s (M6 design §4.5), and one import batch with a remote embedding model takes longer than that. `ReindexState` lives in `ConnectionState`, subscribes to `JobFinished` and so goes on with the tab closed. It holds the directory, drops it off the GPUI thread as soon as the import ends in any way, and tells its job to stop on quit before dropping it, because on Windows a file still open leaves the directory behind. Directories a crash left, or a quit cut short, are removed off the GPUI thread at a start more than a day later.
 - **Quit** has no veto. A handler registered with the first job stops every job and waits for a `oneshot` per job, for at most GPUI's `SHUTDOWN_TIMEOUT` (200 ms), so an export can remove its part file. The foreground executor stands still meanwhile, so the backend future runs on the background executor and fires the `oneshot` from there. An import's batch in flight may still finish on the server. A hard kill leaves a `.part` file beside the target.
+
+## Backup and restore
+
+A backup and a restore each run as one job, with one `watch` of its step, not as a job per collection.
+
+```
+Jobs ──▶ backend future on tokio ──▶ run_backup or run_restore ──▶ for each collection:
+                  │                                                  run_export or run_import
+                  │                                                  (a forwarder copies its progress)
+GPUI: throttle task ◀── watch of BackupProgress or RestoreProgress
+      outcome task  ◀── background task awaiting the backend future
+```
+
+- **Same parts as a job.** `Jobs::start_backup` and `start_restore` go through `start`, so throttle, ownership, Stop and Quit are those above. Reads and writes of files run in `spawn_blocking`: tar, hashing, and each file of a verify and a load.
+- **Stages before the run.** The Restore view opens a backup in four steps off the GPUI thread, unpack, verify, load and plan, each through `TransferBackend`, under a `JobControl` of its own, so Stop ends them. Only the plan touches the server.
+- **The plan comes twice.** `run_restore` reads the server again before the first write and plans anew: what the user saw may be old. A name that appeared or a reference that lost its target ends the run with nothing written. Rows approved as Differs travel with the job, so a row that came to differ since is kept.
+- **Order.** Stopwords and sets, then collections with referenced ones first, aliases last, except an alias a reference needs, which is written before that import.
+- **A failure ends the run.** What was done stays and is listed per row, and `to_delete` names what stands in the way of a retry. The first error of a row stays typed, so the app words it and can tell a disconnect.
+- **Temp directories.** A backup to an archive writes into a temp directory and reports it in its progress. An unpacked archive and a reindex copy are `Arc<TempDir>`s, registered with `Jobs::hold_temp`. The view and the job each hold one, so the directory lasts as long as either needs it, and Clear cache leaves what `Jobs::held_temps` names. What a crash leaves goes after a day through `sweep_copies`.

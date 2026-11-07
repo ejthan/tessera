@@ -48,6 +48,7 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 url = "=2.5.8"
 uuid = { version = "=1.29.0", features = ["v4", "serde"] }
 wiremock = "=0.6.5"
+zeroize = "=1.9.1"
 zstd = { version = "=0.14.3", default-features = false }
 
 [workspace.lints.rust]

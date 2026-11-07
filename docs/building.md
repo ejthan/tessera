@@ -132,6 +132,15 @@ Nothing here has been done yet: the views are covered by UI tests with fakes and
 8. A backup of a collection with an embedding key: the row stays blocked and names the two files to use. Follow that text by hand once: create the collection with its keys, then import the JSON Lines file.
 9. A read-only profile: a backup needs no unlock, and a restore unlocks first.
 
+10. Settings, ⌘, (Ctrl+,): Tab reaches each control at the smallest window, in light and in dark. The update check is off; with it on and a published release, a restart shows the result and, for a newer version, one toast. A firewall log shows `api.github.com` and nothing else.
+11. Open logs, ⌥⌘L (Ctrl+Alt+L), shows the log folder, and the folder is `0700` on macOS and Linux. Clear cache asks first and says how many went.
+12. Change the language with a table open: the column titles follow, and resized columns go back. Close and reopen a masked input to see it follow.
+13. Drag the sidebar and the bottom dock, open Jobs, quit and start: sizes and the tab come back.
+14. Each empty state in light and in dark: Jobs, API stats, saved queries, the request log, and their links.
+
+15. Record the Linux release binary size from the CI job (NF5, below 41,943,040 bytes). At the close of M8 the macOS arm64 release binary is 28,868,288 bytes, stripped, built with `cargo build --release -p tessera-app`.
+16. Run every `live_*` test on 30.0 and 30.2 and the cluster test on the last commit of M8. They could not run at its close, because Docker stopped answering. The steps are under Tests, and the job `integration` in `.github/workflows/ci.yml` runs most of them.
+
 ## Manual checks of keys, analytics and AI (M7)
 
 Nothing here has been done yet: the views are covered by UI tests with fakes and the client and core by live tests, and none of it has been looked at. Run against the dev server after `cargo run -p xtask -- seed --url http://localhost:18108 --key xyz --reset`. For the analytics steps the server needs its flags: recreate it once with `TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d`, the volume stays. Record the result in the PR description.
