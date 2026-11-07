@@ -80,21 +80,33 @@ fn apply_theme(name: &str, window: &mut Window, cx: &mut App) {
 }
 
 /// Raises the colors of the kit that miss WCAG AA, for text at 4.5:1 and for the focus ring
-/// at 3:1. `ui_a11y` measures each pair.
+/// at 3:1, in the built-in themes; a theme of the registry keeps what its author set.
+/// `ui_a11y` measures each pair.
 pub fn aa_colors(colors: &mut ThemeColor, dark: bool) {
     let hex = |value: u32| Hsla::from(rgb(value));
     if dark {
+        colors.danger_hover = hex(0xfca5a5);
+        colors.danger_active = hex(0xf56565);
         colors.danger_foreground = hex(0x450a0a);
+        colors.success_hover = hex(0x86efac);
+        colors.success_active = hex(0x22c55e);
         colors.success_foreground = hex(0x052e16);
+        colors.warning_hover = hex(0xfde047);
+        colors.warning_active = hex(0xeab308);
         colors.warning_foreground = hex(0x422006);
     } else {
         colors.muted_foreground = hex(0x525252);
         colors.danger = hex(0xb91c1c);
         colors.danger_hover = hex(0x991b1b);
+        colors.danger_active = hex(0x7f1d1d);
         colors.danger_foreground = hex(0xffffff);
         colors.success = hex(0x15803d);
+        colors.success_hover = hex(0x166534);
+        colors.success_active = hex(0x14532d);
         colors.success_foreground = hex(0xffffff);
         colors.warning = hex(0xa16207);
+        colors.warning_hover = hex(0x854d0e);
+        colors.warning_active = hex(0x713f12);
         colors.warning_foreground = hex(0xffffff);
         colors.ring = hex(0x737373);
     }
@@ -106,11 +118,23 @@ fn apply_appearance(settings: &Settings, window: &mut Window, cx: &mut App) {
     apply_theme(&settings.theme, window, cx);
     let kit = cx.global::<KitFontSize>().0;
     let size = settings.font_size.map_or(kit, |n| px(n as f32));
+    let built_in = built_in(&settings.theme, cx);
     Theme::update(cx, |theme| {
         theme.font_size = size;
-        let dark = theme.mode.is_dark();
-        aa_colors(&mut theme.colors, dark);
+        if built_in {
+            let dark = theme.mode.is_dark();
+            aa_colors(&mut theme.colors, dark);
+        }
     });
+}
+
+/// Whether `name` ends on one of the kit's two default themes.
+fn built_in(name: &str, cx: &App) -> bool {
+    matches!(name, "system" | "light" | "dark")
+        || ThemeRegistry::global(cx)
+            .themes()
+            .get(name)
+            .is_none_or(|config| config.is_default)
 }
 
 /// Whether `name` leaves the mode to the system: `system`, or a theme that was removed.

@@ -202,6 +202,8 @@ No change.
 | Dark | `success_foreground` | `#16a34a` | `#052e16` | 8.55 on `#4ade80` |
 | Dark | `warning_foreground` | `#ca8a04` | `#422006` | 9.52 on `#facc15` |
 
+The table holds for the built-in themes alone: `aa_colors` skips a theme of the registry. The hover and active states of `danger`, `success` and `warning` move with them, also in dark, and `ui_a11y` measures each.
+
 `PROD_RED` stays `#DC2626`: white on it reads 4.83.
 
 ### 7.2 Names and focus

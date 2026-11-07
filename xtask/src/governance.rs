@@ -2,8 +2,9 @@
 
 //! `cargo xtask governance` and `cargo xtask dco`: what keeps the repository in order.
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 use crate::i18n::{flat_keys, rust_files};
 
@@ -25,14 +26,16 @@ const REQUIRED: [&str; 11] = [
 
 /// Every problem of the tree at `root`, one string each.
 pub fn check(root: &Path) -> Vec<String> {
-    let read = |path: &str| std::fs::read_to_string(root.join(path)).ok();
+    let read = |path: &str| std::fs::read_to_string(root.join(path));
     let mut problems = Vec::new();
 
     for file in REQUIRED.iter().filter(|f| !root.join(f).is_file()) {
         problems.push(format!("{file} is missing"));
     }
-    let holds = |path: &str, needles: &[&str]| {
-        read(path).is_none_or(|text| needles.iter().all(|n| text.contains(n)))
+    // A file that is missing is reported above; one that cannot be read does not hold.
+    let holds = |path: &str, needles: &[&str]| match read(path) {
+        Ok(text) => needles.iter().all(|n| text.contains(n)),
+        Err(e) => e.kind() == ErrorKind::NotFound,
     };
     if !holds(
         "LICENSE",
@@ -53,7 +56,11 @@ pub fn check(root: &Path) -> Vec<String> {
         problems.push("README.md lacks the trademark notice".to_string());
     }
 
-    let locale = flat_keys(&read("assets/locales/en.yml").unwrap_or_default());
+    let locale = flat_keys(&read_or_report(
+        &root.join("assets/locales/en.yml"),
+        root,
+        &mut problems,
+    ));
     if !locale
         .get("welcome.trademark")
         .is_some_and(|v| v.contains(NOTICE))
@@ -69,8 +76,12 @@ pub fn check(root: &Path) -> Vec<String> {
     }
 
     for dir in ["crates", "xtask"] {
-        for path in rust_files(&root.join(dir)).unwrap_or_default() {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let files = rust_files(&root.join(dir)).unwrap_or_else(|e| {
+            problems.push(format!("cannot read {dir}: {e}"));
+            Vec::new()
+        });
+        for path in files {
+            let text = read_or_report(&path, root, &mut problems);
             if text.lines().next() != Some(SPDX) {
                 let file = path.strip_prefix(root).unwrap_or(&path);
                 problems.push(format!("{} has no SPDX line first", file.display()));
@@ -78,28 +89,26 @@ pub fn check(root: &Path) -> Vec<String> {
         }
     }
 
-    let manifest = read("Cargo.toml").unwrap_or_default();
+    let manifest = read_or_report(&root.join("Cargo.toml"), root, &mut problems);
     let mut pinned_here = BTreeSet::new();
-    for (name, value) in dependency_lines(&manifest, |section| section == "workspace.dependencies")
-    {
-        if !value.contains("path =") && !value.contains("\"=") {
+    for (name, value) in dependencies(&manifest, |section| section == "workspace.dependencies") {
+        let tight = value.replace(' ', "");
+        if !tight.contains("path=") && !tight.contains("\"=") {
             problems.push(format!(
                 "workspace dependency `{name}` is not pinned with `=`"
             ));
         }
         pinned_here.insert(name);
     }
-    let crates = std::fs::read_dir(root.join("crates"))
-        .into_iter()
-        .flatten()
-        .flatten();
-    let manifests = crates
-        .map(|e| e.path().join("Cargo.toml"))
-        .chain([root.join("xtask/Cargo.toml")]);
+    let mut manifests = vec![root.join("xtask/Cargo.toml")];
+    match crate_dirs(&root.join("crates")) {
+        Ok(dirs) => manifests.extend(dirs.into_iter().map(|d| d.join("Cargo.toml"))),
+        Err(e) => problems.push(format!("cannot read crates: {e}")),
+    }
     for path in manifests {
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
-        for (name, value) in dependency_lines(&text, |section| section.ends_with("dependencies")) {
-            if pinned_here.contains(name) && !value.contains("workspace") {
+        let text = read_or_report(&path, root, &mut problems);
+        for (name, value) in dependencies(&text, |section| section.ends_with("dependencies")) {
+            if pinned_here.contains(&name) && !value.contains("workspace") {
                 let file = path.strip_prefix(root).unwrap_or(&path);
                 problems.push(format!(
                     "{} names its own version of `{name}`",
@@ -111,24 +120,57 @@ pub fn check(root: &Path) -> Vec<String> {
     problems
 }
 
-/// The `name = value` lines of the sections `wanted` accepts.
-fn dependency_lines(
-    manifest: &str,
-    wanted: impl Fn(&str) -> bool,
-) -> impl Iterator<Item = (&str, &str)> {
+/// The text of `path`. A read error is a problem and yields nothing.
+fn read_or_report(path: &Path, root: &Path, problems: &mut Vec<String>) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| {
+        let file = path.strip_prefix(root).unwrap_or(path);
+        problems.push(format!("cannot read {}: {e}", file.display()));
+        String::new()
+    })
+}
+
+/// The directories in `dir`.
+fn crate_dirs(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut dirs = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            dirs.push(entry.path());
+        }
+    }
+    Ok(dirs)
+}
+
+/// What the sections `wanted` accepts declare, per dependency: its value, or the joined
+/// `key = value` parts of a `[section.name]` table and of `name.key = value` lines.
+fn dependencies(manifest: &str, wanted: impl Fn(&str) -> bool) -> BTreeMap<String, String> {
+    let mut found = BTreeMap::<String, String>::new();
+    let mut add = |name: &str, value: &str| {
+        let parts = found.entry(name.trim().to_string()).or_default();
+        parts.push_str(value.trim());
+        parts.push(' ');
+    };
+    // The section's dependencies are its lines; a table's lines belong to one dependency.
     let mut inside = false;
-    manifest.lines().filter_map(move |line| {
-        let line = line.trim();
+    let mut table: Option<String> = None;
+    for line in manifest.lines().map(str::trim) {
         if let Some(section) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             inside = wanted(section);
-            return None;
+            table = section
+                .rsplit_once('.')
+                .filter(|(parent, _)| wanted(parent))
+                .map(|(_, name)| name.to_string());
+        } else if line.starts_with('#') || !line.contains('=') {
+        } else if let Some(name) = &table {
+            add(name, line);
+        } else if inside && let Some((key, value)) = line.split_once('=') {
+            match key.split_once('.') {
+                Some((name, part)) => add(name, &format!("{part} = {value}")),
+                None => add(key, value),
+            }
         }
-        if !inside || line.starts_with('#') {
-            return None;
-        }
-        line.split_once('=')
-            .map(|(name, value)| (name.trim(), value.trim()))
-    })
+    }
+    found
 }
 
 /// The short hashes in `log` without a `Signed-off-by` line. `log` is the output of
@@ -306,6 +348,67 @@ mod tests {
         let manifest = "[workspace.dependencies]\nother = { path = \"crates/other\" }\n";
         write(dir.path(), "Cargo.toml", manifest);
         assert_eq!(check(dir.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_path_without_spaces_passes() {
+        let dir = valid();
+        let manifest = "[workspace.dependencies]\nother = { path=\"crates/other\" }\n";
+        write(dir.path(), "Cargo.toml", manifest);
+        assert_eq!(check(dir.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn table_and_dotted_workspace_dependencies_are_seen() {
+        for manifest in [
+            "[workspace.dependencies.foo]\nversion = \"1\"\nfeatures = [\"a\"]\n",
+            "[workspace.dependencies]\nfoo.version = \"1\"\n",
+        ] {
+            let dir = valid();
+            write(dir.path(), "Cargo.toml", manifest);
+            one_problem(&dir, "`foo` is not pinned");
+        }
+        let dir = valid();
+        let manifest = "[workspace.dependencies.foo]\nversion = \"=1\"\n\n[workspace]\nx = 1\n";
+        write(dir.path(), "Cargo.toml", manifest);
+        assert_eq!(check(dir.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_crate_table_or_dotted_version_of_a_pinned_dependency_is_a_problem() {
+        for dependency in [
+            "[dependencies.anyhow]\nversion = \"1\"\n",
+            "[dependencies]\nanyhow.version = \"1\"\n",
+        ] {
+            let dir = valid();
+            write(dir.path(), "xtask/Cargo.toml", dependency);
+            one_problem(&dir, "xtask/Cargo.toml names its own version of `anyhow`");
+        }
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_a_problem() {
+        let invalid: &[u8] = &[0xff, 0xfe];
+        for file in [
+            "Cargo.toml",
+            "xtask/Cargo.toml",
+            "crates/tessera-core/Cargo.toml",
+            "crates/tessera-core/src/lib.rs",
+            "assets/locales/en.yml",
+            "README.md",
+        ] {
+            let dir = valid();
+            std::fs::write(dir.path().join(file), invalid).expect("write");
+            let problems = check(dir.path());
+            assert!(!problems.is_empty(), "{file}");
+        }
+        let dir = valid();
+        std::fs::remove_file(dir.path().join("Cargo.toml")).expect("remove");
+        one_problem(&dir, "cannot read Cargo.toml");
+        let dir = valid();
+        std::fs::remove_dir_all(dir.path().join("crates")).expect("remove");
+        let problems = check(dir.path());
+        assert!(problems.iter().any(|p| p.contains("cannot read crates")));
     }
 
     #[test]

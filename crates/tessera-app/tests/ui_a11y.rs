@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use gpui_kit::base::Root;
 use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, Hsla, Rgba, Role, TestAppContext, Window,
@@ -101,6 +101,42 @@ fn assert_aa(theme: &Theme, name: &str) {
             4.5,
         ),
         (
+            "danger_foreground on danger_hover",
+            theme.danger_foreground,
+            theme.danger_hover,
+            4.5,
+        ),
+        (
+            "danger_foreground on danger_active",
+            theme.danger_foreground,
+            theme.danger_active,
+            4.5,
+        ),
+        (
+            "success_foreground on success_hover",
+            theme.success_foreground,
+            theme.success_hover,
+            4.5,
+        ),
+        (
+            "success_foreground on success_active",
+            theme.success_foreground,
+            theme.success_active,
+            4.5,
+        ),
+        (
+            "warning_foreground on warning_hover",
+            theme.warning_foreground,
+            theme.warning_hover,
+            4.5,
+        ),
+        (
+            "warning_foreground on warning_active",
+            theme.warning_foreground,
+            theme.warning_active,
+            4.5,
+        ),
+        (
             "primary_foreground",
             theme.primary_foreground,
             theme.primary,
@@ -152,6 +188,42 @@ async fn both_themes_meet_aa_also_after_a_system_change(cx: &mut TestAppContext)
         appearance_changed(&large, window, cx);
         assert_eq!(cx.theme().font_size, px(18.));
         assert_aa(cx.theme(), "large font");
+    })
+    .unwrap();
+}
+
+/// `color` as `0xrrggbb`.
+fn rgb_of(color: Hsla) -> u32 {
+    let color = Rgba::from(color);
+    let byte = |c: f32| (c * 255.0).round() as u32;
+    byte(color.r) << 16 | byte(color.g) << 8 | byte(color.b)
+}
+
+#[gpui_kit::test]
+async fn a_theme_of_the_registry_keeps_its_colors(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        ThemeRegistry::global_mut(cx)
+            .load_themes_from_str(
+                r##"{"name":"t","themes":[
+                    {"name":"Soft","mode":"light","colors":{
+                        "danger.background":"#ff0000",
+                        "muted.foreground":"#888888",
+                        "ring":"#00ff00"}},
+                    {"name":"Deep","mode":"dark","colors":{
+                        "danger.background":"#7f0000",
+                        "danger.foreground":"#ffffff"}}]}"##,
+            )
+            .unwrap();
+        apply(&themed("Soft"), window, cx);
+        assert_eq!(rgb_of(cx.theme().danger), 0xff0000);
+        assert_eq!(rgb_of(cx.theme().muted_foreground), 0x888888);
+        assert_eq!(rgb_of(cx.theme().ring), 0x00ff00);
+        apply(&themed("Deep"), window, cx);
+        assert_eq!(rgb_of(cx.theme().danger_foreground), 0xffffff);
+        // Back on a built-in theme, the fixes return.
+        apply(&themed("dark"), window, cx);
+        assert_aa(cx.theme(), "dark after a registry theme");
     })
     .unwrap();
 }

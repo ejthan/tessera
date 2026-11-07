@@ -88,6 +88,22 @@ pub fn run(root: &Path) -> anyhow::Result<Vec<Finding>> {
         }
     }
 
+    for key in same {
+        let line = same_text.lines().position(|l| l.trim() == key).unwrap_or(0) + 1;
+        let stale = match (en.get(key), de.get(key)) {
+            (None, _) => Some("is in no locale file"),
+            (Some(a), Some(b)) if a != b => Some("differs in de.yml"),
+            _ => None,
+        };
+        if let Some(stale) = stale {
+            report(
+                SAME,
+                line,
+                format!("`{key}` {stale}: remove it from {SAME}"),
+            );
+        }
+    }
+
     for path in rust_files(&root.join("crates"))? {
         let source = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
@@ -144,7 +160,11 @@ pub fn placeholders(value: &str) -> BTreeSet<&str> {
 /// Letter-bearing literals in a UI position, as `(line, literal)`.
 pub fn sink_literals(source: &str) -> Vec<(usize, String)> {
     let lines: Vec<&str> = source.lines().collect();
-    let end = source.find("#[cfg(test)]").unwrap_or(source.len());
+    // Only a test module ends the code: `#[cfg(test)]` on one item leaves what follows in.
+    let end = source
+        .match_indices("#[cfg(test)]")
+        .find(|(at, attr)| source[at + attr.len()..].trim_start().starts_with("mod "))
+        .map_or(source.len(), |(at, _)| at);
     let code = blank(&source[..end], false);
     let bare = blank(&source[..end], true);
     let mut hits = Vec::new();
@@ -427,6 +447,14 @@ mod tests {
     }
 
     #[test]
+    fn a_test_attribute_on_one_item_cuts_nothing() {
+        let source = "#[cfg(test)]\nfn helper() {}\nx.child(\"Real\")\n";
+        assert_eq!(found(source), [(3, "Real".to_string())]);
+        let source = "#[cfg(test)]\n\nmod tests { y.child(\"Save\") }\n";
+        assert_eq!(found(source), []);
+    }
+
+    #[test]
     fn comments_are_skipped_and_a_url_is_no_comment() {
         assert!(found("// x.child(\"Save\")\n").is_empty());
         assert!(found("/* x.child(\"Save\") */\n").is_empty());
@@ -609,6 +637,20 @@ mod tests {
             got[0].contains("view.rs:2") && got[0].contains("Oops"),
             "{got:?}"
         );
+    }
+
+    #[test]
+    fn a_stale_entry_of_the_same_list_is_reported() {
+        let dir = tree(
+            "a: \"Status\"\nb: \"Save\"\n",
+            "a: \"Status\"\nb: \"Sichern\"\n",
+            "# same in both\na\nb\ngone\n",
+            "",
+        );
+        let got = messages(&dir);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got[0].contains("i18n-same.txt:3") && got[0].contains("`b` differs"));
+        assert!(got[1].contains("i18n-same.txt:4") && got[1].contains("`gone` is in no"));
     }
 
     #[test]
