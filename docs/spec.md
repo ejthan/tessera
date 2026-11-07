@@ -816,7 +816,7 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D110 | Where do the user docs live? | `book/`, mdBook 0.5.4, English, deployed to Pages by a workflow. The app does not link to it until it is published (UX rule 4) |
 | D111 | When does the version become 1.0.0? | In M9's last task, so artifacts carry it. The tag, the release date in the CHANGELOG and everything published stay with the maintainer |
 | D112 | Spec points that do not hold as written | Uptime: no endpoint offers it. Undo hint: nothing on a server can be undone. `xtask spec-fetch`: refreshing the vendored file stays a hand step, with the commit in its header. `assets/themes` and `dev/seed`: nothing goes there. `history.jsonl`: capped, not rotated. A GPUI scroll benchmark does not exist |
-| D113 | Open: do the kit's filled `Button::danger`, `success` and `warning` get AA colors? | Not decided. They draw with `button_danger`, `button_danger_foreground` and the like, which the kit derives when a theme loads, so `aa_colors` does not reach them, and `ui_a11y` does not measure them. In the light theme the text reads about 2.9, 1.9 and 1.7 on its tint (computed with a 20 % tint, not measured in a window) |
+| D113 | Do the kit's filled `Button::danger`, `success` and `warning` get AA colors? | Yes, in the built-in themes. The kit fills them with a tint of 20 to 40 % and takes the text from `button_danger_foreground` and the like, which read about 2.9, 1.9 and 1.7 in the light theme. `aa_colors` sets these tokens, hover and active included, to the solid `danger`, `success` and `warning` pairs, so a filled button is solid now. `ui_a11y` measures each state. A theme of the registry keeps its colors |
 
 ---
 

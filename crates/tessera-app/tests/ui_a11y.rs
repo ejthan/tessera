@@ -143,6 +143,61 @@ fn assert_aa(theme: &Theme, name: &str) {
             4.5,
         ),
         ("ring", theme.ring, window, 3.0),
+        // The kit fills a button from these tokens and takes its text from `colors`.
+        (
+            "button_danger",
+            theme.button_danger_foreground,
+            theme.tokens.button_danger.color,
+            4.5,
+        ),
+        (
+            "button_danger_hover",
+            theme.button_danger_foreground,
+            theme.tokens.button_danger_hover.color,
+            4.5,
+        ),
+        (
+            "button_danger_active",
+            theme.button_danger_foreground,
+            theme.tokens.button_danger_active.color,
+            4.5,
+        ),
+        (
+            "button_success",
+            theme.button_success_foreground,
+            theme.tokens.button_success.color,
+            4.5,
+        ),
+        (
+            "button_success_hover",
+            theme.button_success_foreground,
+            theme.tokens.button_success_hover.color,
+            4.5,
+        ),
+        (
+            "button_success_active",
+            theme.button_success_foreground,
+            theme.tokens.button_success_active.color,
+            4.5,
+        ),
+        (
+            "button_warning",
+            theme.button_warning_foreground,
+            theme.tokens.button_warning.color,
+            4.5,
+        ),
+        (
+            "button_warning_hover",
+            theme.button_warning_foreground,
+            theme.tokens.button_warning_hover.color,
+            4.5,
+        ),
+        (
+            "button_warning_active",
+            theme.button_warning_foreground,
+            theme.tokens.button_warning_active.color,
+            4.5,
+        ),
     ];
     for (pair, fg, bg, least) in pairs {
         let ratio = contrast(fg, bg, window);

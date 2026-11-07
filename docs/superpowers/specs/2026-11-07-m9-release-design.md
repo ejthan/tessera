@@ -204,6 +204,8 @@ No change.
 
 The table holds for the built-in themes alone: `aa_colors` skips a theme of the registry. The hover and active states of `danger`, `success` and `warning` move with them, also in dark, and `ui_a11y` measures each.
 
+Filled buttons (D113) draw from `button_danger`, `button_success`, `button_warning` and their hover, active and foreground tokens. `aa_colors` sets them to the solid pairs above in both themes, and `ui_a11y` measures each.
+
 `PROD_RED` stays `#DC2626`: white on it reads 4.83.
 
 ### 7.2 Names and focus

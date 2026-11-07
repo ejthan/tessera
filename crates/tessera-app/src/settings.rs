@@ -110,6 +110,19 @@ pub fn aa_colors(colors: &mut ThemeColor, dark: bool) {
         colors.warning_foreground = hex(0xffffff);
         colors.ring = hex(0x737373);
     }
+    // Filled buttons: the kit's tint misses 4.5:1, so they take the solid pairs above.
+    colors.button_danger = colors.danger;
+    colors.button_danger_hover = colors.danger_hover;
+    colors.button_danger_active = colors.danger_active;
+    colors.button_danger_foreground = colors.danger_foreground;
+    colors.button_success = colors.success;
+    colors.button_success_hover = colors.success_hover;
+    colors.button_success_active = colors.success_active;
+    colors.button_success_foreground = colors.success_foreground;
+    colors.button_warning = colors.warning;
+    colors.button_warning_hover = colors.warning_hover;
+    colors.button_warning_active = colors.warning_active;
+    colors.button_warning_foreground = colors.warning_foreground;
 }
 
 /// Applies the theme, then the font size, which a theme file can set too, and the contrast
