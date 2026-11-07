@@ -116,6 +116,7 @@ gpui_kit::actions!(
         QuickSwitch,
         ToggleJobs,
         ShowLastFailure,
+        NewWindow,
         CancelJob,
         DismissJob,
         SaveReport,
@@ -607,6 +608,10 @@ const TOGGLE_JOBS: &str = "cmd-shift-j";
 #[cfg(not(target_os = "macos"))]
 const TOGGLE_JOBS: &str = "ctrl-shift-j";
 #[cfg(target_os = "macos")]
+const NEW_WINDOW: &str = "alt-cmd-n";
+#[cfg(not(target_os = "macos"))]
+const NEW_WINDOW: &str = "ctrl-alt-n";
+#[cfg(target_os = "macos")]
 const SHOW_LAST_FAILURE: &str = "alt-cmd-r";
 #[cfg(not(target_os = "macos"))]
 const SHOW_LAST_FAILURE: &str = "ctrl-alt-r";
@@ -753,6 +758,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     QuickSwitch,
     ToggleJobs,
     ShowLastFailure,
+    NewWindow,
     CancelJob,
     DismissJob,
     SaveReport,
@@ -890,6 +896,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(TOGGLE_LOG, ToggleRequestLog, None),
         KeyBinding::new(TOGGLE_JOBS, ToggleJobs, None),
         KeyBinding::new(SHOW_LAST_FAILURE, ShowLastFailure, None),
+        KeyBinding::new(NEW_WINDOW, NewWindow, None),
         // Global, so the selected log entry can be copied wherever focus is.
         KeyBinding::new(COPY_CURL, CopyAsCurl, None),
         // The dock's own actions, handled by the tab group that holds focus.

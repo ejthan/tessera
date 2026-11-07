@@ -90,6 +90,12 @@ pub fn open_state_at(
     secrets: Arc<dyn SecretStore>,
 ) -> (WindowHandle<Root>, Entity<AppState>) {
     cx.update(|cx| {
+        // A test that opens twice has two states; an open must not target the other's window.
+        for window in cx.windows() {
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        }
         gpui_kit::init(cx);
         gpui_kit::component::set_locale("en");
         tessera_app::actions::bind_keys(cx);
@@ -113,7 +119,7 @@ pub fn open_state_at(
                 ..Default::default()
             },
             cx,
-            |window, cx| cx.new(|cx| RootView::new(root_state, window, cx)),
+            |window, cx| cx.new(|cx| RootView::new(root_state, true, window, cx)),
         )
         .expect("open test window");
         (window.downcast::<Root>().expect("Base Root"), state)

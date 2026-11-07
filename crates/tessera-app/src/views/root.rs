@@ -15,9 +15,9 @@ use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
-    prelude::*, px, rgb,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window,
+    div, prelude::*, px, rgb,
 };
 use rust_i18n::t;
 use tessera_core::layout::{BottomTab, Layout};
@@ -34,10 +34,10 @@ use super::request_log::RequestLogPanel;
 use super::settings::SettingsDialog;
 use super::{env_badge, status_bar};
 use crate::actions::{
-    CopyAsCurl, NewConnection, OpenAi, OpenAliases, OpenAnalytics, OpenBackup, OpenConsoleTab,
-    OpenCurations, OpenKeys, OpenOperations, OpenPalette, OpenPresetsTab, OpenSearchTab,
-    OpenSettings, OpenStemming, OpenStopwords, OpenSynonyms, QuickSwitch, ShowLastFailure,
-    ToggleJobs, ToggleRequestLog,
+    CopyAsCurl, NewConnection, NewWindow, OpenAi, OpenAliases, OpenAnalytics, OpenBackup,
+    OpenConsoleTab, OpenCurations, OpenKeys, OpenOperations, OpenPalette, OpenPresetsTab,
+    OpenSearchTab, OpenSettings, OpenStemming, OpenStopwords, OpenSynonyms, QuickSwitch,
+    ShowLastFailure, ToggleJobs, ToggleRequestLog,
 };
 use crate::connection::ConnectionState;
 use crate::jobs::{JobFinished, JobId, JobKind, Jobs, JobsGlobal, RunningChanged};
@@ -58,6 +58,8 @@ const LAYOUT_SAVE_DELAY: Duration = Duration::from_millis(500);
 pub struct RootView {
     focus_handle: FocusHandle,
     state: Entity<AppState>,
+    /// Whether this window keeps the layout.
+    primary: bool,
     dock: Entity<DockArea>,
     welcome: Entity<WelcomePanel>,
     log: Entity<RequestLogPanel>,
@@ -77,6 +79,26 @@ pub struct RootView {
     _subscriptions: Vec<Subscription>,
 }
 
+/// The window for what belongs to the app and to no window: the active one, or the first.
+fn front_window(cx: &App) -> Option<AnyWindowHandle> {
+    let windows = cx.windows();
+    let active = cx.active_window().filter(|window| windows.contains(window));
+    active.or(windows.first().copied())
+}
+
+/// Whether `window` is the one to act on connection `id`: its owner when it has one, which
+/// comes forward, otherwise the front window. Every window hears every open.
+fn targeted(state: &Entity<AppState>, id: Uuid, window: &Window, cx: &App) -> bool {
+    let owner = state.read(cx).window_of(id);
+    if owner.or_else(|| front_window(cx)) != Some(window.window_handle()) {
+        return false;
+    }
+    if owner.is_some() && !window.is_window_active() {
+        window.activate_window();
+    }
+    true
+}
+
 /// What the status bar counts.
 fn count_running(jobs: &Jobs) -> Option<usize> {
     (!jobs.jobs().is_empty()).then(|| jobs.running())
@@ -84,7 +106,13 @@ fn count_running(jobs: &Jobs) -> Option<usize> {
 
 impl RootView {
     /// Builds the view and keeps the theme in sync with the system appearance.
-    pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// Only the `primary` window restores and saves the layout and checks for updates.
+    pub fn new(
+        state: Entity<AppState>,
+        primary: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         settings::apply(&state.read(cx).settings.clone(), window, cx);
         let (dock, skin) = DockSkin::dock_area("tessera", None, window, cx);
         skin.set_close_button_visible(true, cx);
@@ -92,7 +120,11 @@ impl RootView {
         let log = cx.new(|cx| RequestLogPanel::new(state.clone(), window, cx));
         let jobs = cx.new(|cx| JobsPanel::new(state.clone(), window, cx));
         let welcome = cx.new(|cx| WelcomePanel::new(state.clone(), cx));
-        let layout = state.read(cx).layout.clone();
+        let layout = if primary {
+            state.read(cx).layout.clone()
+        } else {
+            Layout::default()
+        };
         dock.update(cx, |area, cx| {
             let tabs = |panel| DockLayout::tabs().panel_view(panel, cx);
             let (left, bottom, center) = (
@@ -113,12 +145,17 @@ impl RootView {
             }
             area.set_center(center, window, cx);
         });
-        if state.read(cx).settings.update_check {
+        if primary && state.read(cx).settings.update_check {
             state.update(cx, |s, cx| s.check_for_update(cx));
         }
         let job_list = cx.global::<JobsGlobal>().0.clone();
         let running_jobs = count_running(job_list.read(cx));
-        let subscriptions = vec![
+        let handle = window.window_handle();
+        let mut subscriptions = vec![
+            cx.on_release(move |this, cx| {
+                this.state
+                    .update(cx, |s, _| s.retain_window_of(handle, |_| false));
+            }),
             cx.subscribe(&job_list, |this, jobs, _: &RunningChanged, cx| {
                 this.running_jobs = count_running(jobs.read(cx));
                 cx.notify();
@@ -137,31 +174,42 @@ impl RootView {
                 cx.notify();
             }),
             cx.subscribe_in(&state, window, |_, _, event: &UpdateFound, window, cx| {
-                let text = t!("settings.update.toast", version = event.0.as_str());
-                window.push_notification(text.to_string(), cx);
+                if front_window(cx) == Some(window.window_handle()) {
+                    let text = t!("settings.update.toast", version = event.0.as_str());
+                    window.push_notification(text.to_string(), cx);
+                }
             }),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &OpenOverview, window, cx| {
-                    this.open_tab(event.0, Kind::Overview, window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Overview, window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &OpenCollections, window, cx| {
-                    this.open_tab(event.0, Kind::Collections, window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Collections, window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &OpenCollection, window, cx| {
-                    this.open_tab(event.0, Kind::Collection(event.1.clone()), window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Collection(event.1.clone()), window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(&state, window, |this, _, event: &OpenSearch, window, cx| {
+                if !targeted(&this.state, event.0, window, cx) {
+                    return;
+                }
                 this.open_tab(event.0, Kind::Search, window, cx);
                 let Some((drafts, union)) = event.1.clone() else {
                     return;
@@ -181,38 +229,50 @@ impl RootView {
                 &state,
                 window,
                 |this, _, event: &OpenConsole, window, cx| {
-                    this.open_tab(event.0, Kind::Console, window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Console, window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &OpenResource, window, cx| {
-                    this.open_tab(event.0, Kind::Resource(event.1), window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Resource(event.1), window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &OpenReindex, window, cx| {
-                    this.open_tab(event.0, Kind::Reindex(event.1.clone()), window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Reindex(event.1.clone()), window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &CloseCollection, window, cx| {
-                    this.close_collection_tab(event.0, &event.1, window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.close_collection_tab(event.0, &event.1, window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, window, cx| {
                 if matches!(event, DockEvent::LayoutChanged) {
                     this.layout_changed(window, cx);
-                    this.save_layout_soon(cx);
+                    if this.primary {
+                        this.save_layout_soon(cx);
+                    }
                 }
             }),
+        ];
+        if primary {
             // Quitting drops a save still waiting out `LAYOUT_SAVE_DELAY`, so it is written here.
-            cx.on_app_quit(|this, cx| {
+            subscriptions.push(cx.on_app_quit(|this, cx| {
                 let layout = this.current_layout(cx);
                 let changed = layout != this.state.read(cx).layout;
                 let write =
@@ -222,13 +282,14 @@ impl RootView {
                         write.await;
                     }
                 }
-            }),
-        ];
+            }));
+        }
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         Self {
             focus_handle,
             state,
+            primary,
             dock,
             welcome,
             log,
@@ -447,6 +508,10 @@ impl RootView {
 
     /// A job ending is a background event, so it is the one toast, unless its tab is on screen.
     fn job_finished(&mut self, id: JobId, window: &mut Window, cx: &mut Context<Self>) {
+        // Every window hears this; one reloads, and one toast shows.
+        if front_window(cx) != Some(window.window_handle()) {
+            return;
+        }
         self.reload_after(id, cx);
         if self.bottom_shows(self.jobs_id(), cx) {
             return;
@@ -610,6 +675,9 @@ impl RootView {
             area.select_panel(id, window, cx);
             id
         });
+        let handle = window.window_handle();
+        self.state
+            .update(cx, |s, _| s.set_window_of(id, Some(handle)));
         // Set here, not from the layout event: selecting a displayed tab changes no layout.
         self.displayed = self.displayed_tabs(cx);
         self.set_active(Some(panel), cx);
@@ -732,6 +800,15 @@ impl RootView {
             .or(displayed.first())
             .copied();
         self.displayed = displayed;
+        let open: Vec<Uuid> = self
+            .connection_tabs(cx)
+            .iter()
+            .map(|(_, tab)| tab.connection(cx).read(cx).profile.id)
+            .collect();
+        let handle = window.window_handle();
+        self.state.update(cx, |s, _| {
+            s.retain_window_of(handle, |id| open.contains(&id))
+        });
         let center_empty = self
             .dock
             .read(cx)
@@ -937,6 +1014,16 @@ impl Render for RootView {
                     this.log.update(cx, |log, cx| log.copy_as_curl(cx));
                 }))
             })
+            .on_action(cx.listener(|this, _: &NewWindow, window, cx| {
+                let state = this.state.clone();
+                // Not while this window is being updated.
+                cx.defer_in(window, move |_, window, cx| {
+                    if let Err(e) = crate::open_main_window(state, false, Vec::new(), cx) {
+                        let text = t!("window.open_failed", detail = e.to_string());
+                        window.push_notification(text.to_string(), cx);
+                    }
+                });
+            }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.open_palette(PaletteMode::All, window, cx);
             }))

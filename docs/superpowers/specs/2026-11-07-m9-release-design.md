@@ -243,10 +243,10 @@ The status bar gains a control while `latest_failed(active connection)` is `Some
 
 ### 7.7 Several windows (D105, D106)
 
-- `lib.rs` extracts `pub fn open_main_window(state, primary: bool, cx) -> WindowHandle<Root>` from `run`, used for both windows. `app_id` goes into its options.
+- `lib.rs` extracts `pub fn open_main_window(state, primary: bool, keymap_errors: Vec<String>, cx) -> anyhow::Result<AnyWindowHandle>` from `run`, used for both windows. `app_id` goes into its options.
 - Action `NewWindow`, ⌥⌘N / Ctrl+Alt+N, bound globally and offered in the palette.
 - `AppState` gains `tab_windows: HashMap<Uuid, AnyWindowHandle>`, the window that shows a connection. A connection has one window at a time.
-- `RootView::targeted(id, window, cx)`: the owner in `tab_windows` when one is set, otherwise `cx.active_window()`, otherwise the first of `cx.windows()`. All nine `Open*` subscriptions and `CloseCollection` return early unless it is this window. The owner, when not active, gets `window.activate_window()`, so clicking prod in the sidebar of a staging window brings prod's window forward.
+- `targeted(state, id, window, cx)`, private in `root.rs`: the owner in `tab_windows` when one is set, otherwise `cx.active_window()`, otherwise the first of `cx.windows()`. All seven `Open*` subscriptions and `CloseCollection` return early unless it is this window. The owner, when not active, gets `window.activate_window()`, so clicking prod in the sidebar of a staging window brings prod's window forward.
 - `open_tab` records the owner. `layout_changed` clears the entry when this window holds no more tabs of the connection. `cx.on_release` clears all entries of a closed window.
 - Only the primary window restores and saves the layout, checks for updates, shows keymap errors and registers the quit hook. A later window starts at the default layout. Closing the primary window ends saving for the session; what was saved stays.
 - `UpdateFound` and job toasts go to the active window, or the first one, not to all.

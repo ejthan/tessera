@@ -383,7 +383,7 @@ fn rebuilt_dock(
 ) -> Entity<DockArea> {
     let state = state.clone();
     cx.update_window(handle.into(), |_, window, cx| {
-        let root = cx.new(|cx| RootView::new(state, window, cx));
+        let root = cx.new(|cx| RootView::new(state, true, window, cx));
         root.read(cx).dock().clone()
     })
     .unwrap()

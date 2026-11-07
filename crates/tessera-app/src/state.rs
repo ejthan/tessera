@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter, Subscription, Task,
+};
 use rust_i18n::t;
 use secrecy::{ExposeSecret as _, SecretString};
 use tessera_client::{Error, RequestEvent, RequestHook};
@@ -248,6 +250,8 @@ pub struct AppState {
     pub connections: Vec<Entity<ConnectionState>>,
     /// The connection the main area shows.
     pub selected: Option<Uuid>,
+    /// The window that shows a connection; it has one at a time (D105).
+    tab_windows: HashMap<Uuid, AnyWindowHandle>,
     /// The connection from CLI flags or `TYPESENSE_*`. Never saved; its key lives in memory.
     /// An empty key means none was given.
     pub temporary: Option<(Profile, SecretString)>,
@@ -329,6 +333,7 @@ impl AppState {
             secrets,
             connections: Vec::new(),
             selected: None,
+            tab_windows: HashMap::new(),
             temporary: None,
             session_keys: HashMap::new(),
             load_error,
@@ -721,6 +726,25 @@ impl AppState {
                 Ok(Some(id))
             }
         }
+    }
+
+    /// The window that shows connection `id`.
+    pub fn window_of(&self, id: Uuid) -> Option<AnyWindowHandle> {
+        self.tab_windows.get(&id).copied()
+    }
+
+    /// Records the window that shows connection `id`; `None` for no window.
+    pub fn set_window_of(&mut self, id: Uuid, window: Option<AnyWindowHandle>) {
+        match window {
+            Some(window) => self.tab_windows.insert(id, window),
+            None => self.tab_windows.remove(&id),
+        };
+    }
+
+    /// Drops what `window` owns, except the connections `keep` names.
+    pub fn retain_window_of(&mut self, window: AnyWindowHandle, keep: impl Fn(Uuid) -> bool) {
+        self.tab_windows
+            .retain(|id, owner| *owner != window || keep(*id));
     }
 
     /// The open connection of profile `id`.

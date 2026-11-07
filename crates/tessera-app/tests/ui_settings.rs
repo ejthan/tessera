@@ -320,7 +320,7 @@ async fn the_update_check_is_off_and_sends_nothing(cx: &mut TestAppContext) {
     assert!(!f.settings(cx).update_check);
     let state = f.state.clone();
     f.act(cx, |window, cx| {
-        cx.new(|cx| RootView::new(state, window, cx));
+        cx.new(|cx| RootView::new(state, true, window, cx));
     });
     f.settle(cx);
     assert_eq!(*admin.calls.lock().unwrap(), Vec::<String>::new());
@@ -342,7 +342,7 @@ async fn the_update_check_runs_once_at_a_start_when_on(cx: &mut TestAppContext) 
     let f = Fixture::open(cx, Some("update_check = true\n"));
     let state = f.state.clone();
     f.act(cx, |window, cx| {
-        cx.new(|cx| RootView::new(state, window, cx));
+        cx.new(|cx| RootView::new(state, true, window, cx));
     });
     f.settle(cx);
     assert_eq!(admin.calls.lock().unwrap().len(), 1);
