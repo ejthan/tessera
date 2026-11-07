@@ -17,6 +17,7 @@ use tessera_client::{Error, RequestEvent, RequestHook};
 use tessera_core::cli::Launch;
 use tessera_core::documents::views::{self, CollectionView, ViewsFile};
 use tessera_core::import;
+use tessera_core::layout::{self, Layout};
 use tessera_core::log::{LogEntry, RequestLog};
 use tessera_core::profile::Profile;
 use tessera_core::search::history::{self, History, HistoryItem};
@@ -283,6 +284,11 @@ pub struct AppState {
     pub settings_path: Option<PathBuf>,
     /// Why `settings.toml` is not being written, in full. The dialog shows it.
     pub settings_error: Option<SettingsProblem>,
+    /// The dock sizes, as last saved.
+    pub layout: Layout,
+    /// Where `layout` is saved; `None` keeps it for the session.
+    pub layout_path: Option<PathBuf>,
+    layout_chain: WriteChain,
     /// The newest update check of this session.
     pub update_check: Option<UpdateCheck>,
     settings_chain: WriteChain,
@@ -340,6 +346,9 @@ impl AppState {
             settings: Settings::default(),
             settings_path: None,
             settings_error: None,
+            layout: Layout::default(),
+            layout_path: None,
+            layout_chain: WriteChain::default(),
             update_check: None,
             settings_chain: WriteChain::default(),
         }
@@ -428,6 +437,31 @@ impl AppState {
             }
         }
         self.settings_path = path;
+    }
+
+    /// Reads the layout, once, before the window. A bad file leaves the defaults.
+    pub fn load_layout(&mut self, path: Option<PathBuf>) {
+        if let Some(path) = &path {
+            self.layout = layout::load(path);
+        }
+        self.layout_path = path;
+    }
+
+    /// Remembers `new` and writes it. The answer ends when it is on disk.
+    pub fn save_layout(&mut self, new: Layout, cx: &mut Context<Self>) -> Task<()> {
+        self.layout = new.clone();
+        let Some(path) = self.layout_path.clone() else {
+            return Task::ready(());
+        };
+        let write = move || {
+            if let Err(e) = layout::save(&path, &new) {
+                tracing::warn!("the layout was not saved: {e}");
+            }
+        };
+        let done = self.layout_chain.push(write, |s| &mut s.layout_chain, cx);
+        cx.background_spawn(async move {
+            done.await;
+        })
     }
 
     /// Applies `change` and writes the file, unless a load or an earlier write failed.

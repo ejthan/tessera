@@ -834,8 +834,11 @@ impl SearchWorkbench {
             .map(Entry::title_and_note)
             .collect();
         if rows.is_empty() {
-            let note = t!("search.queries.empty").to_string();
+            let note = SharedString::from(t!("search.queries.empty").to_string());
             return div()
+                .id("search.queries.empty")
+                .test_support()
+                .aria_label(note.clone())
                 .p_2()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)

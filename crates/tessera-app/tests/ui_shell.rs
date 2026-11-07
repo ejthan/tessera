@@ -10,13 +10,17 @@ mod common;
 use gpui_kit::base::{Placement, Root};
 use gpui_kit::component::dock::{DockArea, DockPlacement, InsertTarget, NodeId, PaneRef, PanelId};
 use gpui_kit::test::TestWindowExt as _;
-use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle};
-use tessera_app::actions::{Refresh, apply_keymap};
+use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle, px};
+use std::sync::Arc;
+use std::time::Duration;
+use tessera_app::actions::{Refresh, ToggleJobs, ToggleRequestLog, apply_keymap};
+use tessera_app::state::AppState;
 use tessera_app::views::dock::OverviewPanel;
 use tessera_app::views::root::RootView;
 use tessera_core::keymap::UserBinding;
+use tessera_core::layout::BottomTab;
 use tessera_core::profile::{Environment, Profile};
-use tessera_core::store::StoreError;
+use tessera_core::store::{ConnectionsFile, StoreError};
 
 use common::*;
 
@@ -364,6 +368,129 @@ async fn closing_a_tab_keeps_the_connection(cx: &mut TestAppContext) {
         let conn = s.connection(staging.id, cx).expect("still open");
         assert!(conn.read(cx).connected.is_some());
     });
+}
+
+fn open_with_state(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<AppState>) {
+    let secrets = Arc::new(tessera_core::secrets::MemoryStore::default());
+    open_state(cx, Ok(ConnectionsFile::default()), secrets)
+}
+
+/// A root built on `state`, as a new start builds it.
+fn rebuilt_dock(
+    cx: &mut TestAppContext,
+    handle: WindowHandle<Root>,
+    state: &Entity<AppState>,
+) -> Entity<DockArea> {
+    let state = state.clone();
+    cx.update_window(handle.into(), |_, window, cx| {
+        let root = cx.new(|cx| RootView::new(state, window, cx));
+        root.read(cx).dock().clone()
+    })
+    .unwrap()
+}
+
+fn is_at(area: &Entity<DockArea>, cx: &mut TestAppContext, left: f32, bottom: f32) -> bool {
+    cx.read(|cx| {
+        let area = area.read(cx);
+        area.dock_size(DockPlacement::Left) == Some(px(left))
+            && area.dock_size(DockPlacement::Bottom) == Some(px(bottom))
+    })
+}
+
+#[gpui_kit::test]
+async fn sizes_and_the_bottom_tab_survive_a_rebuilt_root(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("layout").join("main.json");
+    let (handle, state) = open_with_state(cx);
+    cx.update(|cx| state.update(cx, |s, _| s.load_layout(Some(path.clone()))));
+    let area = dock(cx, handle);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.dispatch_action(Box::new(ToggleJobs), cx);
+        area.update(cx, |area, cx| {
+            area.set_dock_size(DockPlacement::Left, px(300.), window, cx);
+            area.set_dock_size(DockPlacement::Bottom, px(320.), window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(!path.exists(), "the save waits a moment");
+    cx.executor().advance_clock(Duration::from_millis(600));
+    cx.run_until_parked();
+    let saved = tessera_core::layout::load(&path);
+    assert_eq!(saved.left_width, 300.);
+    assert_eq!(saved.bottom_height, 320.);
+    assert!(saved.bottom_open);
+    assert_eq!(saved.bottom_tab, BottomTab::Jobs);
+
+    let rebuilt = rebuilt_dock(cx, handle, &state);
+    assert!(is_at(&rebuilt, cx, 300., 320.));
+    cx.read(|cx| assert!(rebuilt.read(cx).is_dock_open(DockPlacement::Bottom)));
+}
+
+#[gpui_kit::test]
+async fn a_newer_change_drops_the_pending_save(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("main.json");
+    let (handle, state) = open_with_state(cx);
+    cx.update(|cx| state.update(cx, |s, _| s.load_layout(Some(path.clone()))));
+    let area = dock(cx, handle);
+    for width in [300., 310.] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            area.update(cx, |area, cx| {
+                area.set_dock_size(DockPlacement::Left, px(width), window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(300));
+        cx.run_until_parked();
+    }
+    assert!(!path.exists());
+    cx.executor().advance_clock(Duration::from_millis(300));
+    cx.run_until_parked();
+    assert_eq!(tessera_core::layout::load(&path).left_width, 310.);
+}
+
+#[gpui_kit::test]
+async fn a_bad_layout_file_starts_with_the_defaults(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("main.json");
+    std::fs::write(&path, "not json").unwrap();
+    let (handle, state) = open_with_state(cx);
+    cx.update(|cx| state.update(cx, |s, _| s.load_layout(Some(path))));
+    let rebuilt = rebuilt_dock(cx, handle, &state);
+    assert!(is_at(&rebuilt, cx, 240., 240.));
+    cx.read(|cx| assert!(!rebuilt.read(cx).is_dock_open(DockPlacement::Bottom)));
+}
+
+#[gpui_kit::test]
+fn welcome_offers_each_way_in(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        for id in ["welcome.add_connection", "welcome.import", "welcome.copy"] {
+            assert!(window.find(id).visible(), "{id}");
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn an_empty_log_and_empty_jobs_say_what_comes(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    for action in [true, false] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            if action {
+                window.dispatch_action(Box::new(ToggleRequestLog), cx);
+            } else {
+                window.dispatch_action(Box::new(ToggleJobs), cx);
+            }
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let id = if action { "log.empty" } else { "jobs.docs" };
+        wait_for_element(cx, handle, id.into(), true).await;
+    }
 }
 
 /// The dock area of the window.

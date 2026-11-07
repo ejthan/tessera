@@ -807,6 +807,17 @@ impl Render for RequestLogPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let full_body = self.full_body_bar(window, cx);
         let no_full_body = self.kept_part(cx).is_none();
+        let empty = (self.table.read(cx).delegate().rows_count(cx) == 0).then(|| {
+            let text = SharedString::from(t!("log.empty").to_string());
+            div()
+                .id("log.empty")
+                .test_support()
+                .aria_label(text.clone())
+                .px_2()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(text)
+        });
         let filters = self.render_filters(window, cx);
         let table = DataTable::new(&self.table)
             .xsmall()
@@ -819,6 +830,7 @@ impl Render for RequestLogPanel {
             .key_context(gated(REQUEST_LOG, &[(no_full_body, &ShowFullBody)]))
             .size_full()
             .child(filters)
+            .children(empty)
             .child(
                 div().flex_1().min_h_0().child(
                     h_resizable("log.split")

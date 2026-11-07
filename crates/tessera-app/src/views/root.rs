@@ -2,6 +2,8 @@
 
 //! The window's top-level view: title bar, the dock (sidebar, tabs, request log), status bar.
 
+use std::time::Duration;
+
 use gpui_kit::base::{Root, TestSupportExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{
@@ -12,10 +14,11 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, prelude::*,
-    px, rgb,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
+    prelude::*, px, rgb,
 };
 use rust_i18n::t;
+use tessera_core::layout::{BottomTab, Layout};
 
 use super::connect_dialog::ConnectDialog;
 use super::dock::{
@@ -41,12 +44,10 @@ use crate::state::{
     OpenReindex, OpenResource, OpenSearch, ResourceKind, UpdateFound,
 };
 
-/// Width of the left sidebar.
-const SIDEBAR_WIDTH: f32 = 240.;
 /// Tallest the list of `keymap.toml` errors gets before it scrolls.
 const KEYMAP_ERRORS_HEIGHT: f32 = 96.;
-/// Height of the request log when open.
-const LOG_HEIGHT: f32 = 240.;
+/// How long a layout change must stand before it is saved.
+const LAYOUT_SAVE_DELAY: Duration = Duration::from_millis(500);
 
 /// The main window content.
 pub struct RootView {
@@ -66,6 +67,8 @@ pub struct RootView {
     displayed: Vec<PanelId>,
     /// What was wrong with `keymap.toml`, in full. It stays until the file is fixed.
     keymap_errors: Vec<String>,
+    /// The pending save of the layout; a newer change drops it.
+    layout_save: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -84,22 +87,25 @@ impl RootView {
         let log = cx.new(|cx| RequestLogPanel::new(state.clone(), window, cx));
         let jobs = cx.new(|cx| JobsPanel::new(state.clone(), window, cx));
         let welcome = cx.new(|cx| WelcomePanel::new(state.clone(), cx));
+        let layout = state.read(cx).layout.clone();
         dock.update(cx, |area, cx| {
             let tabs = |panel| DockLayout::tabs().panel_view(panel, cx);
             let (left, bottom, center) = (
                 tabs(panel_handle(sidebar)),
                 tabs(panel_handle(log.clone()))
                     .panel_view(panel_handle(jobs.clone()), cx)
-                    .active_index(0),
+                    .active_index(usize::from(layout.bottom_tab == BottomTab::Jobs)),
                 tabs(panel_handle(welcome.clone())),
             );
             area.set_dock(DockPlacement::Left, left, window, cx);
-            area.set_dock_size(DockPlacement::Left, px(SIDEBAR_WIDTH), window, cx);
+            area.set_dock_size(DockPlacement::Left, px(layout.left_width), window, cx);
             // Its collapse button would have no shortcut.
             area.set_dock_collapsible(DockPlacement::Left, false, window, cx);
             area.set_dock(DockPlacement::Bottom, bottom, window, cx);
-            area.set_dock_size(DockPlacement::Bottom, px(LOG_HEIGHT), window, cx);
-            area.toggle_dock(DockPlacement::Bottom, window, cx);
+            area.set_dock_size(DockPlacement::Bottom, px(layout.bottom_height), window, cx);
+            if !layout.bottom_open {
+                area.toggle_dock(DockPlacement::Bottom, window, cx);
+            }
             area.set_center(center, window, cx);
         });
         if state.read(cx).settings.update_check {
@@ -197,6 +203,19 @@ impl RootView {
             cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, window, cx| {
                 if matches!(event, DockEvent::LayoutChanged) {
                     this.layout_changed(window, cx);
+                    this.save_layout_soon(cx);
+                }
+            }),
+            // Dragging a dock's edge emits no `LayoutChanged`, so its last size is read here.
+            cx.on_app_quit(|this, cx| {
+                let layout = this.current_layout(cx);
+                let changed = layout != this.state.read(cx).layout;
+                let write =
+                    changed.then(|| this.state.update(cx, |s, cx| s.save_layout(layout, cx)));
+                async move {
+                    if let Some(write) = write {
+                        write.await;
+                    }
                 }
             }),
         ];
@@ -213,6 +232,7 @@ impl RootView {
             active: None,
             displayed: Vec::new(),
             keymap_errors: Vec::new(),
+            layout_save: None,
             _subscriptions: subscriptions,
         }
     }
@@ -559,6 +579,50 @@ impl RootView {
 
     /// Finds the active tab after a layout change and brings the welcome screen back into
     /// an empty center.
+    /// The docks as they stand.
+    fn current_layout(&self, cx: &App) -> Layout {
+        let area = self.dock.read(cx);
+        let saved = self.state.read(cx).layout.clone();
+        let size = |placement, fallback: f32| area.dock_size(placement).map_or(fallback, f32::from);
+        let mut bottom_tab = saved.bottom_tab;
+        if let Some(tree) = area.layout(DockPlacement::Bottom) {
+            tree.root().walk(&mut |node| {
+                if let PaneRef::Tabs { panels, active_ix } = node.kind() {
+                    bottom_tab = if panels.get(active_ix) == Some(&self.jobs_id()) {
+                        BottomTab::Jobs
+                    } else {
+                        BottomTab::Log
+                    };
+                }
+            });
+        }
+        Layout {
+            left_width: size(DockPlacement::Left, saved.left_width),
+            bottom_height: size(DockPlacement::Bottom, saved.bottom_height),
+            bottom_open: area.is_dock_open(DockPlacement::Bottom),
+            bottom_tab,
+            ..saved
+        }
+    }
+
+    /// Saves the layout once it stood for a moment, if it differs.
+    fn save_layout_soon(&mut self, cx: &mut Context<Self>) {
+        if self.current_layout(cx) == self.state.read(cx).layout {
+            self.layout_save = None;
+            return;
+        }
+        self.layout_save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LAYOUT_SAVE_DELAY).await;
+            this.update(cx, |this, cx| {
+                let layout = this.current_layout(cx);
+                this.state
+                    .update(cx, |s, cx| s.save_layout(layout, cx))
+                    .detach();
+            })
+            .ok();
+        }));
+    }
+
     fn layout_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let displayed = self.displayed_tabs(cx);
         // shortcut: a tab that just came on screen wins; a click into a group whose tab is

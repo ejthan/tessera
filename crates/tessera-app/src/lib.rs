@@ -90,6 +90,7 @@ pub fn run(launch: Launch) -> Result<(), String> {
         tessera_core::search::saved::saved_path(),
     );
     state.load_settings(tessera_core::settings::settings_path());
+    state.load_layout(tessera_core::layout::layout_path());
     let language = state.settings.language;
     let open = state.resolve(launch)?;
     // Like the profiles: once, before the window opens.

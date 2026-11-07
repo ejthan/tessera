@@ -1548,6 +1548,13 @@ async fn save_trims_the_name_and_splits_the_tags(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn empty_saved_queries_say_how_they_fill(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.press(cx, OPEN_SAVED);
+    assert!(f.has(cx, "search.queries.empty"));
+}
+
+#[gpui_kit::test]
 async fn save_needs_a_name_and_keeps_no_key(cx: &mut TestAppContext) {
     let f = Fixture::new(cx).await;
     f.press(cx, SHOW_JSON);

@@ -46,6 +46,8 @@ use crate::jobs::{
 use crate::state::AppState;
 use crate::transfer::TransferBackendGlobal;
 
+const DOCS_URL: &str = "https://typesense.org/docs/30.2/api/documents.html#index-documents";
+
 /// Initial height of the detail under the job table.
 const DETAIL_HEIGHT: f32 = 130.;
 /// Width of the buttons and sentences beside the report.
@@ -1058,6 +1060,12 @@ impl Render for JobsPanel {
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(text),
+                            )
+                            .child(
+                                Button::new("jobs.docs")
+                                    .link()
+                                    .label(t!("resources.docs").to_string())
+                                    .on_click(|_, _, cx| cx.open_url(DOCS_URL)),
                             )
                             .when(connected.is_some(), |el| {
                                 el.child(
