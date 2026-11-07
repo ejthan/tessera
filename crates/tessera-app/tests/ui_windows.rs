@@ -36,6 +36,7 @@ use common::*;
 
 const NEW_WINDOW: &str = key("alt-cmd-n", "ctrl-alt-n");
 const CLOSE_WINDOW: &str = key("alt-cmd-w", "ctrl-alt-w");
+const TOGGLE_JOBS: &str = key("cmd-shift-j", "ctrl-shift-j");
 
 fn secrets() -> Arc<MemoryStore> {
     Arc::default()
@@ -340,6 +341,27 @@ async fn a_chord_acts_on_the_connection_of_its_window(cx: &mut TestAppContext) {
         .unwrap();
     assert!(!shown, "prod stays as it was");
     assert_eq!(cx.update(|cx| cx.active_window()), Some(first.into()));
+}
+
+#[gpui_kit::test]
+async fn jobs_import_opens_on_the_connection_of_its_window(cx: &mut TestAppContext) {
+    let (first, _second, _state, staging, _prod, _rt) = one_connection_each(cx).await;
+    cx.update_window(first.into(), |_, window, cx| window.press(TOGGLE_JOBS, cx))
+        .unwrap();
+    wait_for_element(cx, first, "jobs.import".into(), true).await;
+    cx.update_window(first.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("jobs.import", cx);
+    })
+    .unwrap();
+    wait_for_element(cx, first, "transfer.import.connection".into(), true).await;
+    let name = cx
+        .update_window(first.into(), |_, window, cx| {
+            window.render_frame(cx);
+            label(window, "transfer.import.connection")
+        })
+        .unwrap();
+    assert_eq!(name, staging.name);
 }
 
 #[gpui_kit::test]

@@ -35,6 +35,7 @@ use super::super::overview::grouped;
 use super::super::request_detail::size;
 use super::super::resources::backup::warning_text;
 use super::super::resources::restore::{ROW_LIMIT, restore_warning_text};
+use super::super::root::RootView;
 use super::import_dialog::DocumentImportDialog;
 use crate::actions::{
     CancelJob, DismissJob, ImportDocuments, ImportSavedLines, JOBS, SaveFailedLines, SaveReport,
@@ -733,10 +734,9 @@ impl JobsPanel {
         }
     }
 
-    /// Opens the import dialog on the selected connection, for any collection.
+    /// Opens the import dialog on the connection of this window, for any collection.
     fn import_documents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let state = self.state.read(cx);
-        let Some(connection) = state.selected.and_then(|id| state.connection(id, cx)) else {
+        let Some(connection) = RootView::window_connection(window, cx) else {
             return;
         };
         DocumentImportDialog::open(self.state.clone(), connection, None, None, window, cx);
@@ -1043,10 +1043,7 @@ impl Render for JobsPanel {
             .map(|el| match body {
                 None => {
                     let text = t!("jobs.empty").to_string();
-                    let connected = {
-                        let state = self.state.read(cx);
-                        state.selected.and_then(|id| state.connection(id, cx))
-                    };
+                    let connected = RootView::window_connection(window, cx);
                     el.child(
                         v_flex()
                             .p_3()

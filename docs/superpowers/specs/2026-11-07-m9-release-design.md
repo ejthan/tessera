@@ -338,8 +338,8 @@ Dependencies for `.deb`: `libfontconfig1`, `libxkbcommon0`, `libxkbcommon-x11-0`
 ## 10. Workflows (never run)
 
 - `ci.yml`: `lint` gains `cargo xtask i18n` and `cargo xtask governance`. A new `dco` job on pull requests runs `cargo xtask dco origin/${{ github.base_ref }}` after a checkout with `fetch-depth: 0`.
-- `release.yml`: on tag `v*`, a nightly `schedule` and `workflow_dispatch`. The matrix is `build`'s four runners. Each installs the tools with pinned `--version`, runs `cargo xtask dist`, prints `ldd` on Linux, and uploads `target/dist/`. A `publish` job with `contents: write` downloads everything, joins the `SHA256SUMS`, and runs `gh release create`: for a tag with `cargo xtask release-notes`, for a schedule as the `nightly` pre-release, replacing the earlier one. No secret other than `GITHUB_TOKEN`.
-- `docs.yml`: on push to `main` under `book/`, installs mdBook, builds, deploys through Pages.
+- `release.yml`: on tag `v*`, a nightly `schedule` and `workflow_dispatch`. The matrix is `build`'s four runners. Each installs the tools with pinned `--version`, runs `cargo xtask dist`, prints `ldd` on Linux, and uploads `target/dist/`. A `publish` job with `contents: write` downloads everything, joins the `SHA256SUMS`, and runs `gh release create`: for a tag with `cargo xtask release-notes`, for a schedule as the `nightly` pre-release, replacing the earlier one. No secret other than `GITHUB_TOKEN`. After review: a read-only `prepare` job checks the tag against the workspace version and writes the notes, `publish` has no checkout and holds the token on its `gh` steps alone, checkouts set `persist-credentials: false`, `concurrency` serializes runs of a ref, only `main` replaces `nightly`, and a tag with a hyphen is `--prerelease`.
+- `docs.yml`: on push to `main` under `book/`, installs mdBook and builds in a read-only job, and a second job alone holds the Pages rights and deploys.
 - Versions verified on 2026-11-07 with `gh api`, read-only: `actions/download-artifact` v8.0.2, `actions/configure-pages` v6.0.0, `actions/upload-pages-artifact` v5.0.0, `actions/deploy-pages` v5.0.1. The others follow `ci.yml`.
 
 ## 11. Docs site (D110)

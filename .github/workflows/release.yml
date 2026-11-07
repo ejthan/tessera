@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# One run per ref, so a dispatch and the nightly cannot race the delete and the create.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   # Packages GPUI needs on Ubuntu 24.04, as in ci.yml, and FUSE for the AppImage tools.
@@ -19,7 +24,33 @@ env:
     vulkan-validationlayers libvulkan1 libfuse2t64
 
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: The tag must name the workspace version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "tessera-app") | .version')
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version"
+            exit 1
+          fi
+      - name: Write the release notes
+        if: github.ref_type == 'tag'
+        run: cargo xtask release-notes "${GITHUB_REF_NAME#v}" > notes.md
+      - if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: release-notes
+          path: notes.md
+          if-no-files-found: error
+
   build:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +66,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - if: runner.os == 'Linux'
         run: |
           # shellcheck disable=SC2086 # the package list is meant to split into words
@@ -53,31 +86,42 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [prepare, build]
+    # A dispatch from another branch builds, and must not replace the nightly.
+    if: github.ref_type == 'tag' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
+    # No checkout and no cargo: nothing from the repository runs beside the write token.
     steps:
-      - uses: actions/checkout@v7.0.1
       - uses: actions/download-artifact@v8.0.2
         with:
+          pattern: tessera-*
           path: artifacts
       - name: Flatten the packages and join the checksums
         run: |
           mkdir packages
           find artifacts -type f ! -name SHA256SUMS -exec mv -t packages {} +
           find artifacts -type f -name SHA256SUMS -exec cat {} + | sort -k2 > packages/SHA256SUMS
+      - if: github.ref_type == 'tag'
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: release-notes
       - name: Publish the tag
         if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          cargo xtask release-notes "${GITHUB_REF_NAME#v}" > notes.md
-          gh release create "$GITHUB_REF_NAME" --notes-file notes.md packages/*
+          flags=()
+          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            "${flags[@]}" --notes-file notes.md packages/*
       - name: Replace the nightly pre-release
         if: github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete nightly --cleanup-tag --yes || true
-          gh release create nightly --prerelease --title Nightly \
+          gh release delete nightly --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create nightly --repo "$GITHUB_REPOSITORY" --prerelease --title Nightly \
             --notes "Built from $GITHUB_SHA. Ad-hoc signed, not notarized." \
             --target "$GITHUB_SHA" packages/*

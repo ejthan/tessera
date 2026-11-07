@@ -778,7 +778,7 @@ async fn shift_command_j_opens_jobs(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn empty_panel_offers_import_for_the_selected_connection(cx: &mut TestAppContext) {
+async fn empty_panel_offers_import_for_the_connection_of_the_window(cx: &mut TestAppContext) {
     let f = connected(cx).await;
     f.press(cx, TOGGLE_JOBS);
     assert!(f.has(cx, "jobs.import"));
@@ -793,14 +793,11 @@ async fn empty_panel_offers_import_for_the_selected_connection(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
-async fn empty_panel_has_no_import_without_a_selected_connection(cx: &mut TestAppContext) {
+async fn empty_panel_has_no_import_without_a_connection_tab(cx: &mut TestAppContext) {
     let f = connected(cx).await;
-    cx.update(|cx| {
-        f.state.update(cx, |s, cx| {
-            s.selected = None;
-            cx.notify();
-        })
-    });
+    let id = f.state.read_with(cx, |s, _| s.profiles[0].id);
+    cx.update(|cx| f.state.update(cx, |s, cx| s.disconnect(id, cx)));
+    cx.run_until_parked();
     f.press(cx, TOGGLE_JOBS);
     assert!(f.has(cx, "jobs.empty"));
     assert!(!f.has(cx, "jobs.import"));

@@ -567,6 +567,59 @@ async fn sidebar_activates_a_tab_in_another_split_group(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+async fn the_shortcut_leaves_the_active_lone_tab_while_focus_is_in_another_region(
+    cx: &mut TestAppContext,
+) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let (staging, prod, secrets) = two_profiles();
+    let (handle, _rt) = open_profiles(cx, vec![staging.clone(), prod.clone()], secrets);
+    open_tab(cx, handle, &staging).await;
+    open_tab(cx, handle, &prod).await;
+    let area = dock(cx, handle);
+    let id = handle
+        .update(cx, |_, _, cx| tab_panel(area.read(cx), &prod, cx).0)
+        .unwrap();
+    // Prod goes into the open bottom dock, so staging is alone in the center and active.
+    handle
+        .update(cx, |_, window, cx| {
+            let mut bottom = None;
+            let tree = area.read(cx).layout(DockPlacement::Bottom).unwrap();
+            tree.root().walk(&mut |node| {
+                if matches!(node.kind(), PaneRef::Tabs { .. }) {
+                    bottom.get_or_insert(node.id());
+                }
+            });
+            let target = InsertTarget::Tabs {
+                node: bottom.unwrap(),
+                ix: None,
+                activate: true,
+            };
+            area.update(cx, |area, cx| {
+                area.move_panel(id, target, window, cx);
+                area.toggle_dock(DockPlacement::Bottom, window, cx);
+            });
+        })
+        .unwrap();
+    cx.run_until_parked();
+    click_overview(cx, handle, &staging).await;
+    handle
+        .update(cx, |_, window, cx| {
+            let focus = area.read(cx).panel(id).unwrap().focus_handle(cx);
+            focus.focus(window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| window.press(CLOSE_TAB, cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(tab(&staging)).is_some(), "staging stays");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 async fn a_tab_moved_into_a_dock_stays_tracked(cx: &mut TestAppContext) {
     fake_connector(cx, |_| Ok(server("30.2", true)));
     let (staging, prod, secrets) = two_profiles();

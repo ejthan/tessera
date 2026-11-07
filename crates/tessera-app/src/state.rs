@@ -248,8 +248,6 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretStore>,
     /// Open connections, one per profile or temporary connection.
     pub connections: Vec<Entity<ConnectionState>>,
-    /// The connection the main area shows.
-    pub selected: Option<Uuid>,
     /// The window that shows a connection; it has one at a time (D105).
     tab_windows: HashMap<Uuid, AnyWindowHandle>,
     /// The connection from CLI flags or `TYPESENSE_*`. Never saved; its key lives in memory.
@@ -332,7 +330,6 @@ impl AppState {
             store_path,
             secrets,
             connections: Vec::new(),
-            selected: None,
             tab_windows: HashMap::new(),
             temporary: None,
             session_keys: HashMap::new(),
@@ -950,15 +947,14 @@ impl AppState {
         })
     }
 
-    /// Connects profile `id` (saved or temporary) and selects it. `key` is used instead of
+    /// Connects profile `id` (saved or temporary). `key` is used instead of
     /// the stored one, so a key that was just saved need not be read back from the keychain.
-    /// A connected profile is only selected; a failed or running attempt is retried in place
+    /// A connected profile only opens its overview; a failed or running attempt is retried in place
     /// with the current profile, cancelling the previous attempt.
     pub fn connect(&mut self, id: Uuid, key: Option<SecretString>, cx: &mut Context<Self>) {
         if let Some(conn) = self.connection(id, cx)
             && conn.read(cx).connected.is_some()
         {
-            self.selected = Some(id);
             cx.emit(OpenOverview(id));
             cx.notify();
             return;
@@ -992,7 +988,6 @@ impl AppState {
                 conn
             }
         };
-        self.selected = Some(id);
         cx.notify();
         if let Err(e) = client_options(&profile) {
             conn.update(cx, |c, cx| {
@@ -1087,21 +1082,18 @@ impl AppState {
         let conn = cx.new(|_| state);
         observe_connection(&conn, cx);
         self.connections.push(conn);
-        self.selected = Some(id);
         cx.emit(OpenOverview(id));
         cx.notify();
     }
 
     /// Asks for the collections tab of profile `id`.
     pub fn open_collections(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        self.selected = Some(id);
         cx.emit(OpenCollections(id));
         cx.notify();
     }
 
     /// Asks for the tab of collection `name` of profile `id`.
     pub fn open_collection(&mut self, id: Uuid, name: String, cx: &mut Context<Self>) {
-        self.selected = Some(id);
         cx.emit(OpenCollection(id, name));
         cx.notify();
     }
@@ -1114,28 +1106,24 @@ impl AppState {
         preset: Option<PresetTarget>,
         cx: &mut Context<Self>,
     ) {
-        self.selected = Some(id);
         cx.emit(OpenSearch(id, loaded, preset));
         cx.notify();
     }
 
     /// Asks for the console tab of profile `id`.
     pub fn open_console(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        self.selected = Some(id);
         cx.emit(OpenConsole(id));
         cx.notify();
     }
 
     /// Asks for the `kind` tab of profile `id`.
     pub fn open_resource(&mut self, id: Uuid, kind: ResourceKind, cx: &mut Context<Self>) {
-        self.selected = Some(id);
         cx.emit(OpenResource(id, kind));
         cx.notify();
     }
 
     /// Asks for the reindex tab of `alias` of profile `id`.
     pub fn open_reindex(&mut self, id: Uuid, alias: String, cx: &mut Context<Self>) {
-        self.selected = Some(id);
         cx.emit(OpenReindex(id, alias));
         cx.notify();
     }
@@ -1154,9 +1142,6 @@ impl AppState {
             });
         }
         self.connections.retain(|c| c.read(cx).profile.id != id);
-        if self.selected == Some(id) {
-            self.selected = self.connections.last().map(|c| c.read(cx).profile.id);
-        }
         cx.notify();
     }
 }
@@ -1382,7 +1367,6 @@ mod tests {
         cx.run_until_parked();
         state.read_with(cx, |s, cx| {
             assert!(s.profiles.is_empty());
-            assert_eq!(s.selected, Some(id));
             let c = s.connection(id, cx).expect("connection exists");
             let c = c.read(cx);
             assert!(c.connected.is_some());
@@ -1498,7 +1482,6 @@ mod tests {
         state.read_with(cx, |s, cx| {
             assert!(s.profiles.is_empty());
             assert!(s.connection(id, cx).is_none());
-            assert_eq!(s.selected, None);
             assert_eq!(s.last_used, None);
         });
         assert!(secrets.get(id).unwrap().is_none());

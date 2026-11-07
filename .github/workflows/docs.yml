@@ -7,23 +7,34 @@ on:
   workflow_dispatch:
 
 permissions:
-  pages: write
-  id-token: write
   contents: read
 
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - run: cargo install mdbook --locked --version 0.5.4
+      - run: mdbook build book
+      - uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: target/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v7.0.1
-      - run: cargo install mdbook --locked --version 0.5.4
-      - run: mdbook build book
-      - uses: actions/configure-pages@v6.0.0
-      - uses: actions/upload-pages-artifact@v5.0.0
-        with:
-          path: target/book
       - id: deployment
         uses: actions/deploy-pages@v5.0.1

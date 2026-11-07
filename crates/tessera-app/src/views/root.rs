@@ -64,7 +64,6 @@ pub struct RootView {
     primary: bool,
     dock: Entity<DockArea>,
     welcome: Entity<WelcomePanel>,
-    sidebar_focus: FocusHandle,
     log: Entity<RequestLogPanel>,
     jobs: Entity<JobsPanel>,
     /// How many jobs run; `None` without a job. `render` must not read `Jobs`: that would
@@ -133,7 +132,6 @@ impl RootView {
         let (dock, skin) = DockSkin::dock_area("tessera", None, window, cx);
         skin.set_close_button_visible(true, cx);
         let sidebar = cx.new(|cx| SidebarPanel::new(state.clone(), cx));
-        let sidebar_focus = sidebar.read(cx).focus_handle(cx);
         let log = cx.new(|cx| RequestLogPanel::new(state.clone(), window, cx));
         let jobs = cx.new(|cx| JobsPanel::new(state.clone(), window, cx));
         let welcome = cx.new(|cx| WelcomePanel::new(state.clone(), cx));
@@ -318,7 +316,6 @@ impl RootView {
             primary,
             dock,
             welcome,
-            sidebar_focus,
             log,
             jobs,
             running_jobs,
@@ -333,6 +330,12 @@ impl RootView {
     /// The connection of the active tab.
     pub fn active_connection(&self, cx: &App) -> Option<Entity<ConnectionState>> {
         Some(connection_tab(self.dock.read(cx), self.active?)?.connection(cx))
+    }
+
+    /// The connection of the active tab of `window`, for a view inside it.
+    pub fn window_connection(window: &Window, cx: &App) -> Option<Entity<ConnectionState>> {
+        let root = Root::read(window, cx).view().clone().downcast::<Self>();
+        root.ok()?.read(cx).active_connection(cx)
     }
 
     /// The request log panel.
@@ -613,22 +616,16 @@ impl RootView {
         displayed
     }
 
-    /// Makes `active` the active tab; the sidebar selection follows when it changes.
+    /// Makes `active` the active tab. The sidebar and the jobs panel read it in `render`, and the
+    /// dock caches them.
     fn set_active(&mut self, active: Option<PanelId>, cx: &mut Context<Self>) {
         cx.notify();
         if self.active == active {
             return;
         }
         self.active = active;
-        let Some(id) = self.active_connection(cx).map(|c| c.read(cx).profile.id) else {
-            return;
-        };
-        self.state.update(cx, |s, cx| {
-            if s.selected != Some(id) {
-                s.selected = Some(id);
-                cx.notify();
-            }
-        });
+        self.state.update(cx, |_, cx| cx.notify());
+        self.jobs.update(cx, |_, cx| cx.notify());
     }
 
     /// Opens the `kind` tab of profile `id`, or shows and activates the one already open,
@@ -769,20 +766,18 @@ impl RootView {
     /// ⌘W on the only tab of a region: the kit refuses it, as a dock's last panel. A tab with
     /// something to ask or wait for goes on to its own handler. Returns whether it closed.
     fn close_lone_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let focus_elsewhere = [
-            self.sidebar_focus.clone(),
-            self.log.read(cx).focus_handle(cx),
-            self.jobs.read(cx).focus_handle(cx),
-        ]
-        .iter()
-        .any(|focus| focus.contains_focused(window, cx));
-        if focus_elsewhere || window.has_active_dialog(cx) {
-            return false;
-        }
-        let area = self.dock.read(cx);
         let Some(active) = self.active else {
             return false;
         };
+        let tab_focus = self.dock.read(cx).panel(active).map(|p| p.focus_handle(cx));
+        // Only the tab the keyboard is in, or the window itself: not a tab of another region.
+        let focused = window.focused(cx).is_none()
+            || self.focus_handle.is_focused(window)
+            || tab_focus.is_some_and(|focus| focus.contains_focused(window, cx));
+        if !focused || window.has_active_dialog(cx) {
+            return false;
+        }
+        let area = self.dock.read(cx);
         let alone = REGIONS.into_iter().any(|placement| {
             area.layout(placement).is_some_and(|tree| {
                 tree.panels().any(|id| id == active) && tree.panels().count() == 1
@@ -1061,7 +1056,6 @@ impl Render for RootView {
         let breadcrumb = self.breadcrumb(cx);
         let red = rgb(env_badge::PROD_RED);
         let state = self.state.read(cx);
-        // This window's connection: `selected` follows whichever window was used last.
         let can_search = self
             .active_connection(cx)
             .filter(|c| c.read(cx).connected.is_some())
