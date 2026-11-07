@@ -38,7 +38,7 @@ use crate::jobs::{JobFinished, JobId, JobKind, Jobs, JobsGlobal, RunningChanged}
 use crate::settings;
 use crate::state::{
     AppState, CloseCollection, OpenCollection, OpenCollections, OpenConsole, OpenOverview,
-    OpenReindex, OpenResource, OpenSearch, ResourceKind,
+    OpenReindex, OpenResource, OpenSearch, ResourceKind, UpdateFound,
 };
 
 /// Width of the left sidebar.
@@ -102,6 +102,9 @@ impl RootView {
             area.toggle_dock(DockPlacement::Bottom, window, cx);
             area.set_center(center, window, cx);
         });
+        if state.read(cx).settings.update_check {
+            state.update(cx, |s, cx| s.check_for_update(cx));
+        }
         let job_list = cx.global::<JobsGlobal>().0.clone();
         let running_jobs = count_running(job_list.read(cx));
         let subscriptions = vec![
@@ -121,6 +124,10 @@ impl RootView {
             cx.observe_in(&state, window, |this, _, window, cx| {
                 this.close_stale_tabs(window, cx);
                 cx.notify();
+            }),
+            cx.subscribe_in(&state, window, |_, _, event: &UpdateFound, window, cx| {
+                let text = t!("settings.update.toast", version = event.0.as_str());
+                window.push_notification(text.to_string(), cx);
             }),
             cx.subscribe_in(
                 &state,

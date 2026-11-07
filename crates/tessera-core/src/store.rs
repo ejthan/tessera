@@ -85,7 +85,16 @@ pub fn config_dir() -> Option<PathBuf> {
     )
 }
 
-/// Directory of the log files, if the home directory is known.
+/// The platform data directory.
+pub fn data_dir() -> Option<PathBuf> {
+    Some(
+        ProjectDirs::from("org", "tessera", "Tessera")?
+            .data_dir()
+            .to_path_buf(),
+    )
+}
+
+/// Where the log files go.
 pub fn logs_dir() -> Option<PathBuf> {
     Some(
         ProjectDirs::from("org", "tessera", "Tessera")?

@@ -1444,6 +1444,8 @@ pub type ServerChange = Box<dyn FnOnce(&FakeData) + Send>;
 pub struct FakeRelevance {
     /// Every call, in order, as `method arg…`.
     pub calls: Mutex<Vec<String>>,
+    /// What each `clear_copies` was told to keep.
+    pub held: Mutex<Vec<Vec<PathBuf>>>,
     /// Writes fail with this status and Typesense message.
     pub fail: Mutex<Option<(u16, String)>>,
     /// `save_alias` answers with this target instead of the one sent.
@@ -1642,6 +1644,11 @@ impl RelevanceBackend for FakeRelevanceBackend {
         Box::pin(async move { text.unwrap_or_else(|| Ok(String::new())) })
     }
 
+    fn clear_copies(&self, held: Vec<PathBuf>) -> tessera_app::collections::BoxFuture<usize> {
+        self.0.held.lock().unwrap().push(held);
+        Box::pin(async move { 2 })
+    }
+
     fn write_set_file(
         &self,
         path: PathBuf,
@@ -1837,6 +1844,8 @@ pub type ScopedSearch = (String, String, Vec<(String, String)>);
 pub struct FakeAdmin {
     /// Every call, in order, as `method arg…`.
     pub calls: Mutex<Vec<String>>,
+    /// What `latest_release` answers; `None` is a 404.
+    pub release: Mutex<Option<String>>,
     /// `vote` answers `false`.
     pub vote_refused: Mutex<bool>,
     /// What `schema_changes` answers.
@@ -2128,6 +2137,12 @@ impl AdminBackend for FakeAdminBackend {
         self.0.calls.lock().unwrap().push(call);
         let answer = self.0.schema_changes.lock().unwrap().clone();
         Box::pin(async move { Ok(answer) })
+    }
+
+    fn latest_release(&self) -> tessera_app::collections::BoxFuture<Result<String, Error>> {
+        self.0.calls.lock().unwrap().push("latest_release".into());
+        let tag = self.0.release.lock().unwrap().clone();
+        Box::pin(async move { tag.ok_or_else(|| http_error((404, "Not Found".into()))) })
     }
 
     fn flush(&self, _: Client) -> tessera_app::collections::BoxFuture<Result<(), Error>> {

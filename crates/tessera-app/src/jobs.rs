@@ -5,7 +5,8 @@
 //! does lock the client a job shares, which stops a write on a read-only profile.
 
 use std::future::Future;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use gpui_kit::{
@@ -178,6 +179,8 @@ impl Job {
 #[derive(Default)]
 pub struct Jobs {
     jobs: Vec<Job>,
+    /// The temp directories in use, which Clear cache must leave.
+    temps: Vec<Weak<tempfile::TempDir>>,
     next_id: u64,
     quit: Option<Subscription>,
 }
@@ -561,6 +564,25 @@ impl Jobs {
                 done.await.ok();
             }
         }
+    }
+
+    /// Keeps `temp` from Clear cache for as long as anything holds it.
+    pub fn hold_temp(&mut self, temp: &Arc<tempfile::TempDir>) {
+        self.temps.retain(|t| t.strong_count() > 0);
+        self.temps.push(Arc::downgrade(temp));
+    }
+
+    /// The temp directories in use now.
+    pub fn held_temps(&self) -> Vec<PathBuf> {
+        let archives = self.jobs.iter().filter(|job| job.is_running());
+        let archives = archives.filter_map(|job| match &job.live {
+            Live::Backup(progress) => progress.temp.clone(),
+            _ => None,
+        });
+        let open = self.temps.iter().filter_map(Weak::upgrade);
+        archives
+            .chain(open.map(|t| t.path().to_path_buf()))
+            .collect()
     }
 
     fn job_mut(&mut self, id: JobId) -> Option<&mut Job> {

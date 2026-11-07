@@ -86,6 +86,8 @@ pub struct BackupProgress {
     pub export: ExportProgress,
     /// The collection being exported.
     pub collection: String,
+    /// The temp directory of an archive being written.
+    pub temp: Option<PathBuf>,
 }
 
 /// One collection that was written.
@@ -738,6 +740,8 @@ impl Run<'_> {
 
         let target = plan.target.clone();
         let mut workspace = blocking(move || prepare(&target)).await??;
+        let temp = workspace.temp.as_ref().map(|t| t.path().to_path_buf());
+        self.progress.send_modify(|p| p.temp = temp);
         let dir = workspace.dir.clone();
         let mut done = self.fill(&lists, &selected, &dir).await;
         if done.is_ok() {

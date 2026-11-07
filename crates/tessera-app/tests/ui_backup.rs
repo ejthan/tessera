@@ -14,7 +14,7 @@ use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
 use serde_json::json;
 use std::sync::Arc;
-use tessera_app::actions::ToggleJobs;
+use tessera_app::actions::{OpenSettings, ToggleJobs};
 use tessera_app::jobs::{JobKind, JobStatus, Jobs, JobsGlobal};
 use tessera_app::state::{AppState, ResourceKind};
 use tessera_client::{Collection, SetKind, StopwordSet};
@@ -735,6 +735,54 @@ async fn the_plan_is_read_again_when_the_job_ends(cx: &mut TestAppContext) {
         f.has(cx, "restore.result.Collection.fresh"),
         "the result stays"
     );
+}
+
+#[gpui_kit::test]
+async fn clear_cache_keeps_a_held_directory_and_reloads_the_lists(cx: &mut TestAppContext) {
+    let relevance = fake_relevance(cx);
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    let temp = Arc::new(tempfile::tempdir().unwrap());
+    let path = temp.path().to_path_buf();
+    if let Some(Ok(answer)) = f.fake.open_answer.lock().unwrap().as_mut() {
+        answer.2 = Some(temp);
+    }
+    f.choose(cx);
+    let lists = *f.data.lists.lock().unwrap();
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        window.dispatch_action(Box::new(OpenSettings), cx);
+    })
+    .unwrap();
+    f.settle(cx);
+    for _ in 0..14 {
+        cx.update_window(f.handle.into(), |_, window, cx| window.press("tab", cx))
+            .unwrap();
+        f.settle(cx);
+    }
+    f.click(cx, "settings.clear_cache.button");
+    assert!(relevance.held.lock().unwrap().is_empty(), "it asks first");
+    f.click(cx, "confirm.ok");
+    assert_eq!(relevance.held.lock().unwrap().as_slice(), [vec![path]]);
+    assert!(f.label(cx, "settings.clear_cache.note").contains('2'));
+    assert!(*f.data.lists.lock().unwrap() > lists);
+}
+
+#[gpui_kit::test]
+async fn a_restore_takes_the_batch_size_of_the_settings(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    cx.update(|cx| {
+        let settings = cx.update_entity(&f.state, |s, _| {
+            s.settings.batch_size = 77;
+            s.settings.clone()
+        });
+        cx.update_window(f.handle.into(), |_, window, cx| {
+            tessera_app::settings::apply(&settings, window, cx);
+        })
+        .unwrap();
+    });
+    f.start_restore(cx);
+    assert_eq!(f.fake.restores.lock().unwrap()[0].batch_size, 77);
 }
 
 #[gpui_kit::test]

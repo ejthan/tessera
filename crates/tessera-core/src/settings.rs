@@ -11,6 +11,11 @@ use crate::documents::{CONFIRM_ABOVE, PER_PAGE};
 use crate::store::{self, StoreError};
 use crate::transfer::{DEFAULT_BATCH, MAX_BATCH};
 
+/// Where the update check asks for the latest release.
+pub const RELEASES_API: &str = "https://api.github.com/repos/ejthan/tessera/releases/latest";
+/// The link shown for a new version: this constant, never a URL from the answer.
+pub const RELEASES_PAGE: &str = "https://github.com/ejthan/tessera/releases";
+
 /// The poll intervals the overview offers, in seconds.
 pub const POLL_CHOICES: [u32; 4] = [2, 5, 10, 30];
 
@@ -95,6 +100,13 @@ impl Settings {
             ..self
         }
     }
+}
+
+/// Whether release `tag` is newer than `current`. One leading `v` is stripped; a tag that is no
+/// version is `None`, which prompts nothing.
+pub fn is_newer(tag: &str, current: &str) -> Option<bool> {
+    let parse = |text: &str| semver::Version::parse(text.strip_prefix('v').unwrap_or(text)).ok();
+    Some(parse(tag)? > parse(current)?)
 }
 
 /// Why `settings.toml` could not be loaded.
@@ -194,6 +206,23 @@ mod tests {
                 "{text}"
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn is_newer_compares_versions() {
+        for (tag, current, want) in [
+            ("v1.2.3", "1.2.2", Some(true)),
+            ("1.2.3", "1.2.3", Some(false)),
+            ("v1.2.3", "1.3.0", Some(false)),
+            ("v0.10.0", "0.9.0", Some(true)),
+            ("v1.0.0-rc.1", "1.0.0", Some(false)),
+            ("vv1.2.3", "1.0.0", None),
+            ("nightly", "1.0.0", None),
+            ("v1.2", "1.0.0", None),
+            ("v1.0.0", "not-a-version", None),
+        ] {
+            assert_eq!(is_newer(tag, current), want, "{tag} against {current}");
         }
     }
 

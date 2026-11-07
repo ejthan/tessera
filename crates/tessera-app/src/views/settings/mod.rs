@@ -1,28 +1,37 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The settings dialog: Appearance and Defaults. Plain rows, because the kit's `Settings` picks
+//! The settings dialog: Appearance, Defaults, Privacy, Storage and About. Plain rows, because the kit's `Settings` picks
 //! its pages from a sidebar whose items take no focus, so a keyboard reaches the first page only.
 
 use std::cell::Cell;
 use std::ops::RangeInclusive;
 
 use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::theme::ThemeRegistry;
 use gpui_kit::component::{
-    ActiveTheme as _, IndexPath, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, Subscription, Window, div,
-    prelude::*, px,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle, Focusable as _,
+    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, Subscription,
+    Window, div, prelude::*, px,
 };
 use rust_i18n::t;
-use tessera_core::settings::{Density, Language, POLL_CHOICES, Settings};
+use tessera_core::settings::{Density, Language, POLL_CHOICES, RELEASES_PAGE, Settings};
+use tessera_core::store;
 use tessera_core::transfer::MAX_BATCH;
 
-use crate::state::{AppState, SettingsProblem};
+use tessera_widgets::confirm;
+
+use crate::actions::{OpenLogs, SETTINGS};
+use crate::jobs::JobsGlobal;
+use crate::relevance::RelevanceBackendGlobal;
+use crate::state::{AppState, SettingsProblem, UpdateCheck};
 
 /// Width of the dialog.
 const WIDTH: f32 = 560.;
@@ -33,6 +42,10 @@ const CONTROL_WIDTH: f32 = 200.;
 /// The smallest font size; the options follow it up to 20.
 const FIRST_FONT_SIZE: u8 = 12;
 const FONT_SIZES: usize = 9;
+/// Children of the scroller past Defaults, for the focus to scroll to.
+const PRIVACY_ROW: usize = 13;
+const STORAGE_ROW: usize = 15;
+const ABOUT_ROW: usize = 23;
 
 type Choice = Entity<SelectState<Vec<String>>>;
 
@@ -51,6 +64,16 @@ pub struct SettingsDialog {
     rows: Vec<(FocusHandle, usize)>,
     focused_row: Option<usize>,
     scroll: ScrollHandle,
+    focus_handle: FocusHandle,
+    /// The controls of the sections after Defaults, each with its row.
+    update_focus: FocusHandle,
+    check_focus: FocusHandle,
+    logs_focus: FocusHandle,
+    clear_focus: FocusHandle,
+    copy_focus: [FocusHandle; 3],
+    releases_focus: FocusHandle,
+    /// What the last Clear cache did.
+    cleared: Option<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -156,6 +179,10 @@ impl SettingsDialog {
         let batch_size = number(settings.batch_size.to_string());
         let confirm_above = number(settings.confirm_above.to_string());
 
+        let update_focus = cx.focus_handle();
+        let (check_focus, logs_focus) = (cx.focus_handle(), cx.focus_handle());
+        let copy_focus = [cx.focus_handle(), cx.focus_handle(), cx.focus_handle()];
+        let (clear_focus, releases_focus) = (cx.focus_handle(), cx.focus_handle());
         // Row numbers are children of the scroller.
         let rows = vec![
             (theme.focus_handle(cx), 1),
@@ -166,6 +193,14 @@ impl SettingsDialog {
             (batch_size.focus_handle(cx), 8),
             (poll.focus_handle(cx), 9),
             (confirm_above.focus_handle(cx), 10),
+            (update_focus.clone(), PRIVACY_ROW - 1),
+            (check_focus.clone(), PRIVACY_ROW),
+            (logs_focus.clone(), STORAGE_ROW),
+            (clear_focus.clone(), STORAGE_ROW + 1),
+            (copy_focus[0].clone(), STORAGE_ROW + 2),
+            (copy_focus[1].clone(), STORAGE_ROW + 3),
+            (copy_focus[2].clone(), STORAGE_ROW + 4),
+            (releases_focus.clone(), ABOUT_ROW),
         ];
         let subscriptions = vec![
             Self::on_choice(&theme, theme_labels, window, cx, move |s, ix| {
@@ -206,6 +241,14 @@ impl SettingsDialog {
             rows,
             focused_row: None,
             scroll: ScrollHandle::new(),
+            focus_handle: cx.focus_handle(),
+            update_focus,
+            check_focus,
+            logs_focus,
+            clear_focus,
+            copy_focus,
+            releases_focus,
+            cleared: None,
             _subscriptions: subscriptions,
         }
     }
@@ -269,6 +312,104 @@ impl SettingsDialog {
         }
         crate::settings::apply(&settings, window, cx);
         cx.notify();
+    }
+}
+
+impl SettingsDialog {
+    /// Asks first, in plain words, then clears off this thread.
+    fn clear_cache(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.entity().downgrade();
+        confirm::open(
+            t!("settings.clear_cache").to_string(),
+            t!("settings.clear_cache.confirm").to_string(),
+            t!("settings.clear_cache.action").to_string(),
+            move |_, cx| {
+                view.update(cx, |view, cx| view.run_clear_cache(cx)).ok();
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn run_clear_cache(&mut self, cx: &mut Context<Self>) {
+        let held = cx.global::<JobsGlobal>().0.read(cx).held_temps();
+        let done = cx.global::<RelevanceBackendGlobal>().0.clear_copies(held);
+        let state = self.state.clone();
+        cx.spawn(async move |this, cx| {
+            let count = done.await;
+            this.update(cx, |this, cx| {
+                for connection in state.read(cx).connections.clone() {
+                    connection.update(cx, |c, cx| c.invalidate_collections(cx));
+                }
+                this.cleared = Some(count);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn update_note(&self, cx: &App) -> Option<(String, bool)> {
+        let text = match self.state.read(cx).update_check.as_ref()? {
+            UpdateCheck::Running => t!("settings.update.running"),
+            UpdateCheck::Current => {
+                t!(
+                    "settings.update.current",
+                    version = env!("CARGO_PKG_VERSION")
+                )
+            }
+            UpdateCheck::Newer(tag) => t!(
+                "settings.update.newer",
+                version = tag.as_str(),
+                url = RELEASES_PAGE
+            ),
+            UpdateCheck::NoRelease => t!("settings.update.no_release"),
+            UpdateCheck::UnknownTag(tag) => t!("settings.update.unknown", tag = tag.as_str()),
+            UpdateCheck::Failed(detail) => {
+                return Some((
+                    t!("settings.update.failed", detail = detail.as_str()).to_string(),
+                    true,
+                ));
+            }
+        };
+        Some((text.to_string(), false))
+    }
+
+    /// Its path, with Copy.
+    fn path_row(
+        id: &'static str,
+        path: Option<std::path::PathBuf>,
+        focus: &FocusHandle,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let path = path?.display().to_string();
+        let copy = path.clone();
+        Some(
+            h_flex()
+                .gap_2()
+                .justify_between()
+                .child(
+                    v_flex().min_w_0().child(t!(id).to_string()).child(
+                        div()
+                            .id(SharedString::from(format!("{id}.path")))
+                            .test_support()
+                            .aria_label(SharedString::from(path.clone()))
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(path),
+                    ),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("{id}.copy")))
+                        .small()
+                        .track_focus(focus)
+                        .label(t!("settings.copy").to_string())
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                        }),
+                )
+                .into_any_element(),
+        )
     }
 }
 
@@ -358,6 +499,13 @@ impl Render for SettingsDialog {
         let batch_note = range(&self.batch_size, batch_range(), cx);
         let confirm_note = range(&self.confirm_above, CONFIRM_RANGE, cx)
             .unwrap_or((label("settings.confirm_above.note"), false));
+        let update_on = self.state.read(cx).settings.update_check;
+        let checking = self.state.read(cx).update_check == Some(UpdateCheck::Running);
+        let about = t!(
+            "settings.about.version",
+            version = env!("CARGO_PKG_VERSION")
+        )
+        .to_string();
         let rows = v_flex()
             .id("settings.rows")
             .gap_2()
@@ -419,10 +567,121 @@ impl Render for SettingsDialog {
                 number("settings.confirm_above", &self.confirm_above),
                 Some(confirm_note),
                 cx,
-            ));
+            ))
+            .child(heading(label("settings.privacy"), cx))
+            .child(
+                v_flex()
+                    .track_focus(&self.update_focus)
+                    .gap_1()
+                    .child(
+                        Switch::new("settings.update_check")
+                            .label(label("settings.update_check"))
+                            .checked(update_on)
+                            .on_click(cx.listener(|this, on: &bool, window, cx| {
+                                let on = *on;
+                                this.change(|s| s.update_check = on, window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(label("settings.update_check.note")),
+                    ),
+            )
+            .child(row(
+                "settings.check_now",
+                Button::new("settings.check_now.button")
+                    .small()
+                    .track_focus(&self.check_focus)
+                    .label(label("settings.check_now"))
+                    .disabled(checking)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.check_for_update(cx));
+                    }))
+                    .into_any_element(),
+                self.update_note(cx),
+                cx,
+            ))
+            .child(heading(label("settings.storage"), cx))
+            .child(row(
+                "settings.logs",
+                Button::new("settings.open_logs")
+                    .small()
+                    .track_focus(&self.logs_focus)
+                    .label(label("settings.open_logs"))
+                    .children(Kbd::binding_for_action(&OpenLogs, Some(SETTINGS), window))
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenLogs), cx))
+                    .into_any_element(),
+                None,
+                cx,
+            ))
+            .child(row(
+                "settings.clear_cache",
+                Button::new("settings.clear_cache.button")
+                    .small()
+                    .track_focus(&self.clear_focus)
+                    .label(label("settings.clear_cache"))
+                    .on_click(cx.listener(|this, _, window, cx| this.clear_cache(window, cx)))
+                    .into_any_element(),
+                self.cleared.map(|count| {
+                    let text = t!("settings.clear_cache.done", count = count);
+                    (text.to_string(), false)
+                }),
+                cx,
+            ))
+            .children(Self::path_row(
+                "settings.path.config",
+                store::config_dir(),
+                &self.copy_focus[0],
+                cx,
+            ))
+            .children(Self::path_row(
+                "settings.path.data",
+                store::data_dir(),
+                &self.copy_focus[1],
+                cx,
+            ))
+            .children(Self::path_row(
+                "settings.path.logs",
+                store::logs_dir(),
+                &self.copy_focus[2],
+                cx,
+            ))
+            .child(heading(label("settings.about"), cx))
+            .child(
+                div()
+                    .id("settings.about")
+                    .test_support()
+                    .aria_label(SharedString::from(about.clone()))
+                    .text_sm()
+                    .child(about),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(label("welcome.trademark")),
+            )
+            .child(
+                h_flex().child(
+                    Button::new("settings.releases")
+                        .link()
+                        .track_focus(&self.releases_focus)
+                        .label(label("settings.releases"))
+                        .on_click(|_, _, cx| cx.open_url(RELEASES_PAGE)),
+                ),
+            );
         v_flex()
             .id("settings")
             .test_support()
+            .key_context(SETTINGS)
+            .track_focus(&self.focus_handle)
+            .on_action(|_: &OpenLogs, _, cx| {
+                if let Some(dir) = store::logs_dir() {
+                    cx.reveal_path(&dir);
+                }
+            })
             .gap_2()
             .children(error.map(|problem| {
                 let text = match problem {

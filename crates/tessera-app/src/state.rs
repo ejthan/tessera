@@ -13,7 +13,7 @@ use std::time::Duration;
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use rust_i18n::t;
 use secrecy::{ExposeSecret as _, SecretString};
-use tessera_client::{RequestEvent, RequestHook};
+use tessera_client::{Error, RequestEvent, RequestHook};
 use tessera_core::cli::Launch;
 use tessera_core::documents::views::{self, CollectionView, ViewsFile};
 use tessera_core::import;
@@ -23,15 +23,36 @@ use tessera_core::search::history::{self, History, HistoryItem};
 use tessera_core::search::params::SearchDraft;
 use tessera_core::search::saved::{self, SavedFile, SavedQuery};
 use tessera_core::secrets::{SecretError, SecretStore};
-use tessera_core::settings::{self, Settings};
+use tessera_core::settings::{self, Settings, is_newer};
 use tessera_core::store::{self, ConnectionsFile, SCHEMA_VERSION, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::admin::AdminBackendGlobal;
 use crate::connection::{Connected, ConnectionState, ConnectorGlobal, client_options, error_text};
 use crate::runtime::Tokio;
 use crate::views::status_bar;
+
+/// Where the update check stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateCheck {
+    /// Asking.
+    Running,
+    /// This is the latest version.
+    Current,
+    /// This tag is newer.
+    Newer(String),
+    /// The project has no release yet.
+    NoRelease,
+    /// The tag is no version.
+    UnknownTag(String),
+    /// It failed, in full.
+    Failed(String),
+}
+
+/// A newer version exists, under this tag.
+pub struct UpdateFound(pub String);
 
 /// Why settings are not saved, in full.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +283,8 @@ pub struct AppState {
     pub settings_path: Option<PathBuf>,
     /// Why `settings.toml` is not being written, in full. The dialog shows it.
     pub settings_error: Option<SettingsProblem>,
+    /// The newest update check of this session.
+    pub update_check: Option<UpdateCheck>,
     settings_chain: WriteChain,
     log: RequestLog,
     log_tx: UnboundedSender<LogEntry>,
@@ -317,6 +340,7 @@ impl AppState {
             settings: Settings::default(),
             settings_path: None,
             settings_error: None,
+            update_check: None,
             settings_chain: WriteChain::default(),
         }
     }
@@ -429,6 +453,36 @@ impl AppState {
                 })
                 .ok();
             }
+        })
+        .detach();
+    }
+
+    /// Asks GitHub for the latest release. One request at a time.
+    pub fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        if self.update_check == Some(UpdateCheck::Running) {
+            return;
+        }
+        self.update_check = Some(UpdateCheck::Running);
+        cx.notify();
+        let answer = cx.global::<AdminBackendGlobal>().0.latest_release();
+        cx.spawn(async move |this, cx| {
+            let check = match answer.await {
+                Err(Error::Http { status: 404, .. }) => UpdateCheck::NoRelease,
+                Err(e) => UpdateCheck::Failed(e.to_string()),
+                Ok(tag) => match is_newer(&tag, env!("CARGO_PKG_VERSION")) {
+                    Some(true) => UpdateCheck::Newer(tag),
+                    Some(false) => UpdateCheck::Current,
+                    None => UpdateCheck::UnknownTag(tag),
+                },
+            };
+            this.update(cx, |s, cx| {
+                if let UpdateCheck::Newer(tag) = &check {
+                    cx.emit(UpdateFound(tag.clone()));
+                }
+                s.update_check = Some(check);
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -1066,6 +1120,7 @@ fn observe_connection(conn: &Entity<ConnectionState>, cx: &mut Context<AppState>
     .detach();
 }
 
+impl EventEmitter<UpdateFound> for AppState {}
 impl EventEmitter<OpenOverview> for AppState {}
 impl EventEmitter<OpenCollections> for AppState {}
 impl EventEmitter<OpenCollection> for AppState {}

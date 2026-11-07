@@ -9,22 +9,20 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use gpui_kit::component::table::{Column, TableDelegate, TableState};
 use gpui_kit::component::{
     ActiveTheme as _, Size, Theme, ThemeMode, ThemeRegistry, WindowExt as _,
 };
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    App, AppContext as _, Bounds, Context, Entity, IntoElement, Point, TestAppContext, Window,
-    WindowHandle, base::Root, px, size,
+    AppContext as _, Bounds, Entity, Point, TestAppContext, WindowHandle, base::Root, px, size,
 };
 use tessera_app::actions::{OpenPalette, OpenSettings};
-use tessera_app::settings::{appearance_changed, follow_language, table_size};
+use tessera_app::settings::{appearance_changed, table_size};
 use tessera_app::state::AppState;
+use tessera_app::views::root::RootView;
 use tessera_core::secrets::MemoryStore;
-use tessera_core::settings::{Density, Language, Settings};
+use tessera_core::settings::{Density, Language, RELEASES_PAGE, Settings};
 use tessera_core::store::ConnectionsFile;
 
 use common::*;
@@ -280,54 +278,6 @@ async fn a_failed_write_shows_inline_and_stops_saving(cx: &mut TestAppContext) {
     assert!(!f.path.exists(), "nothing is written after a failure");
 }
 
-/// Counts how often the kit reads its columns, which it caches.
-struct CountedColumns(Arc<AtomicUsize>);
-
-impl TableDelegate for CountedColumns {
-    fn columns_count(&self, _: &App) -> usize {
-        1
-    }
-
-    fn rows_count(&self, _: &App) -> usize {
-        0
-    }
-
-    fn column(&self, _: usize, _: &App) -> Column {
-        self.0.fetch_add(1, Ordering::Relaxed);
-        Column::new("a", "a")
-    }
-
-    fn render_td(
-        &mut self,
-        _: usize,
-        _: usize,
-        _: &mut Window,
-        _: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
-        "a"
-    }
-}
-
-#[gpui_kit::test]
-async fn open_tables_reread_their_headers_after_a_language_change(cx: &mut TestAppContext) {
-    let f = Fixture::open(cx, None);
-    let reads = Arc::new(AtomicUsize::new(0));
-    let delegate = CountedColumns(reads.clone());
-    let _table = f.act(cx, |window, cx| {
-        cx.new(|cx| {
-            follow_language(cx);
-            TableState::new(delegate, window, cx)
-        })
-    });
-    f.settle(cx);
-    f.open_dialog(cx);
-    f.pick(cx, "settings.density", 1);
-    let before = reads.load(Ordering::Relaxed);
-    f.pick(cx, "settings.language", 2);
-    assert!(reads.load(Ordering::Relaxed) > before);
-    f.pick(cx, "settings.language", 0);
-}
-
 #[gpui_kit::test]
 async fn a_removed_theme_keeps_following_the_system(cx: &mut TestAppContext) {
     let f = Fixture::open(cx, Some("theme = \"gone\"\n"));
@@ -339,6 +289,109 @@ async fn a_removed_theme_keeps_following_the_system(cx: &mut TestAppContext) {
         appearance_changed(&settings, window, cx);
         assert!(!cx.theme().mode.is_dark());
     });
+}
+
+impl Fixture {
+    fn note(&self, cx: &mut TestAppContext, id: &str) -> String {
+        let id = id.to_string();
+        self.act(cx, |window, _| window.find(id).label().unwrap().to_string())
+    }
+
+    /// Tabs to the control, which scrolls it into view, and clicks it.
+    fn click(&self, cx: &mut TestAppContext, id: &str) {
+        for _ in 0..16 {
+            self.act(cx, |window, cx| window.press("tab", cx));
+            self.settle(cx);
+            let id = id.to_string();
+            if self.act(cx, |window, _| window.find(id).focused()) == Some(true) {
+                break;
+            }
+        }
+        let id = id.to_string();
+        self.act(cx, |window, cx| window.click(id, cx));
+        self.settle(cx);
+    }
+}
+
+#[gpui_kit::test]
+async fn the_update_check_is_off_and_sends_nothing(cx: &mut TestAppContext) {
+    let admin = fake_admin(cx);
+    let f = Fixture::open(cx, None);
+    assert!(!f.settings(cx).update_check);
+    let state = f.state.clone();
+    f.act(cx, |window, cx| {
+        cx.new(|cx| RootView::new(state, window, cx));
+    });
+    f.settle(cx);
+    assert_eq!(*admin.calls.lock().unwrap(), Vec::<String>::new());
+}
+
+#[gpui_kit::test]
+async fn turning_the_check_on_sends_nothing_until_a_start(cx: &mut TestAppContext) {
+    let admin = fake_admin(cx);
+    let f = Fixture::open(cx, None);
+    f.open_dialog(cx);
+    f.click(cx, "settings.update_check");
+    assert!(f.settings(cx).update_check);
+    assert_eq!(*admin.calls.lock().unwrap(), Vec::<String>::new());
+}
+
+#[gpui_kit::test]
+async fn the_update_check_runs_once_at_a_start_when_on(cx: &mut TestAppContext) {
+    let admin = fake_admin(cx);
+    let f = Fixture::open(cx, Some("update_check = true\n"));
+    let state = f.state.clone();
+    f.act(cx, |window, cx| {
+        cx.new(|cx| RootView::new(state, window, cx));
+    });
+    f.settle(cx);
+    assert_eq!(admin.calls.lock().unwrap().len(), 1);
+}
+
+#[gpui_kit::test]
+async fn check_now_shows_a_newer_version_and_only_the_constant_link(cx: &mut TestAppContext) {
+    let admin = fake_admin(cx);
+    *admin.release.lock().unwrap() = Some("v99.0.0".into());
+    let f = Fixture::open(cx, None);
+    f.open_dialog(cx);
+    f.click(cx, "settings.check_now.button");
+    let text = f.note(cx, "settings.check_now.note");
+    assert!(text.contains("v99.0.0"), "{text}");
+    assert!(text.contains(RELEASES_PAGE), "{text}");
+    assert_eq!(f.act(cx, |window, cx| window.notifications(cx).len()), 1);
+}
+
+#[gpui_kit::test]
+async fn a_404_says_there_is_no_release_in_the_section_only(cx: &mut TestAppContext) {
+    let _admin = fake_admin(cx);
+    let f = Fixture::open(cx, None);
+    f.open_dialog(cx);
+    f.click(cx, "settings.check_now.button");
+    let text = f.note(cx, "settings.check_now.note");
+    assert!(text.contains("no release"), "{text}");
+    assert_eq!(f.act(cx, |window, cx| window.notifications(cx).len()), 0);
+}
+
+#[gpui_kit::test]
+async fn a_tag_that_is_no_version_prompts_nothing(cx: &mut TestAppContext) {
+    let admin = fake_admin(cx);
+    *admin.release.lock().unwrap() = Some("nightly".into());
+    let f = Fixture::open(cx, None);
+    f.open_dialog(cx);
+    f.click(cx, "settings.check_now.button");
+    assert!(f.note(cx, "settings.check_now.note").contains("nightly"));
+}
+
+#[gpui_kit::test]
+async fn storage_and_about_show(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx, None);
+    f.open_dialog(cx);
+    let about = f.note(cx, "settings.about");
+    assert!(about.contains(env!("CARGO_PKG_VERSION")), "{about}");
+    assert!(about.contains("GPL-3.0-or-later"), "{about}");
+    assert!(f.has(cx, "settings.path.logs.copy"));
+    assert!(f.has(cx, "settings.open_logs"));
+    assert!(f.has(cx, "settings.releases"));
 }
 
 #[gpui_kit::test]
@@ -405,6 +458,14 @@ async fn tab_reaches_every_control_and_shows_it(cx: &mut TestAppContext) {
         "settings.batch_size",
         "settings.poll",
         "settings.confirm_above",
+        "settings.update_check",
+        "settings.check_now.button",
+        "settings.open_logs",
+        "settings.clear_cache.button",
+        "settings.path.config.copy",
+        "settings.path.data.copy",
+        "settings.path.logs.copy",
+        "settings.releases",
     ];
     for id in ids {
         f.act(cx, |window, cx| window.press("tab", cx));

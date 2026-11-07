@@ -23,7 +23,7 @@ use tessera_core::backup::restore::{
     RowKind, RowState,
 };
 use tessera_core::profile::Profile;
-use tessera_core::transfer::{DEFAULT_BATCH, JobControl, JobEnd};
+use tessera_core::transfer::{JobControl, JobEnd};
 
 use super::{Danger, client_of, confirm_write, notice, row_button};
 use crate::actions::{PickImportFile, SaveResource, StopWaiting};
@@ -228,6 +228,10 @@ impl RestoreForm {
                 }
             };
             let alive = this.update(cx, |this, cx| {
+                if let Some(temp) = &temp {
+                    let jobs = cx.global::<JobsGlobal>().0.clone();
+                    jobs.update(cx, |jobs, _| jobs.hold_temp(temp));
+                }
                 this.temp = temp;
                 stage(Stage::Verifying)(this, cx);
             });
@@ -477,7 +481,7 @@ impl RestoreForm {
             loaded: opened.loaded.clone(),
             ticked: self.ticked.clone(),
             replace: replace.map(|r| (r.kind, r.name.clone())).collect(),
-            batch_size: DEFAULT_BATCH,
+            batch_size: crate::settings::current(cx).batch_size,
         };
         let label = self.chosen.clone();
         let (connection, temp) = (self.connection.clone(), self.temp.clone());
