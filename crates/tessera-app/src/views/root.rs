@@ -11,6 +11,7 @@ use gpui_kit::component::dock::{
     DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, PaneRef, PanelId, panel_handle,
 };
 use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
 };
@@ -952,6 +953,7 @@ impl Render for RootView {
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| t!("titlebar.no_connection").to_string()),
         );
+        let full_title = title.clone();
         let switcher = h_flex()
             .flex_none()
             .gap_2()
@@ -967,6 +969,7 @@ impl Render for RootView {
                     // UX rule 1: a long name must not push the badge next to it away.
                     .max_w(px(TITLE_WIDTH))
                     .truncate()
+                    .tooltip(move |window, cx| Tooltip::new(full_title.clone()).build(window, cx))
                     .child(title),
             )
             .when_some(profile, |el, p| {
@@ -1036,9 +1039,12 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &ToggleRequestLog, window, cx| {
                 this.toggle_bottom(this.log_id(), window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ShowLastFailure, window, cx| {
-                this.show_last_failure(window, cx);
-            }))
+            // Registered only with a failure, so the palette offers it only then.
+            .when(last_failure.is_some(), |el| {
+                el.on_action(cx.listener(|this, _: &ShowLastFailure, window, cx| {
+                    this.show_last_failure(window, cx);
+                }))
+            })
             .on_action(cx.listener(|this, _: &ToggleJobs, window, cx| {
                 this.toggle_bottom(this.jobs_id(), window, cx);
             }))

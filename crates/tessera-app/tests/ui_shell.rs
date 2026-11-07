@@ -1026,3 +1026,32 @@ fn the_welcome_screen_shows_the_palette_and_settings_chords(cx: &mut TestAppCont
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+async fn the_section_crumb_leads_to_the_list(cx: &mut TestAppContext) {
+    let (handle, state, profile, _rt) = on_overview(cx, "staging", Environment::Staging).await;
+    state.update(cx, |s, cx| {
+        s.open_collection(profile.id, "books".into(), cx)
+    });
+    wait_for_label(cx, handle, "titlebar.breadcrumb".into(), "books").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // The kit gives a crumb no id, so this walks the path until the tab changes.
+        let bounds = window.find("titlebar.breadcrumb").bounds();
+        for x in (70..200).step_by(10) {
+            let at = bounds.origin + gpui_kit::point(px(x as f32), bounds.size.height / 2.);
+            window.pointer_move(at, None, cx);
+            window.pointer_down(at, gpui_kit::MouseButton::Left, cx);
+            window.pointer_up(at, gpui_kit::MouseButton::Left, cx);
+        }
+    })
+    .unwrap();
+    wait_for_label(
+        cx,
+        handle,
+        "titlebar.breadcrumb".into(),
+        "staging / Collections",
+    )
+    .await;
+    assert_eq!(crumb_path(cx, handle), "staging / Collections");
+}

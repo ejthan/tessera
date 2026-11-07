@@ -223,11 +223,11 @@ async fn lists_actions_of_the_focused_view_only(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn lists_the_last_failed_request(cx: &mut TestAppContext) {
+async fn leaves_out_the_last_failed_request_without_one(cx: &mut TestAppContext) {
     let f = Fixture::on_documents(cx, Profile::new("test", vec![node()])).await;
     f.palette(cx);
     f.query(cx, "last failed");
-    assert!(f.has_action(cx, "ShowLastFailure"));
+    assert!(!f.has_action(cx, "ShowLastFailure"));
 }
 
 #[gpui_kit::test]

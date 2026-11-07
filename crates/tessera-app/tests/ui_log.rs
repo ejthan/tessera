@@ -1043,3 +1043,23 @@ async fn copy_as_curl_does_nothing_while_the_log_is_hidden(cx: &mut TestAppConte
         "the selection survives hiding"
     );
 }
+
+#[gpui_kit::test]
+async fn the_palette_offers_the_last_failure_only_when_there_is_one(cx: &mut TestAppContext) {
+    let (handle, state, staging, _prod, _rt) = connected_pair(cx).await;
+    // The palette lists the available actions.
+    let offered = |cx: &mut TestAppContext| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .available_actions(cx)
+                .iter()
+                .any(|action| action.name() == "tessera::ShowLastFailure")
+        })
+        .unwrap()
+    };
+    assert!(!offered(cx), "nothing failed yet");
+    send(cx, &state, vec![failure(1, &staging)]);
+    wait_for_element(cx, handle, "status.last_failure".into(), true).await;
+    assert!(offered(cx));
+}

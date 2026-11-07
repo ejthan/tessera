@@ -190,8 +190,8 @@ impl RequestLog {
             .find(|e| e.event.id == id)
     }
 
-    /// Id of the newest failed user request of `connection`. Polling stays out: a user never
-    /// saw those failures.
+    /// Id of the newest failed user request of `connection`. Polling stays out, so a poll that
+    /// fills `collections_error` on the overview gets no control (D104).
     pub fn latest_failed(&self, connection: Uuid) -> Option<u64> {
         self.user
             .iter()

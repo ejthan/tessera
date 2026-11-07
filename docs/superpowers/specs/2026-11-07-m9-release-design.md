@@ -177,7 +177,7 @@ Callers: `store::write_atomic`, `store::load` and the other readers of config fi
 pub fn latest_failed(&self, connection: Uuid) -> Option<u64>;
 ```
 
-It walks the user buffer from newest to oldest with `LogEntry::is_error`, and it leaves polling out, since a user never saw those failures.
+It walks the user buffer from newest to oldest with `LogEntry::is_error`, and it leaves polling out. One polling failure does show: a failed collection list fills `collections_error` on the overview, and that error gets no control (D104).
 
 ## 6. tessera-widgets
 

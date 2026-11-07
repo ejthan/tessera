@@ -38,7 +38,7 @@ Logs go to stderr and to `tessera.log.YYYY-MM-DD` in the `logs` folder of the lo
 
 The contrast guarantee of `tests/ui_a11y.rs` covers the built-in light and dark themes. A theme of the registry keeps the colors its author set, so it may fall below WCAG AA.
 
-`RUST_LOG=tessera::nf4=warn` shows the synchronous UI work that took longer than a 16 ms frame (NF4): one line with the span's `name` and its `ms`, from `log.drain`, `palette.rank`, `log.filter`, `jobs.progress` and `documents.page`. A debug frame can take that long by itself, so judge the numbers in a release build. A debug build also panics with `blocking call on the UI thread: …` when a config write, a keychain call or a backup archive runs on the UI thread; a release build does not check.
+Synchronous UI work that takes longer than a 16 ms frame (NF4) logs a warning: one line with the span's `name` and its `ms`, from `log.drain`, `palette.rank`, `log.filter`, `jobs.progress` and `documents.page`. The default level `info` keeps these lines on in every build, with no rate limit, on stderr and in the log file. stderr is written on the UI thread, so a full pipe blocks the thread being measured. `RUST_LOG=tessera::nf4=warn` leaves only these lines and silences every other log. A debug frame can take that long by itself, so judge the numbers in a release build. A debug build also panics with `blocking call on the UI thread: …` when a config write, a keychain call or a backup archive runs on the UI thread; a release build does not check.
 
 `cargo run -p tessera-app --features frame-overlay` adds a frame-time overlay, cycled with ⌘⌥F / Ctrl+Alt+F in the documents view.
 

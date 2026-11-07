@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::redact;
 use crate::search::params::SearchDraft;
 use crate::store::{self, StoreError};
+use crate::ui_thread::assert_off;
 
 /// Entries kept per kind.
 pub const HISTORY_CAP: usize = 500;
@@ -197,6 +198,7 @@ fn to_line(item: &HistoryItem) -> Result<String, StoreError> {
 
 /// Adds `item` at the end of the file.
 pub fn append(path: &Path, item: &HistoryItem) -> Result<(), StoreError> {
+    assert_off("history::append");
     let line = to_line(item)? + "\n";
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
