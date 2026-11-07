@@ -111,6 +111,7 @@ gpui_kit::actions!(
         DeleteSavedQuery,
         OpenExport,
         OpenPalette,
+        OpenSettings,
         QuickSwitch,
         ToggleJobs,
         CancelJob,
@@ -574,6 +575,10 @@ const OPEN_PALETTE: &str = "cmd-k";
 #[cfg(not(target_os = "macos"))]
 const OPEN_PALETTE: &str = "ctrl-k";
 #[cfg(target_os = "macos")]
+const OPEN_SETTINGS: &str = "cmd-,";
+#[cfg(not(target_os = "macos"))]
+const OPEN_SETTINGS: &str = "ctrl-,";
+#[cfg(target_os = "macos")]
 const QUICK_SWITCH: &str = "cmd-p";
 #[cfg(not(target_os = "macos"))]
 const QUICK_SWITCH: &str = "ctrl-p";
@@ -627,6 +632,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     ImportProfiles,
     ExportProfiles,
     ToggleReopenLast,
+    OpenSettings,
     ToggleRequestLog,
     CopyAsCurl,
     CopyKey,
@@ -864,6 +870,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(NEW_CONNECTION, NewConnection, None),
         KeyBinding::new(QUIT, Quit, None),
         KeyBinding::new(OPEN_PALETTE, OpenPalette, None),
+        KeyBinding::new(OPEN_SETTINGS, OpenSettings, None),
         KeyBinding::new(QUICK_SWITCH, QuickSwitch, None),
         KeyBinding::new(TOGGLE_LOG, ToggleRequestLog, None),
         KeyBinding::new(TOGGLE_JOBS, ToggleJobs, None),

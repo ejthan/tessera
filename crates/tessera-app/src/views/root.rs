@@ -3,10 +3,13 @@
 //! The window's top-level view: title bar, the dock (sidebar, tabs, request log), status bar.
 
 use gpui_kit::base::{Root, TestSupportExt as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{
     DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, PaneRef, PanelId, panel_handle,
 };
-use gpui_kit::component::{ActiveTheme as _, Theme, TitleBar, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, prelude::*,
@@ -22,14 +25,17 @@ use super::dock::{
 use super::jobs::panel::JobsPanel;
 use super::palette::{self, PaletteMode};
 use super::request_log::RequestLogPanel;
+use super::settings::SettingsDialog;
 use super::{env_badge, status_bar};
 use crate::actions::{
     CopyAsCurl, NewConnection, OpenAi, OpenAliases, OpenAnalytics, OpenBackup, OpenConsoleTab,
     OpenCurations, OpenKeys, OpenOperations, OpenPalette, OpenPresetsTab, OpenSearchTab,
-    OpenStemming, OpenStopwords, OpenSynonyms, QuickSwitch, ToggleJobs, ToggleRequestLog,
+    OpenSettings, OpenStemming, OpenStopwords, OpenSynonyms, QuickSwitch, ToggleJobs,
+    ToggleRequestLog,
 };
 use crate::connection::ConnectionState;
 use crate::jobs::{JobFinished, JobId, JobKind, Jobs, JobsGlobal, RunningChanged};
+use crate::settings;
 use crate::state::{
     AppState, CloseCollection, OpenCollection, OpenCollections, OpenConsole, OpenOverview,
     OpenReindex, OpenResource, OpenSearch, ResourceKind,
@@ -71,7 +77,7 @@ fn count_running(jobs: &Jobs) -> Option<usize> {
 impl RootView {
     /// Builds the view and keeps the theme in sync with the system appearance.
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Theme::sync_system_appearance(Some(window), cx);
+        settings::apply(&state.read(cx).settings.clone(), window, cx);
         let (dock, skin) = DockSkin::dock_area("tessera", None, window, cx);
         skin.set_close_button_visible(true, cx);
         let sidebar = cx.new(|cx| SidebarPanel::new(state.clone(), cx));
@@ -108,8 +114,9 @@ impl RootView {
                 window,
                 |this, _, event: &JobFinished, window, cx| this.job_finished(event.0, window, cx),
             ),
-            cx.observe_window_appearance(window, |_, window, cx| {
-                Theme::sync_system_appearance(Some(window), cx);
+            cx.observe_window_appearance(window, |this, window, cx| {
+                let settings = this.state.read(cx).settings.clone();
+                settings::appearance_changed(&settings, window, cx);
             }),
             cx.observe_in(&state, window, |this, _, window, cx| {
                 this.close_stale_tabs(window, cx);
@@ -324,6 +331,12 @@ impl RootView {
         };
         let text = job.toast_text();
         window.push_notification(text, cx);
+    }
+
+    fn open_settings(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !window.has_active_dialog(cx) {
+            SettingsDialog::open(self.state.clone(), window, cx);
+        }
     }
 
     fn open_palette(&self, mode: PaletteMode, window: &mut Window, cx: &mut Context<Self>) {
@@ -744,6 +757,9 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.open_palette(PaletteMode::All, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_settings(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &QuickSwitch, window, cx| {
                 this.open_palette(PaletteMode::Collections, window, cx);
             }))
@@ -821,7 +837,20 @@ impl Render for RootView {
             })
             .bg(theme.background)
             .text_color(theme.foreground)
-            .child(TitleBar::new().child(switcher))
+            .child(
+                TitleBar::new().child(switcher).child(
+                    Button::new("titlebar.settings")
+                        .ghost()
+                        .small()
+                        .mr_2()
+                        .icon(IconName::Settings)
+                        .accessibility_label(t!("settings.open").to_string())
+                        .tooltip_with_action(t!("settings.open").to_string(), &OpenSettings, None)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_settings(window, cx);
+                        })),
+                ),
+            )
             .when(!self.keymap_errors.is_empty(), |el| {
                 let text = SharedString::from(self.keymap_errors.join("\n"));
                 el.child(

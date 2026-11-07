@@ -14,6 +14,7 @@ pub mod poller;
 pub mod relevance;
 pub mod runtime;
 pub mod search;
+pub mod settings;
 pub mod state;
 pub mod transfer;
 pub mod views;
@@ -88,6 +89,8 @@ pub fn run(launch: Launch) -> Result<(), String> {
         tessera_core::search::history::history_path(),
         tessera_core::search::saved::saved_path(),
     );
+    state.load_settings(tessera_core::settings::settings_path());
+    let language = state.settings.language;
     let open = state.resolve(launch)?;
     // Like the profiles: once, before the window opens.
     let keymap = tessera_core::keymap::keymap_path().map_or_else(
@@ -135,7 +138,7 @@ pub fn run(launch: Launch) -> Result<(), String> {
         cx.set_global(runtime::Tokio(handle));
         gpui_kit::init(cx);
         jobs::init(cx);
-        i18n::init();
+        i18n::init(language);
         actions::bind_keys(cx);
         // A file that does not parse changes nothing: the default shortcuts stay.
         let keymap_errors = match keymap {

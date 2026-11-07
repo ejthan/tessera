@@ -893,6 +893,7 @@ impl Render for CollectionsList {
                 .min_h_0()
                 .child(
                     DataTable::new(&self.table)
+                        .with_size(crate::settings::table_size(cx))
                         .bordered(false)
                         .accessibility_label(t!("sidebar.collections").to_string()),
                 )

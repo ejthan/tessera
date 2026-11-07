@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use rust_i18n::t;
@@ -22,6 +23,7 @@ use tessera_core::search::history::{self, History, HistoryItem};
 use tessera_core::search::params::SearchDraft;
 use tessera_core::search::saved::{self, SavedFile, SavedQuery};
 use tessera_core::secrets::{SecretError, SecretStore};
+use tessera_core::settings::{self, Settings};
 use tessera_core::store::{self, ConnectionsFile, SCHEMA_VERSION, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
@@ -245,6 +247,13 @@ pub struct AppState {
     /// Why the saved file did not load; while set, it is not written.
     pub saved_error: Option<String>,
     saved_chain: WriteChain,
+    /// The preferences; the defaults until [`Self::load_settings`].
+    pub settings: Settings,
+    /// Where `settings.toml` lives; `None` means settings are not persisted.
+    pub settings_path: Option<PathBuf>,
+    /// Why `settings.toml` is not being written, in full. The dialog shows it.
+    pub settings_error: Option<String>,
+    settings_chain: WriteChain,
     log: RequestLog,
     log_tx: UnboundedSender<LogEntry>,
     /// Taken by [`AppState::spawn_log_drain`].
@@ -296,6 +305,10 @@ impl AppState {
             saved_path: None,
             saved_error: None,
             saved_chain: WriteChain::default(),
+            settings: Settings::default(),
+            settings_path: None,
+            settings_error: None,
+            settings_chain: WriteChain::default(),
         }
     }
 
@@ -367,6 +380,52 @@ impl AppState {
         }
         self.history_path = history_path;
         self.saved_path = saved_path;
+    }
+
+    /// Reads `settings.toml`, once, before the window. A bad file leaves the defaults and is
+    /// not written over.
+    pub fn load_settings(&mut self, path: Option<PathBuf>) {
+        if let Some(path) = &path {
+            match settings::load(path) {
+                Ok(settings) => self.settings = settings,
+                Err(e) => {
+                    tracing::warn!("settings not loaded, they will not be written: {e}");
+                    self.settings_error = Some(e.to_string());
+                }
+            }
+        }
+        self.settings_path = path;
+    }
+
+    /// Applies `change` and writes the file, unless a load or an earlier write failed.
+    pub fn change_settings(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+        change(&mut self.settings);
+        cx.notify();
+        let Some(path) = self.settings_path.clone() else {
+            return;
+        };
+        if self.settings_error.is_some() {
+            return;
+        }
+        let file = self.settings.clone();
+        let write = move || settings::save(&path, &file).map_err(|e| e.to_string());
+        let done = self
+            .settings_chain
+            .push(write, |s| &mut s.settings_chain, cx);
+        cx.spawn(async move |this, cx| {
+            if let Some(Err(e)) = done.await {
+                this.update(cx, |s, cx| {
+                    s.settings_error = Some(e);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn poll_interval(&self) -> Duration {
+        Duration::from_secs(u64::from(self.settings.poll_seconds))
     }
 
     fn is_temporary(&self, profile: Uuid) -> bool {
@@ -797,7 +856,12 @@ impl AppState {
                 conn
             }
             None => {
-                let conn = cx.new(|_| ConnectionState::new(profile.clone()));
+                let interval = self.poll_interval();
+                let conn = cx.new(|_| {
+                    let mut conn = ConnectionState::new(profile.clone());
+                    conn.interval = interval;
+                    conn
+                });
                 observe_connection(&conn, cx);
                 self.connections.push(conn.clone());
                 conn
@@ -892,6 +956,7 @@ impl AppState {
         let id = profile.id;
         self.disconnect(id, cx);
         let mut state = ConnectionState::new(profile);
+        state.interval = self.poll_interval();
         state.writes_unlocked = false;
         state.connected = Some(connected);
         let conn = cx.new(|_| state);

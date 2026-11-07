@@ -2311,6 +2311,54 @@ async fn multi_delete_builds_one_id_filter(cx: &mut TestAppContext) {
     assert!(f.ticked(cx).is_empty());
 }
 
+/// Ticks `ticks` documents with `confirm_above` of 5 and presses Delete.
+async fn delete_with_confirm_above_5(cx: &mut TestAppContext, ticks: u32) -> Fixture {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let settings = tessera_core::settings::Settings {
+        confirm_above: 5,
+        ..Default::default()
+    };
+    f.act(cx, |window, cx| {
+        tessera_app::settings::apply(&settings, window, cx)
+    });
+    for id in 1..=ticks {
+        f.tick(cx, &id.to_string());
+    }
+    f.press(cx, DELETE);
+    f
+}
+
+#[gpui_kit::test]
+async fn confirm_above_of_5_leaves_a_delete_of_5_plain(cx: &mut TestAppContext) {
+    let f = delete_with_confirm_above_5(cx, 5).await;
+    assert!(f.has(cx, "confirm.ok"));
+    assert!(!f.has(cx, "danger.input"));
+}
+
+#[gpui_kit::test]
+async fn confirm_above_of_5_makes_a_delete_of_6_typed(cx: &mut TestAppContext) {
+    let f = delete_with_confirm_above_5(cx, 6).await;
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+}
+
+#[gpui_kit::test]
+async fn a_new_documents_view_pages_by_the_setting(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 100).await;
+    let id = f.profile_id(cx);
+    let mut other = plain_schema();
+    other.name = "other".into();
+    *f.backend.data.lock().unwrap() = Some((vec![plain_schema(), other], vec![]));
+    cx.update(|cx| {
+        f.state.update(cx, |s, cx| {
+            s.settings.per_page = 20;
+            s.open_collection(id, "other".into(), cx);
+        })
+    });
+    wait_for_element(cx, f.handle, "documents.columns".into(), true).await;
+    f.settle(cx);
+    assert_eq!(f.docs.pages.lock().unwrap().last().unwrap().per_page, 20);
+}
+
 #[gpui_kit::test]
 async fn long_selection_is_batched(cx: &mut TestAppContext) {
     let docs = fake_documents(cx);

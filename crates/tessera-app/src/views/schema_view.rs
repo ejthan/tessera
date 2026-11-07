@@ -577,9 +577,11 @@ impl Render for SchemaView {
                 .gap_3()
                 .child(self.header(&l.collection, window, cx))
                 .child(
-                    div()
-                        .h(px(ROW_HEIGHT * (rows + 1) as f32 + 2.))
-                        .child(DataTable::new(&self.table).bordered(true)),
+                    div().h(px(ROW_HEIGHT * (rows + 1) as f32 + 2.)).child(
+                        DataTable::new(&self.table)
+                            .with_size(crate::settings::table_size(cx))
+                            .bordered(true),
+                    ),
                 )
                 .child(section("schema.options"))
                 .child(self.options(&l.collection, cx))

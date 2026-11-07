@@ -51,6 +51,8 @@ pub fn file_writer(dir: &Path) -> Result<(NonBlocking, WorkerGuard), InitError> 
     // The crate counts files, at each start and each rollover. Spec §11 says 7 days, which is
     // the same at one file a day; a day without a start writes no file, so 7 files can reach
     // further back than a week.
+    // First, or the crate's pruning prints an error on a first start. `build` reports a failure.
+    let _ = std::fs::create_dir_all(dir);
     let roller = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix("tessera.log")

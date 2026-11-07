@@ -7,7 +7,6 @@ use std::collections::BTreeSet;
 use gpui_kit::{App, Context, SharedString, Task, WeakEntity, Window};
 use rust_i18n::t;
 use tessera_client::{Client, Error};
-use tessera_core::documents::CONFIRM_ABOVE;
 use tessera_core::documents::export::{Danger, danger_level};
 use tessera_core::documents::ids::id_batches;
 use tessera_core::documents::{ID_FILTER_BYTES, MAX_SELECTION};
@@ -152,7 +151,7 @@ fn confirm_delete(
     let action = t!("documents.delete.action").to_string();
     let run =
         move |window: &mut Window, cx: &mut App| run(view.clone(), ids.clone(), draft, window, cx);
-    match danger_level(count, CONFIRM_ABOVE, prod) {
+    match danger_level(count, crate::settings::current(cx).confirm_above, prod) {
         // The dialog is gone by then, so a failure shows in the view.
         Danger::Medium => confirm::open(
             title,
