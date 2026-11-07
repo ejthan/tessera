@@ -306,10 +306,9 @@ impl DocRows {
                 self.search_time_ms = answer.search_time_ms;
                 self.error = None;
                 self.query_error = None;
-                if replaced {
-                    // The scroll position stays, and it may be far from page 1.
-                    self.fetch_wanted(cx);
-                }
+                // The scroll position may be far from page 1 after a replace, and a jump can want
+                // more pages than `MAX_INFLIGHT`, so each answer starts what is still missing.
+                self.fetch_wanted(cx);
                 new_column
             }
             Err(e) => {

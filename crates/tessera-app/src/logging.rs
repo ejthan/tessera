@@ -48,15 +48,15 @@ impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for Redacted<M> {
 /// The writer for `tessera.log.YYYY-MM-DD` in `dir`, off the calling thread, since a log call
 /// may run on the GPUI thread. The directory is made if needed.
 pub fn file_writer(dir: &Path) -> Result<(NonBlocking, WorkerGuard), InitError> {
-    // The crate counts files, at each start and each rollover. Spec §11 says 7 days, which is
-    // the same at one file a day; a day without a start writes no file, so 7 files can reach
-    // further back than a week.
+    // The crate counts files, and at each start it prunes to one below the limit, so 8 keeps 7
+    // days always, as spec §11 says, and an eighth for a day after a rollover. A day without a
+    // start writes no file, so the files can reach further back than a week.
     // First, or the crate's pruning prints an error on a first start. `build` reports a failure.
-    let _ = std::fs::create_dir_all(dir);
+    let _ = tessera_core::store::private_dir(dir);
     let roller = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix("tessera.log")
-        .max_log_files(7)
+        .max_log_files(8)
         .build(dir)?;
     Ok(tracing_appender::non_blocking(roller))
 }

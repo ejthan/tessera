@@ -3,9 +3,10 @@
 //! Puts the settings into effect: theme, font size and table density. The language is set by
 //! `i18n`.
 
+use gpui_kit::component::table::{TableDelegate, TableState};
 use gpui_kit::component::theme::ThemeRegistry;
 use gpui_kit::component::{Size, Theme, ThemeMode};
-use gpui_kit::{App, Global, Pixels, Window, px};
+use gpui_kit::{App, Context, Global, Pixels, Window, px};
 use tessera_core::settings::{Density, Settings};
 
 /// The kit's font size, read before the first change.
@@ -22,6 +23,21 @@ impl Global for Current {}
 pub fn current(cx: &App) -> Settings {
     cx.try_global::<Current>()
         .map_or_else(Settings::default, |c| c.0.clone())
+}
+
+/// Keeps the headers of this table in the language in use: the kit caches its column titles.
+/// A refresh takes the widths from the delegate again.
+pub fn follow_language<D: TableDelegate>(cx: &mut Context<TableState<D>>) {
+    let mut shown = rust_i18n::locale().to_string();
+    cx.observe_global::<Current>(move |table, cx| {
+        let locale = rust_i18n::locale().to_string();
+        if locale != shown {
+            shown = locale;
+            table.refresh(cx);
+            cx.notify();
+        }
+    })
+    .detach();
 }
 
 /// The size of a data table, `Size::XSmall` when compact.
@@ -67,13 +83,19 @@ fn apply_theme(name: &str, window: &mut Window, cx: &mut App) {
 fn apply_appearance(settings: &Settings, window: &mut Window, cx: &mut App) {
     apply_theme(&settings.theme, window, cx);
     let kit = cx.global::<KitFontSize>().0;
-    let size = settings.font_size.map_or(kit, |n| px(f32::from(n)));
+    let size = settings.font_size.map_or(kit, |n| px(n as f32));
     Theme::update(cx, |theme| theme.font_size = size);
+}
+
+/// Whether `name` leaves the mode to the system: `system`, or a theme that was removed.
+fn follows_system(name: &str, cx: &App) -> bool {
+    let known = ThemeRegistry::global(cx).themes().contains_key(name);
+    name == "system" || !(matches!(name, "light" | "dark") || known)
 }
 
 /// What a change of the system appearance does: nothing to an explicit theme.
 pub fn appearance_changed(settings: &Settings, window: &mut Window, cx: &mut App) {
-    if settings.theme == "system" {
+    if follows_system(&settings.theme, cx) {
         apply_appearance(settings, window, cx);
     }
 }

@@ -170,10 +170,21 @@ pub(crate) fn save_pretty<T: Serialize>(path: &Path, file: &T) -> Result<(), Sto
     write_atomic(path, json.as_bytes())
 }
 
+/// Makes `dir` if needed, readable by this user alone where the system has modes.
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// Writes `bytes` via a synced temporary file and a rename, creating parent directories.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        private_dir(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
     // Synced before the rename, so a power loss cannot leave an empty file in its place.
@@ -187,6 +198,20 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_dir_is_this_users_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let logs = dir.path().join("a").join("logs");
+        private_dir(&logs).expect("made");
+        let open = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&logs, open).expect("widened");
+        private_dir(&logs).expect("again");
+        let found = std::fs::metadata(&logs).expect("metadata");
+        assert_eq!(found.permissions().mode() & 0o777, 0o700);
+    }
 
     fn path(dir: &tempfile::TempDir) -> PathBuf {
         dir.path().join("sub").join("connections.json")

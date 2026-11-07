@@ -33,6 +33,15 @@ use crate::connection::{Connected, ConnectionState, ConnectorGlobal, client_opti
 use crate::runtime::Tokio;
 use crate::views::status_bar;
 
+/// Why settings are not saved, in full.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsProblem {
+    /// `settings.toml` could not be read, so it must not be written over.
+    Read(String),
+    /// A write failed, so later changes last until the app quits.
+    Write(String),
+}
+
 /// One file's writes: each waits for the one before, on the background executor, and quitting
 /// waits for the last.
 #[derive(Default)]
@@ -252,7 +261,7 @@ pub struct AppState {
     /// Where `settings.toml` lives; `None` means settings are not persisted.
     pub settings_path: Option<PathBuf>,
     /// Why `settings.toml` is not being written, in full. The dialog shows it.
-    pub settings_error: Option<String>,
+    pub settings_error: Option<SettingsProblem>,
     settings_chain: WriteChain,
     log: RequestLog,
     log_tx: UnboundedSender<LogEntry>,
@@ -390,7 +399,7 @@ impl AppState {
                 Ok(settings) => self.settings = settings,
                 Err(e) => {
                     tracing::warn!("settings not loaded, they will not be written: {e}");
-                    self.settings_error = Some(e.to_string());
+                    self.settings_error = Some(SettingsProblem::Read(e.to_string()));
                 }
             }
         }
@@ -415,7 +424,7 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             if let Some(Err(e)) = done.await {
                 this.update(cx, |s, cx| {
-                    s.settings_error = Some(e);
+                    s.settings_error = Some(SettingsProblem::Write(e));
                     cx.notify();
                 })
                 .ok();

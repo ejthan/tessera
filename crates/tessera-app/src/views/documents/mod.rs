@@ -162,6 +162,7 @@ impl DocumentsView {
         let per_page = state.read(cx).settings.per_page;
         let rows = DocRows::new(connection.clone(), name.clone(), prefs, per_page);
         let table = cx.new(|cx| {
+            crate::settings::follow_language(cx);
             TableState::new(rows, window, cx)
                 .cell_selectable(true)
                 .row_header(false)

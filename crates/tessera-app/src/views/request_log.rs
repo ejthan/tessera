@@ -272,6 +272,7 @@ impl RequestLogPanel {
     /// The log of `state`, refreshed whenever new entries arrive.
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let table = cx.new(|cx| {
+            crate::settings::follow_language(cx);
             TableState::new(LogRows::default(), window, cx)
                 .sortable(false)
                 .col_movable(false)

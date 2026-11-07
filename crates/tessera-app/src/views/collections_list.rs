@@ -479,6 +479,7 @@ impl CollectionsList {
             locked: false,
         };
         let table = cx.new(|cx| {
+            crate::settings::follow_language(cx);
             TableState::new(rows, window, cx)
                 .sortable(false)
                 .col_movable(false)

@@ -22,7 +22,7 @@ use rust_i18n::t;
 use tessera_core::settings::{Density, Language, POLL_CHOICES, Settings};
 use tessera_core::transfer::MAX_BATCH;
 
-use crate::state::AppState;
+use crate::state::{AppState, SettingsProblem};
 
 /// Width of the dialog.
 const WIDTH: f32 = 560.;
@@ -139,7 +139,7 @@ impl SettingsDialog {
             &font_labels,
             settings
                 .font_size
-                .map_or(0, |n| usize::from(n - FIRST_FONT_SIZE) + 1),
+                .map_or(0, |n| (n - i64::from(FIRST_FONT_SIZE)) as usize + 1),
         );
         let density = choice(&density_labels, settings.density as usize);
         let language = choice(&language_labels, settings.language as usize);
@@ -172,7 +172,7 @@ impl SettingsDialog {
                 s.theme = themes[ix].clone();
             }),
             Self::on_choice(&font_size, font_labels, window, cx, |s, ix| {
-                s.font_size = (ix > 0).then(|| FIRST_FONT_SIZE + ix as u8 - 1);
+                s.font_size = (ix > 0).then(|| i64::from(FIRST_FONT_SIZE) + ix as i64 - 1);
             }),
             Self::on_choice(&density, density_labels, window, cx, |s, ix| {
                 s.density = [Density::Comfortable, Density::Compact][ix];
@@ -264,10 +264,10 @@ impl SettingsDialog {
             state.change_settings(edit, cx);
             state.settings.clone()
         });
-        crate::settings::apply(&settings, window, cx);
         if settings.language != before {
             crate::i18n::init(settings.language);
         }
+        crate::settings::apply(&settings, window, cx);
         cx.notify();
     }
 }
@@ -424,8 +424,12 @@ impl Render for SettingsDialog {
             .id("settings")
             .test_support()
             .gap_2()
-            .children(error.map(|detail| {
-                let text = SharedString::from(t!("settings.error", detail = detail).to_string());
+            .children(error.map(|problem| {
+                let text = match problem {
+                    SettingsProblem::Read(detail) => t!("settings.error", detail = detail),
+                    SettingsProblem::Write(detail) => t!("settings.error.write", detail = detail),
+                };
+                let text = SharedString::from(text.to_string());
                 div()
                     .id("settings.error")
                     .test_support()

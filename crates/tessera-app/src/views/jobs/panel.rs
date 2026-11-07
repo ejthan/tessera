@@ -510,12 +510,14 @@ impl JobsPanel {
         let jobs = cx.global::<JobsGlobal>().0.clone();
         let rows = JobRows { jobs: jobs.clone() };
         let table = cx.new(|cx| {
+            crate::settings::follow_language(cx);
             TableState::new(rows, window, cx)
                 .sortable(false)
                 .col_movable(false)
                 .col_selectable(false)
         });
         let report = cx.new(|cx| {
+            crate::settings::follow_language(cx);
             TableState::new(ReportRows::default(), window, cx)
                 .sortable(false)
                 .col_movable(false)

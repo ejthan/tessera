@@ -9,14 +9,19 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use gpui_kit::component::{ActiveTheme as _, Size, ThemeRegistry, WindowExt as _};
+use gpui_kit::component::table::{Column, TableDelegate, TableState};
+use gpui_kit::component::{
+    ActiveTheme as _, Size, Theme, ThemeMode, ThemeRegistry, WindowExt as _,
+};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AppContext as _, Bounds, Entity, Point, TestAppContext, WindowHandle, base::Root, px, size,
+    App, AppContext as _, Bounds, Context, Entity, IntoElement, Point, TestAppContext, Window,
+    WindowHandle, base::Root, px, size,
 };
 use tessera_app::actions::{OpenPalette, OpenSettings};
-use tessera_app::settings::{appearance_changed, table_size};
+use tessera_app::settings::{appearance_changed, follow_language, table_size};
 use tessera_app::state::AppState;
 use tessera_core::secrets::MemoryStore;
 use tessera_core::settings::{Density, Language, Settings};
@@ -261,6 +266,79 @@ async fn a_failed_write_shows_inline_and_stops_saving(cx: &mut TestAppContext) {
     f.open_dialog(cx);
     f.pick(cx, "settings.density", 1);
     assert!(f.has(cx, "settings.error"));
+    let label = f.act(cx, |window, _| {
+        window.find("settings.error").label().unwrap().to_string()
+    });
+    assert!(label.contains("could not be written"), "{label}");
+
+    std::fs::remove_dir(f.path.with_extension("json.tmp")).unwrap();
+    f.pick(cx, "settings.font_size", 1);
+    assert!(
+        f.settings(cx).font_size.is_some(),
+        "the change still applies"
+    );
+    assert!(!f.path.exists(), "nothing is written after a failure");
+}
+
+/// Counts how often the kit reads its columns, which it caches.
+struct CountedColumns(Arc<AtomicUsize>);
+
+impl TableDelegate for CountedColumns {
+    fn columns_count(&self, _: &App) -> usize {
+        1
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        0
+    }
+
+    fn column(&self, _: usize, _: &App) -> Column {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Column::new("a", "a")
+    }
+
+    fn render_td(
+        &mut self,
+        _: usize,
+        _: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        "a"
+    }
+}
+
+#[gpui_kit::test]
+async fn open_tables_reread_their_headers_after_a_language_change(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx, None);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let delegate = CountedColumns(reads.clone());
+    let _table = f.act(cx, |window, cx| {
+        cx.new(|cx| {
+            follow_language(cx);
+            TableState::new(delegate, window, cx)
+        })
+    });
+    f.settle(cx);
+    f.open_dialog(cx);
+    f.pick(cx, "settings.density", 1);
+    let before = reads.load(Ordering::Relaxed);
+    f.pick(cx, "settings.language", 2);
+    assert!(reads.load(Ordering::Relaxed) > before);
+    f.pick(cx, "settings.language", 0);
+}
+
+#[gpui_kit::test]
+async fn a_removed_theme_keeps_following_the_system(cx: &mut TestAppContext) {
+    let f = Fixture::open(cx, Some("theme = \"gone\"\n"));
+    let settings = f.settings(cx);
+    assert_eq!(settings.theme, "gone");
+    f.act(cx, |window, cx| {
+        Theme::change(ThemeMode::Dark, Some(window), cx);
+        // The test window's appearance is light.
+        appearance_changed(&settings, window, cx);
+        assert!(!cx.theme().mode.is_dark());
+    });
 }
 
 #[gpui_kit::test]

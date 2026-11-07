@@ -122,7 +122,7 @@ fn value_span(text: &str, i: usize) -> (usize, usize) {
     if let Some(rest) = tail.strip_prefix("\\\"") {
         (i + 2, rest.find("\\\"").map_or(b.len(), |n| i + 2 + n))
     } else if b.get(i) == Some(&b'"') {
-        (i + 1, string_end(b, i).saturating_sub(1).max(i + 1))
+        (i + 1, closing_quote(b, i).unwrap_or(b.len()))
     } else if b.get(i) == Some(&b'\'') {
         (i + 1, tail[1..].find('\'').map_or(b.len(), |n| i + 1 + n))
     } else {
@@ -196,18 +196,23 @@ pub fn contains_mask(v: &Value) -> bool {
     }
 }
 
-/// Byte index just past the string literal that starts at `start` (a `"`), or the end of
-/// the text if it is unterminated.
-fn string_end(b: &[u8], start: usize) -> usize {
+/// Byte index of the `"` that closes the string literal starting at `start`, if one does.
+fn closing_quote(b: &[u8], start: usize) -> Option<usize> {
     let mut i = start + 1;
     while i < b.len() {
         match b[i] {
             b'\\' => i += 2,
-            b'"' => return i + 1,
+            b'"' => return Some(i),
             _ => i += 1,
         }
     }
-    b.len()
+    None
+}
+
+/// Byte index just past the string literal that starts at `start` (a `"`), or the end of
+/// the text if it is unterminated.
+fn string_end(b: &[u8], start: usize) -> usize {
+    closing_quote(b, start).map_or(b.len(), |i| i + 1)
 }
 
 fn skip_ws(b: &[u8], mut i: usize) -> usize {
@@ -294,6 +299,16 @@ mod tests {
             line("key: abc\napi_key: abc\nend\n"),
             "key: abc\napi_key: ••••\nend\n"
         );
+    }
+
+    #[test]
+    fn an_unterminated_quote_masks_to_the_end() {
+        assert_eq!(line(r#"api_key="secret"#), format!(r#"api_key="{MASK}"#));
+    }
+
+    #[test]
+    fn an_unterminated_quote_after_a_multibyte_character_does_not_panic() {
+        assert_eq!(line(r#"api_key: "geheimé"#), format!(r#"api_key: "{MASK}"#));
     }
 
     #[test]

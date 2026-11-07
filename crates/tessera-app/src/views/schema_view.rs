@@ -212,6 +212,7 @@ impl SchemaView {
         cx: &mut Context<Self>,
     ) -> Self {
         let table = cx.new(|cx| {
+            crate::settings::follow_language(cx);
             TableState::new(
                 Fields {
                     fields: Vec::new(),

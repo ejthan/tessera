@@ -44,8 +44,9 @@ pub enum Language {
 pub struct Settings {
     /// `system`, `light`, `dark`, or a theme name.
     pub theme: String,
-    /// Font size in pixels, 12..=20; `None` is the kit's default.
-    pub font_size: Option<u8>,
+    /// Font size in pixels, 12..=20; `None` is the kit's default. As wide as a TOML integer,
+    /// so a number out of range is clamped and does not fail the file.
+    pub font_size: Option<i64>,
     /// Data table density.
     pub density: Density,
     /// Interface language.
@@ -211,6 +212,10 @@ mod tests {
                     confirm_above = 9999999";
         let settings = load(&write(&dir, high)).unwrap();
         assert_eq!(settings.font_size, Some(20));
+        for (text, size) in [("font_size = 300", 20), ("font_size = -1", 12)] {
+            let settings = load(&write(&dir, text)).unwrap();
+            assert_eq!(settings.font_size, Some(size), "{text}");
+        }
         assert_eq!(settings.per_page, 250);
         assert_eq!(settings.batch_size, MAX_BATCH);
         assert_eq!(settings.poll_seconds, 30);
