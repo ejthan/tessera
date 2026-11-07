@@ -160,6 +160,11 @@ impl Job {
         .to_string()
     }
 
+    /// The profile it runs on.
+    pub fn profile(&self) -> &Profile {
+        &self.profile
+    }
+
     /// The report of a finished import.
     pub fn report(&self) -> Option<&Arc<Report>> {
         match &self.outcome {
@@ -236,10 +241,10 @@ fn backup_failure(err: &BackupError, profile: &Profile) -> SharedString {
 }
 
 /// What went wrong with a row of a restore.
-pub fn row_failure_text(failure: &RowFailure) -> String {
+fn row_failure_text(failure: &RowFailure, profile: &Profile) -> String {
     let grouped = crate::views::overview::grouped;
     match failure {
-        RowFailure::Text(text) => text.clone(),
+        RowFailure::Error(e) => failure_text(&e.0, profile).to_string(),
         RowFailure::Count { expected, found } => t!(
             "restore.failure.count",
             expected = grouped(*expected),
@@ -265,16 +270,40 @@ pub fn row_failure_text(failure: &RowFailure) -> String {
     }
 }
 
+/// One row after a restore in a sentence, and whether it failed.
+pub fn row_result_text(row: &RestoreRow, profile: &Profile) -> (String, bool) {
+    let text = match &row.result {
+        RowResult::Done => t!("restore.result.done").to_string(),
+        RowResult::Kept => t!("restore.result.kept").to_string(),
+        RowResult::Skipped => t!("restore.result.skipped").to_string(),
+        RowResult::Failed(failure) => row_failure_text(failure, profile),
+    };
+    let what = t!(row_kind_key(row.kind));
+    (
+        format!("{what} {}: {text}", row.name),
+        matches!(row.result, RowResult::Failed(_)),
+    )
+}
+
+/// The ticked collections and what they miss, as a list of `collection → target`.
+pub fn unmet_text(unmet: &[(String, String)]) -> String {
+    let pairs = unmet.iter().map(|(from, to)| format!("{from} → {to}"));
+    pairs.collect::<Vec<_>>().join(", ")
+}
+
 fn restore_failure(err: &RestoreError, rows: &[RestoreRow], profile: &Profile) -> SharedString {
     let text = match err {
         RestoreError::Read(e) => long_error_text(e, profile),
         RestoreError::NowExists(names) => {
             t!("restore.error.now_exists", names = names.join(", ")).to_string()
         }
+        RestoreError::Unmet(unmet) => {
+            t!("restore.error.unmet", names = unmet_text(unmet)).to_string()
+        }
         RestoreError::Row { kind, name } => {
             let result = rows.iter().find(|r| r.kind == *kind && r.name == *name);
             let detail = match result.map(|r| &r.result) {
-                Some(RowResult::Failed(failure)) => row_failure_text(failure),
+                Some(RowResult::Failed(failure)) => row_failure_text(failure, profile),
                 _ => String::new(),
             };
             let what = t!(row_kind_key(*kind));
@@ -298,6 +327,20 @@ pub fn row_kind_key(kind: RowKind) -> &'static str {
         RowKind::CurationSet => "restore.kind.curations",
         RowKind::Collection => "restore.kind.collection",
         RowKind::Alias => "restore.kind.alias",
+    }
+}
+
+/// Whether the read-only guard refused a write of this job.
+fn refused_write(outcome: &JobOutcome) -> bool {
+    let refused = |e: &TransferError| matches!(e, TransferError::Client(Error::ReadOnly { .. }));
+    match outcome {
+        JobOutcome::Import(o) => matches!(&o.end, JobEnd::Failed(e) if refused(e)),
+        JobOutcome::Export(o) => matches!(&o.end, JobEnd::Failed(e) if refused(e)),
+        JobOutcome::Backup(_) => false,
+        JobOutcome::Restore(o) => o
+            .rows
+            .iter()
+            .any(|r| matches!(&r.result, RowResult::Failed(RowFailure::Error(e)) if refused(&e.0))),
     }
 }
 
@@ -548,11 +591,11 @@ impl Jobs {
             }
             JobOutcome::Backup(_) | JobOutcome::Restore(_) => None,
         };
+        // A disconnect locks the client this job shares (spec 7.1).
+        let locked =
+            refused_write(&outcome) && job.state.upgrade().is_none_or(|c| c.read(cx).closed);
         job.status = match (end, &outcome) {
-            // A disconnect locks the client this job shares (spec 7.1).
-            (Some(JobEnd::Failed(TransferError::Client(Error::ReadOnly { .. }))), _)
-                if job.state.upgrade().is_none_or(|c| c.read(cx).closed) =>
-            {
+            _ if locked => {
                 JobStatus::Failed(t!("jobs.error.locked_by_disconnect").to_string().into())
             }
             (Some(end), _) => status_of(end, |e| failure_text(e, &job.profile)),

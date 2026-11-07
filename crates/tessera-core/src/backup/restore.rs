@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use tessera_client::{
@@ -18,13 +19,14 @@ use super::archive::Verified;
 use super::format::{
     ALIASES, CURATION_SETS, MANIFEST_LIMIT, Manifest, ManifestCollection, STOPWORDS, SYNONYM_SETS,
 };
+use super::run::has_blank;
 use crate::redact;
 use crate::relevance::changes::changes;
 use crate::relevance::reindex::{Preflight, draft_curation_sets, without_missing};
 use crate::schema::SchemaDraft;
 use crate::transfer::import::{ImportJob, ImportOutcome, ImportProgress, run_import};
 use crate::transfer::source::{Format, ReadOptions, Source};
-use crate::transfer::{JobControl, JobEnd};
+use crate::transfer::{JobControl, JobEnd, TransferError};
 
 /// Why the files of a backup could not be read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -216,7 +218,8 @@ pub enum RestoreWarning {
         /// The dictionary.
         name: String,
     },
-    /// A reference to a collection neither the backup nor the server has.
+    /// A reference to a collection the server does not have and this restore cannot bring,
+    /// because the backup lacks it or holds it blocked.
     MissingReference {
         /// The collection.
         collection: String,
@@ -244,6 +247,20 @@ pub enum RestoreWarning {
     },
     /// An alias left out, because a collection of that name would hide it.
     AliasShadowed(String),
+    /// A set that differs and holds values the backup left blank: Replace writes them blank.
+    BlankedSet(String),
+}
+
+/// What a collection's reference needs from a restore, because the server does not have it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Need {
+    /// The collection that references.
+    pub collection: String,
+    /// What it references.
+    pub target: String,
+    /// The rows that must be written for that to exist. One the plan has no `New` row for
+    /// cannot be met.
+    pub rows: Vec<(RowKind, String)>,
 }
 
 /// What a restore would do.
@@ -255,6 +272,28 @@ pub struct RestorePlan {
     pub warnings: Vec<RestoreWarning>,
     /// The collections that can be restored, referenced ones first.
     pub order: Vec<String>,
+    /// What the references of those collections need from this restore.
+    pub needs: Vec<Need>,
+}
+
+impl RestorePlan {
+    /// Each ticked collection with what it references and this restore would leave out:
+    /// the create would pass, and the import would fail.
+    pub fn unmet(&self, ticked: &HashSet<(RowKind, String)>) -> Vec<(String, String)> {
+        let new = self.rows.iter().filter(|r| r.state == RowState::New);
+        let written: HashSet<(RowKind, String)> = new
+            .map(|r| (r.kind, r.name.clone()))
+            .filter(|key| ticked.contains(key))
+            .collect();
+        let needs = self
+            .needs
+            .iter()
+            .filter(|n| written.contains(&(RowKind::Collection, n.collection.clone())));
+        needs
+            .filter(|n| !n.rows.iter().all(|row| written.contains(row)))
+            .map(|n| (n.collection.clone(), n.target.clone()))
+            .collect()
+    }
 }
 
 fn same_stopwords(a: &StopwordSet, b: &StopwordSet) -> bool {
@@ -450,8 +489,6 @@ fn collection_warnings(
     entry: &ManifestCollection,
     draft: &SchemaDraft,
     known: (&HashSet<&str>, &HashSet<&str>),
-    backup: &HashSet<&str>,
-    loaded: &Loaded,
     server: &RestoreView,
     warnings: &mut Vec<RestoreWarning>,
 ) {
@@ -472,22 +509,6 @@ fn collection_warnings(
             name: name.clone(),
         });
     }
-    let reachable = |target: &str| {
-        backup.contains(target)
-            || server.collections.iter().any(|c| c == target)
-            || server.aliases.iter().any(|a| a.name == target)
-            || loaded.aliases.iter().any(|a| a.name == target)
-    };
-    let mut named = HashSet::new();
-    for field in draft.fields.iter().filter(|f| !f.reference.is_empty()) {
-        let target = reference_target(&field.reference);
-        if !reachable(target) && named.insert(target) {
-            warnings.push(RestoreWarning::MissingReference {
-                collection: collection(),
-                target: target.to_string(),
-            });
-        }
-    }
     for (kind, name) in missing_sets(draft, known.0, known.1) {
         warnings.push(RestoreWarning::MissingSet {
             collection: collection(),
@@ -495,6 +516,42 @@ fn collection_warnings(
             name,
         });
     }
+}
+
+/// What the references of `draft` need from a restore. `open` are the collections it can create.
+fn needs_of(
+    draft: &SchemaDraft,
+    open: &HashSet<&str>,
+    loaded: &Loaded,
+    server: &RestoreView,
+) -> Vec<Need> {
+    let collection = |name: &str| (RowKind::Collection, name.to_string());
+    let on_server = |name: &str| server.collections.iter().any(|c| c == name);
+    let linked = draft.fields.iter().filter(|f| !f.reference.is_empty());
+    let mut seen = HashSet::new();
+    linked
+        .map(|f| reference_target(&f.reference))
+        .filter(|target| seen.insert(*target))
+        .filter(|target| !on_server(target) && !server.aliases.iter().any(|a| a.name == *target))
+        .map(|target| {
+            let alias = loaded.aliases.iter().find(|a| a.name == target);
+            let rows = match alias.filter(|_| !open.contains(target)) {
+                Some(alias) if on_server(&alias.collection_name) => {
+                    vec![(RowKind::Alias, target.to_string())]
+                }
+                Some(alias) => vec![
+                    (RowKind::Alias, target.to_string()),
+                    collection(&alias.collection_name),
+                ],
+                None => vec![collection(target)],
+            };
+            Need {
+                collection: draft.name.clone(),
+                target: target.to_string(),
+                rows,
+            }
+        })
+        .collect()
 }
 
 /// Compares a backup with `server`. Pure: an order of items or a server-filled key is no
@@ -515,29 +572,40 @@ pub fn plan(manifest: &Manifest, loaded: &Loaded, server: &RestoreView) -> Resto
         };
         rows.push(row(RowKind::Stopwords, &set.id, state));
     }
+    let mut set_row = |kind, set: &ItemSet, set_kind, on_server: &[ItemSet]| {
+        let state = set_state(set_kind, set, on_server);
+        if state == RowState::Differs && set.items.iter().any(has_blank) {
+            warnings.push(RestoreWarning::BlankedSet(set.name.clone()));
+        }
+        rows.push(row(kind, &set.name, state));
+    };
     for set in &loaded.synonym_sets {
-        let state = set_state(SetKind::Synonym, set, &server.synonym_sets);
-        rows.push(row(RowKind::SynonymSet, &set.name, state));
+        set_row(
+            RowKind::SynonymSet,
+            set,
+            SetKind::Synonym,
+            &server.synonym_sets,
+        );
     }
     for set in &loaded.curation_sets {
-        let state = set_state(SetKind::Curation, set, &server.curation_sets);
-        rows.push(row(RowKind::CurationSet, &set.name, state));
+        set_row(
+            RowKind::CurationSet,
+            set,
+            SetKind::Curation,
+            &server.curation_sets,
+        );
     }
 
     let synonyms = names_of(&[&loaded.synonym_sets, &server.synonym_sets]);
     let curations = names_of(&[&loaded.curation_sets, &server.curation_sets]);
     let synonyms: HashSet<&str> = synonyms.iter().map(String::as_str).collect();
     let curations: HashSet<&str> = curations.iter().map(String::as_str).collect();
-    let backup: HashSet<&str> = manifest
-        .collections
-        .iter()
-        .map(|c| c.name.as_str())
-        .collect();
     // An alias counts: a collection of its name would take its searches away from its target.
     let mut taken: HashSet<&str> = server.collections.iter().map(String::as_str).collect();
     taken.extend(server.aliases.iter().map(|a| a.name.as_str()));
 
     let mut open: Vec<&SchemaDraft> = Vec::new();
+    let mut open_entries = Vec::new();
     let mut listed = HashSet::new();
     for (entry, draft) in manifest.collections.iter().zip(&loaded.schemas) {
         // A hostile manifest can list a name twice, and the second would meet the first.
@@ -551,19 +619,17 @@ pub fn plan(manifest: &Manifest, loaded: &Loaded, server: &RestoreView) -> Resto
             Some(block) => RowState::Blocked(block),
             None => {
                 open.push(draft);
-                collection_warnings(
-                    entry,
-                    draft,
-                    (&synonyms, &curations),
-                    &backup,
-                    loaded,
-                    server,
-                    &mut warnings,
-                );
+                open_entries.push(entry);
                 RowState::New
             }
         };
         rows.push(row(RowKind::Collection, &entry.name, state));
+    }
+    let restorable: HashSet<&str> = open.iter().map(|d| d.name.as_str()).collect();
+    let mut needs = Vec::new();
+    for (entry, draft) in open_entries.iter().zip(&open) {
+        collection_warnings(entry, draft, (&synonyms, &curations), server, &mut warnings);
+        needs.extend(needs_of(draft, &restorable, loaded, server));
     }
     let (order, cycle) = reference_order(&open, &loaded.aliases);
     if !cycle.is_empty() {
@@ -584,11 +650,18 @@ pub fn plan(manifest: &Manifest, loaded: &Loaded, server: &RestoreView) -> Resto
         };
         rows.push(row(RowKind::Alias, &alias.name, state));
     }
-    RestorePlan {
+    let mut plan = RestorePlan {
         rows,
         warnings,
         order,
+        needs,
+    };
+    let everything = plan.rows.iter().map(|r| (r.kind, r.name.clone())).collect();
+    for (collection, target) in plan.unmet(&everything) {
+        plan.warnings
+            .push(RestoreWarning::MissingReference { collection, target });
     }
+    plan
 }
 
 /// What to restore.
@@ -600,8 +673,8 @@ pub struct RestoreJob {
     pub loaded: Loaded,
     /// The rows the user left ticked.
     pub ticked: HashSet<(RowKind, String)>,
-    /// Whether ticked `Differs` rows are written.
-    pub replace: bool,
+    /// The rows the user approved as `Differs`. Any other row that differs stays.
+    pub replace: HashSet<(RowKind, String)>,
     /// Documents per import batch.
     pub batch_size: u32,
 }
@@ -635,11 +708,29 @@ pub struct RestoreProgress {
     pub collection: String,
 }
 
+/// The error of a row, typed, so the app can word it. Equal by its text: an error has no `Eq`.
+#[derive(Debug, Clone)]
+pub struct RowError(pub Arc<TransferError>);
+
+impl PartialEq for RowError {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_string() == other.0.to_string()
+    }
+}
+
+impl Eq for RowError {}
+
+impl From<tessera_client::Error> for RowFailure {
+    fn from(e: tessera_client::Error) -> Self {
+        Self::Error(RowError(Arc::new(e.into())))
+    }
+}
+
 /// Why a row failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowFailure {
-    /// The server's or the transfer's text.
-    Text(String),
+    /// The server or the transfer.
+    Error(RowError),
     /// The collection holds another count than the backup.
     Count {
         /// What the manifest says.
@@ -693,6 +784,9 @@ pub enum RestoreError {
     /// These ticked collections appeared since the plan, and nothing was written.
     #[error("these collections exist now: {}", .0.join(", "))]
     NowExists(Vec<String>),
+    /// These ticked collections reference what the restore leaves out, and nothing was written.
+    #[error("collections reference what is left out: {0:?}")]
+    Unmet(Vec<(String, String)>),
     /// A row failed, see its result. What was done before it stays.
     #[error("{kind:?} {name} failed")]
     Row {
@@ -735,11 +829,11 @@ fn is_resource(kind: RowKind) -> bool {
 }
 
 /// Why an import that ended cannot stand, compared with the manifest.
-fn import_failure(outcome: &ImportOutcome, documents: u64, stopped: bool) -> Option<RowFailure> {
+fn import_failure(outcome: ImportOutcome, documents: u64, stopped: bool) -> Option<RowFailure> {
     let progress = &outcome.progress;
-    match &outcome.end {
+    match outcome.end {
         JobEnd::Stopped => Some(RowFailure::Stopped),
-        JobEnd::Failed(e) => Some(RowFailure::Text(e.to_string())),
+        JobEnd::Failed(e) => Some(RowFailure::Error(RowError(Arc::new(e)))),
         JobEnd::Finished if progress.failed > 0 || progress.unconfirmed > 0 => {
             Some(RowFailure::Lines {
                 failed: progress.failed,
@@ -783,10 +877,11 @@ impl Run<'_> {
 
     /// Whether the run means to write `row`.
     fn writes(&self, row: &PlanRow) -> bool {
-        let ticked = self.ticked(row.kind, &row.name);
+        let key = (row.kind, row.name.clone());
+        let ticked = self.job.ticked.contains(&key);
         match row.state {
             RowState::New => ticked,
-            RowState::Differs => ticked && self.job.replace,
+            RowState::Differs => ticked && self.job.replace.contains(&key),
             RowState::Same | RowState::Blocked(_) => false,
         }
     }
@@ -841,7 +936,7 @@ impl Run<'_> {
                 self.mark(at, RowResult::Done);
                 Ok(())
             }
-            Err(e) => Err(self.fail(at, RowFailure::Text(e.to_string()))),
+            Err(e) => Err(self.fail(at, e.into())),
         }
     }
 
@@ -989,13 +1084,13 @@ impl Run<'_> {
             p.import = ImportProgress::default();
         });
         if let Err(e) = self.client.create_collection(&draft.to_json()).await {
-            return Err(self.fail(at, RowFailure::Text(e.to_string())));
+            return Err(self.fail(at, e.into()));
         }
         self.to_delete.push(name.to_string());
         self.aliases_of(&draft, fresh, view).await?;
         let outcome = self.import(entry).await;
         let stopped = self.stop_check().is_err();
-        if let Some(failure) = import_failure(&outcome, entry.documents, stopped) {
+        if let Some(failure) = import_failure(outcome, entry.documents, stopped) {
             return Err(self.fail(at, failure));
         }
         self.mark(at, RowResult::Done);
@@ -1059,6 +1154,10 @@ impl Run<'_> {
         if !taken.is_empty() {
             return Err(Halt::Failed(RestoreError::NowExists(taken)));
         }
+        let unmet = fresh.unmet(&job.ticked);
+        if !unmet.is_empty() {
+            return Err(Halt::Failed(RestoreError::Unmet(unmet)));
+        }
 
         self.progress
             .send_modify(|p| p.step = RestoreStep::Resources);
@@ -1069,7 +1168,7 @@ impl Run<'_> {
             self.stop_check()?;
             match self.write_resource(row).await {
                 Ok(()) => self.mark(at, RowResult::Done),
-                Err(e) => return Err(self.fail(at, RowFailure::Text(e.to_string()))),
+                Err(e) => return Err(self.fail(at, e.into())),
             }
         }
 
@@ -1128,16 +1227,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_stop_after_the_last_batch_is_a_stop() {
-        let outcome = ImportOutcome {
+        let report = Arc::new(Report::new().await.unwrap());
+        let outcome = || ImportOutcome {
             end: JobEnd::Finished,
             progress: ImportProgress::default(),
-            report: Arc::new(Report::new().await.unwrap()),
+            report: report.clone(),
             stopped_at_line: None,
             count: None,
         };
-        assert_eq!(import_failure(&outcome, 2, true), Some(RowFailure::Stopped));
         assert_eq!(
-            import_failure(&outcome, 2, false),
+            import_failure(outcome(), 2, true),
+            Some(RowFailure::Stopped)
+        );
+        assert_eq!(
+            import_failure(outcome(), 2, false),
             Some(RowFailure::Count {
                 expected: 2,
                 found: None,

@@ -96,11 +96,11 @@ pub trait AdminBackend: Send + Sync {
         node: usize,
     ) -> BoxFuture<Result<Vec<SchemaChange>, Error>>;
 
-    /// Sends an analytics event.
     /// The role each node of `client` reports now, indexed like `Client::nodes`. `None` for a
     /// node that does not answer.
     fn roles(&self, client: Client) -> BoxFuture<Vec<Option<tessera_client::RaftState>>>;
 
+    /// Sends an analytics event.
     fn send_event(&self, client: Client, event: Value) -> BoxFuture<Result<(), Error>>;
 
     /// Writes what the server holds in memory to the destinations.
