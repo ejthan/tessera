@@ -1,0 +1,28 @@
+# Labels for the repository. This is a file only: creating them on GitHub is a maintainer step.
+- name: good first issue
+  color: 7057ff
+  description: A small, well-described place to start
+- name: help wanted
+  color: 008672
+  description: The maintainer would welcome a pull request
+- name: typesense-api
+  color: 1d76db
+  description: Depends on a Typesense endpoint or server version
+- name: area/client
+  color: c5def5
+  description: tessera-client, the HTTP client
+- name: area/core
+  color: c5def5
+  description: tessera-core, the domain logic
+- name: area/widgets
+  color: c5def5
+  description: tessera-widgets, the reusable widgets
+- name: area/app
+  color: c5def5
+  description: tessera-app, the desktop app
+- name: area/packaging
+  color: c5def5
+  description: Installers, signing and release builds
+- name: area/docs
+  color: c5def5
+  description: The docs and the book

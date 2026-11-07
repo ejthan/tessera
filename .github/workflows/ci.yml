@@ -32,7 +32,21 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo xtask i18n
+      - run: cargo xtask governance
       - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - run: |
+          # shellcheck disable=SC2086 # the package list is meant to split into words
+          sudo apt-get update && sudo apt-get install -y $LINUX_DEPS
+      - uses: Swatinem/rust-cache@v2.9.3
+      - run: cargo xtask dco "origin/${{ github.base_ref }}"
 
   test:
     strategy:
