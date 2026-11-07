@@ -971,6 +971,37 @@ async fn the_prod_badge_stays_at_the_smallest_window(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn a_saved_local_profile_opens_for_editing(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let mut local = Profile::new("local", vec![node()]);
+    local.nodes[0].port = 9999;
+    let (staging, _, secrets) = two_profiles();
+    let (handle, state, _rt) = open_app(cx, vec![staging, local.clone()], secrets);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("welcome.connect_local", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("connect.node.0.port").value(), Some("9999"));
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let names = cx.read(|cx| {
+        state
+            .read(cx)
+            .profiles
+            .iter()
+            .filter(|p| p.name == "local")
+            .count()
+    });
+    assert_eq!(names, 1);
+}
+
+#[gpui_kit::test]
 fn connect_to_it_fills_the_form_and_connects_to_nothing(cx: &mut TestAppContext) {
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();

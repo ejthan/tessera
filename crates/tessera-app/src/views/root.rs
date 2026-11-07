@@ -8,7 +8,8 @@ use gpui_kit::base::{Root, TestSupportExt as _};
 use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{
-    DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, PaneRef, PanelId, panel_handle,
+    ClosePanel, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, PaneRef, PanelId,
+    panel_handle,
 };
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::tooltip::Tooltip;
@@ -16,7 +17,7 @@ use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, Global,
     IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window,
     div, prelude::*, px, rgb,
 };
@@ -35,10 +36,10 @@ use super::request_log::RequestLogPanel;
 use super::settings::SettingsDialog;
 use super::{env_badge, status_bar};
 use crate::actions::{
-    CopyAsCurl, NewConnection, NewWindow, OpenAi, OpenAliases, OpenAnalytics, OpenBackup,
-    OpenConsoleTab, OpenCurations, OpenKeys, OpenOperations, OpenPalette, OpenPresetsTab,
-    OpenSearchTab, OpenSettings, OpenStemming, OpenStopwords, OpenSynonyms, QuickSwitch,
-    ShowLastFailure, ToggleJobs, ToggleRequestLog,
+    CloseWindow, CopyAsCurl, NewConnection, NewWindow, OpenAi, OpenAliases, OpenAnalytics,
+    OpenBackup, OpenConsoleTab, OpenCurations, OpenKeys, OpenOperations, OpenPalette,
+    OpenPresetsTab, OpenSearchTab, OpenSettings, OpenStemming, OpenStopwords, OpenSynonyms,
+    QuickSwitch, ShowLastFailure, ToggleJobs, ToggleRequestLog,
 };
 use crate::connection::ConnectionState;
 use crate::jobs::{JobFinished, JobId, JobKind, Jobs, JobsGlobal, RunningChanged};
@@ -63,6 +64,7 @@ pub struct RootView {
     primary: bool,
     dock: Entity<DockArea>,
     welcome: Entity<WelcomePanel>,
+    sidebar_focus: FocusHandle,
     log: Entity<RequestLogPanel>,
     jobs: Entity<JobsPanel>,
     /// How many jobs run; `None` without a job. `render` must not read `Jobs`: that would
@@ -100,6 +102,14 @@ fn targeted(state: &Entity<AppState>, id: Uuid, window: &Window, cx: &App) -> bo
     true
 }
 
+/// Holds the app state for the app's life. Without it the state goes with the last window, and
+/// its quit hooks and queued writes with it.
+struct StateGlobal {
+    _state: Entity<AppState>,
+}
+
+impl Global for StateGlobal {}
+
 /// What the status bar counts.
 fn count_running(jobs: &Jobs) -> Option<usize> {
     (!jobs.jobs().is_empty()).then(|| jobs.running())
@@ -114,10 +124,16 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        if primary {
+            cx.set_global(StateGlobal {
+                _state: state.clone(),
+            });
+        }
         settings::apply(&state.read(cx).settings.clone(), window, cx);
         let (dock, skin) = DockSkin::dock_area("tessera", None, window, cx);
         skin.set_close_button_visible(true, cx);
         let sidebar = cx.new(|cx| SidebarPanel::new(state.clone(), cx));
+        let sidebar_focus = sidebar.read(cx).focus_handle(cx);
         let log = cx.new(|cx| RequestLogPanel::new(state.clone(), window, cx));
         let jobs = cx.new(|cx| JobsPanel::new(state.clone(), window, cx));
         let welcome = cx.new(|cx| WelcomePanel::new(state.clone(), cx));
@@ -156,6 +172,15 @@ impl RootView {
             cx.on_release(move |this, cx| {
                 this.state
                     .update(cx, |s, _| s.retain_window_of(handle, |_| false));
+                // The quit hook and a waiting save end with this view, so a close writes here.
+                if this.primary {
+                    let layout = this.current_layout(cx);
+                    if layout != this.state.read(cx).layout {
+                        this.state
+                            .update(cx, |s, cx| s.save_layout(layout, cx))
+                            .detach();
+                    }
+                }
             }),
             cx.subscribe(&job_list, |this, jobs, _: &RunningChanged, cx| {
                 this.running_jobs = count_running(jobs.read(cx));
@@ -293,6 +318,7 @@ impl RootView {
             primary,
             dock,
             welcome,
+            sidebar_focus,
             log,
             jobs,
             running_jobs,
@@ -533,7 +559,10 @@ impl RootView {
 
     fn open_palette(&self, mode: PaletteMode, window: &mut Window, cx: &mut Context<Self>) {
         if !window.has_active_dialog(cx) {
-            palette::open(mode, self.state.clone(), window, cx);
+            let active = self
+                .active_connection(cx)
+                .map(|connection| connection.read(cx).profile.id);
+            palette::open(mode, self.state.clone(), active, window, cx);
         }
     }
 
@@ -732,17 +761,42 @@ impl RootView {
         }
         self.dock.update(cx, |area, cx| {
             for tab in stale {
-                match tab {
-                    ConnectionTab::Overview(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Collections(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Collection(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Search(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Console(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Resource(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Reindex(panel) => area.remove_panel(panel, window, cx),
-                }
+                tab.remove(area, window, cx);
             }
         });
+    }
+
+    /// ⌘W on the only tab of a region: the kit refuses it, as a dock's last panel. A tab with
+    /// something to ask or wait for goes on to its own handler. Returns whether it closed.
+    fn close_lone_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let focus_elsewhere = [
+            self.sidebar_focus.clone(),
+            self.log.read(cx).focus_handle(cx),
+            self.jobs.read(cx).focus_handle(cx),
+        ]
+        .iter()
+        .any(|focus| focus.contains_focused(window, cx));
+        if focus_elsewhere || window.has_active_dialog(cx) {
+            return false;
+        }
+        let area = self.dock.read(cx);
+        let Some(active) = self.active else {
+            return false;
+        };
+        let alone = REGIONS.into_iter().any(|placement| {
+            area.layout(placement).is_some_and(|tree| {
+                tree.panels().any(|id| id == active) && tree.panels().count() == 1
+            })
+        });
+        let Some(tab) = connection_tab(area, active).filter(|tab| tab.closes_silently(cx)) else {
+            return false;
+        };
+        if !alone || !area.panel(active).is_some_and(|panel| panel.closable(cx)) {
+            return false;
+        }
+        self.dock
+            .update(cx, |area, cx| tab.remove(area, window, cx));
+        true
     }
 
     /// Finds the active tab after a layout change and brings the welcome screen back into
@@ -866,6 +920,26 @@ enum ConnectionTab {
 }
 
 impl ConnectionTab {
+    fn remove(self, area: &mut DockArea, window: &mut Window, cx: &mut Context<DockArea>) {
+        match self {
+            Self::Overview(panel) => area.remove_panel(panel, window, cx),
+            Self::Collections(panel) => area.remove_panel(panel, window, cx),
+            Self::Collection(panel) => area.remove_panel(panel, window, cx),
+            Self::Search(panel) => area.remove_panel(panel, window, cx),
+            Self::Console(panel) => area.remove_panel(panel, window, cx),
+            Self::Resource(panel) => area.remove_panel(panel, window, cx),
+            Self::Reindex(panel) => area.remove_panel(panel, window, cx),
+        }
+    }
+
+    /// Whether nothing has to ask first. The inspector's text can differ before it says so.
+    fn closes_silently(&self, cx: &App) -> bool {
+        match self {
+            Self::Collection(panel) => !panel.read(cx).is_dirty(cx),
+            _ => true,
+        }
+    }
+
     fn kind(&self, cx: &App) -> Kind {
         match self {
             Self::Overview(_) => Kind::Overview,
@@ -987,9 +1061,9 @@ impl Render for RootView {
         let breadcrumb = self.breadcrumb(cx);
         let red = rgb(env_badge::PROD_RED);
         let state = self.state.read(cx);
-        let can_search = state
-            .selected
-            .and_then(|id| state.connection(id, cx))
+        // This window's connection: `selected` follows whichever window was used last.
+        let can_search = self
+            .active_connection(cx)
             .filter(|c| c.read(cx).connected.is_some())
             .map(|c| c.read(cx).profile.id);
         let supported = can_search
@@ -1019,13 +1093,19 @@ impl Render for RootView {
             })
             .on_action(cx.listener(|this, _: &NewWindow, window, cx| {
                 let state = this.state.clone();
-                // Not while this window is being updated.
                 cx.defer_in(window, move |_, window, cx| {
                     if let Err(e) = crate::open_main_window(state, false, Vec::new(), cx) {
                         let text = t!("window.open_failed", detail = e.to_string());
                         window.push_notification(text.to_string(), cx);
                     }
                 });
+            }))
+            .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
+            // Before the tab group's own handler, which ends the action without closing.
+            .capture_action(cx.listener(|this, _: &ClosePanel, window, cx| {
+                if this.close_lone_tab(window, cx) {
+                    cx.stop_propagation();
+                }
             }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.open_palette(PaletteMode::All, window, cx);

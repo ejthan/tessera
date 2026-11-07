@@ -416,6 +416,11 @@ impl CollectionPanel {
         &self.connection
     }
 
+    /// Whether the inspector's text differs from the document, shown yet or not.
+    pub fn is_dirty(&self, cx: &App) -> bool {
+        self.documents.read(cx).inspector_dirty(cx)
+    }
+
     /// The collection this tab shows.
     pub fn name(&self) -> &str {
         &self.name
@@ -1144,8 +1149,14 @@ impl Render for WelcomePanel {
                 move |_, window, cx| ImportDialog::open(import_state.clone(), window, cx),
                 move |_, _, cx| this.update(cx, |view, cx| view.copy_docker_command(cx)),
                 move |_, window, cx| {
-                    let local = Some((local_profile(), None));
-                    ConnectDialog::open_new(local_state.clone(), local, window, cx);
+                    // A second press edits the first one, so Save makes no second `local`.
+                    let state = local_state.clone();
+                    let local = local_profile();
+                    let saved = state.read(cx).profiles.iter();
+                    match saved.filter(|p| p.name == local.name).map(|p| p.id).next() {
+                        Some(id) => ConnectDialog::open_edit(state, id, window, cx),
+                        None => ConnectDialog::open_new(state, Some((local, None)), window, cx),
+                    }
                 },
                 window,
                 cx,

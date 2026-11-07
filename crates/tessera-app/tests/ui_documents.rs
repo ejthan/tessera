@@ -10,15 +10,17 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui_kit::component::dock::DockPlacement;
 use gpui_kit::component::table::TableState;
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, Focusable as _, TestAppContext, WindowHandle, base::Root};
 use serde_json::json;
 use tessera_app::connection::ConnectionState;
 use tessera_app::state::AppState;
-use tessera_app::views::dock::CollectionPanel;
+use tessera_app::views::dock::{CollectionPanel, CollectionsPanel, OverviewPanel};
 use tessera_app::views::documents::inspector::Inspector;
 use tessera_app::views::documents::table::DocRows;
+use tessera_app::views::root::RootView;
 use tessera_client::Collection;
 use tessera_core::documents::page::wanted_pages;
 use tessera_widgets::FilterInput;
@@ -59,6 +61,42 @@ impl Fixture {
 
     fn panel(&self, cx: &mut TestAppContext) -> Entity<CollectionPanel> {
         collection_panel(cx, self.handle, "products")
+    }
+
+    /// Removes every other tab, so the kit would refuse to close this one.
+    fn leave_alone(&self, cx: &mut TestAppContext) {
+        let view = self
+            .handle
+            .update(cx, |root, _, _| {
+                root.view().clone().downcast::<RootView>().unwrap()
+            })
+            .unwrap();
+        self.act(cx, |window, cx| {
+            let dock = view.read(cx).dock().clone();
+            dock.update(cx, |area, cx| {
+                let ids: Vec<_> = area
+                    .layout(DockPlacement::Center)
+                    .unwrap()
+                    .panels()
+                    .collect();
+                for id in ids {
+                    let view = area.panel(id).unwrap().view().clone();
+                    if let Ok(panel) = view.clone().downcast::<OverviewPanel>() {
+                        area.remove_panel(panel, window, cx);
+                    } else if let Ok(panel) = view.downcast::<CollectionsPanel>() {
+                        area.remove_panel(panel, window, cx);
+                    }
+                }
+            });
+        });
+        self.settle(cx);
+        let area = cx.read(|cx| view.read(cx).dock().clone());
+        let tabs = cx.read(|cx| {
+            let area = area.read(cx);
+            let tree = area.layout(DockPlacement::Center).unwrap();
+            tree.panels().count()
+        });
+        assert_eq!(tabs, 1);
     }
 
     fn table(&self, cx: &mut TestAppContext) -> Entity<TableState<DocRows>> {
@@ -2080,6 +2118,47 @@ async fn close_tab_while_dirty_asks(cx: &mut TestAppContext) {
     assert!(f.dirty(cx));
     f.click(cx, "confirm.ok");
     wait_for_element(cx, f.handle, tab, false).await;
+}
+
+#[gpui_kit::test]
+async fn close_tab_while_dirty_asks_on_a_lone_tab(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.leave_alone(cx);
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    let id = f.profile_id(cx);
+    let tab = format!("tab.{id}.collection.products");
+    f.act(cx, |window, cx| window.press(CLOSE_TAB, cx));
+    f.settle(cx);
+    assert!(f.has(cx, "confirm.ok"));
+    f.click(cx, "confirm.ok");
+    wait_for_element(cx, f.handle, tab, false).await;
+}
+
+#[gpui_kit::test]
+async fn a_clean_lone_tab_closes(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.leave_alone(cx);
+    let id = f.profile_id(cx);
+    f.press(cx, CLOSE_TAB);
+    let tab = format!("tab.{id}.collection.products");
+    wait_for_element(cx, f.handle, tab, false).await;
+}
+
+#[gpui_kit::test]
+async fn a_lone_tab_waits_for_a_running_delete(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.leave_alone(cx);
+    f.tick(cx, "1");
+    f.press(cx, DELETE);
+    let hold = f.docs.hold_next();
+    f.confirm_delete(cx);
+    f.press(cx, CLOSE_TAB);
+    let id = f.profile_id(cx);
+    let tab = format!("tab.{id}.collection.products");
+    assert!(f.act(cx, |window, _| window.try_find(tab.clone()).is_some()));
+    hold.send(()).unwrap();
+    f.settle(cx);
 }
 
 #[gpui_kit::test]

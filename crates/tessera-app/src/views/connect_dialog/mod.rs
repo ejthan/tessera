@@ -645,7 +645,6 @@ fn keychain_read(e: &SecretError) -> String {
     t!("connect.error.keychain", detail = e.to_string()).to_string()
 }
 
-/// The node a new profile or an added row starts with.
 /// The server of the welcome screen's Docker command, without its key.
 pub fn local_profile() -> Profile {
     let mut profile = Profile::new("local", vec![default_node()]);
@@ -653,6 +652,7 @@ pub fn local_profile() -> Profile {
     profile
 }
 
+/// The node a new profile or an added row starts with.
 fn default_node() -> Node {
     Node {
         protocol: Protocol::Http,

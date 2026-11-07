@@ -85,7 +85,14 @@ struct CommandPalette {
 }
 
 /// Opens the palette on what the focused view offers now.
-pub fn open(mode: PaletteMode, state: Entity<AppState>, window: &mut Window, cx: &mut App) {
+/// Opens the palette of a window whose active tab is on connection `active`.
+pub fn open(
+    mode: PaletteMode,
+    state: Entity<AppState>,
+    active: Option<Uuid>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let previous_focus = window.focused(cx);
     // Before the dialog takes the focus, which would hide the focused view's actions.
     let stack = window.context_stack();
@@ -99,7 +106,7 @@ pub fn open(mode: PaletteMode, state: Entity<AppState>, window: &mut Window, cx:
             .collect(),
         PaletteMode::Collections => Vec::new(),
     };
-    let entries = entries(mode, actions, &state, cx);
+    let entries = entries(mode, actions, &state, active, cx);
     let view = cx.new(|cx| {
         let shown = (0..entries.len().min(PALETTE_LIMIT)).collect();
         CommandPalette {
@@ -125,6 +132,7 @@ fn entries(
     mode: PaletteMode,
     actions: Vec<(&'static str, Box<dyn Action>)>,
     state: &Entity<AppState>,
+    active: Option<Uuid>,
     cx: &App,
 ) -> Vec<PaletteEntry> {
     let state = state.read(cx);
@@ -166,11 +174,10 @@ fn entries(
     if mode == PaletteMode::Collections {
         return entries;
     }
-    let selected = state
-        .selected
+    let active = active
         .and_then(|id| state.connection(id, cx))
         .filter(|c| c.read(cx).connected.is_some());
-    if let Some(conn) = selected {
+    if let Some(conn) = active {
         let profile = &conn.read(cx).profile;
         let queries = state.saved.queries.iter();
         entries.extend(

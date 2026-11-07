@@ -250,7 +250,7 @@ The status bar gains a control while `latest_failed(active connection)` is `Some
 - `open_tab` records the owner. `layout_changed` clears the entry when this window holds no more tabs of the connection. `cx.on_release` clears all entries of a closed window.
 - Only the primary window restores and saves the layout, checks for updates, shows keymap errors and registers the quit hook. A later window starts at the default layout. Closing the primary window ends saving for the session; what was saved stays.
 - `UpdateFound` and job toasts go to the active window, or the first one, not to all.
-- `cx.set_quit_mode(QuitMode::LastWindowClosed)` at the start of `run`, on every platform. Quit hooks flush as before. D31's rule for unsaved inspector changes on quit applies to closing a window too: there is no veto.
+- `cx.set_quit_mode(QuitMode::LastWindowClosed)` at the start of `run`, on every platform. A global holds `AppState` from the primary window on, so its quit hooks and write tasks outlive the last window, and the primary window writes a layout change still waiting when it closes, because its own quit hook ends with it. D31's rule for unsaved inspector changes on quit applies to closing a window too: there is no veto.
 
 ### 7.8 Onboarding
 
