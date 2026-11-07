@@ -9,6 +9,7 @@ pub mod connection;
 pub mod documents;
 pub mod i18n;
 pub mod jobs;
+pub mod logging;
 pub mod poller;
 pub mod relevance;
 pub mod runtime;
@@ -19,6 +20,7 @@ pub mod views;
 
 use std::io::BufRead;
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui_kit::component::TitleBar;
 use gpui_kit::{AppContext as _, Size, WindowOptions, px};
@@ -27,7 +29,6 @@ use secrecy::SecretString;
 use tessera_core::cli::Launch;
 use tessera_core::secrets::KeyringStore;
 use tessera_core::store;
-use tracing_subscriber::EnvFilter;
 
 rust_i18n::i18n!("../../assets/locales", fallback = "en");
 
@@ -67,11 +68,9 @@ pub fn read_stdin_key(launch: Launch, input: &mut dyn BufRead) -> Result<Launch,
 /// Loads the profiles, applies `launch` and runs the app until it quits. Fails before the
 /// window opens when `launch` names a profile that does not exist.
 pub fn run(launch: Launch) -> Result<(), String> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    let started = Instant::now();
+    // Lives until `run` returns, so a normal quit flushes the file.
+    let _log_guard = logging::init(store::logs_dir().as_deref());
     let store_path = store::config_dir().map(|dir| dir.join("connections.json"));
     if store_path.is_none() {
         tracing::warn!("no home directory: profiles are kept for this session only");
@@ -165,14 +164,17 @@ pub fn run(launch: Launch) -> Result<(), String> {
             })
         })
         .expect("failed to open the main window");
-        if smoke {
-            // CI smoke test: prove the window opened and rendered, then exit.
-            window
-                .update(cx, |_, window, _| {
-                    window.on_next_frame(|_, cx| cx.quit());
-                })
-                .expect("main window is open");
-        }
+        window
+            .update(cx, move |_, window, _| {
+                window.on_next_frame(move |_, cx| {
+                    tracing::info!("ready in {} ms", started.elapsed().as_millis());
+                    // CI smoke test: prove the window opened and rendered, then exit.
+                    if smoke {
+                        cx.quit();
+                    }
+                });
+            })
+            .expect("main window is open");
         cx.activate(true);
     });
 

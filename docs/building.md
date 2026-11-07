@@ -34,6 +34,8 @@ cargo run -p tessera-app
 
 `TYPESENSE_API_KEY` prefills the key in the connect dialog. `RUST_LOG=debug` shows one log line per request (never the key).
 
+Logs go to stderr and to `tessera.log.YYYY-MM-DD` in the `logs` folder of the local data directory: `~/Library/Application Support/org.tessera.Tessera/logs` on macOS, `~/.local/share/tessera/logs` on Linux, `%LOCALAPPDATA%\tessera\Tessera\data\logs` on Windows. A new file starts each day, and the last 7 stay. Keys and tokens are masked in both, and neither holds a request body. If the folder cannot be made, the app logs to stderr alone and says so.
+
 `cargo run -p tessera-app --features frame-overlay` adds a frame-time overlay, cycled with ⌘⌥F / Ctrl+Alt+F in the documents view.
 
 ## Local Typesense

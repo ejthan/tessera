@@ -70,6 +70,15 @@ pub fn config_dir() -> Option<PathBuf> {
     )
 }
 
+/// Directory of the log files, if the home directory is known.
+pub fn logs_dir() -> Option<PathBuf> {
+    Some(
+        ProjectDirs::from("org", "tessera", "Tessera")?
+            .data_local_dir()
+            .join("logs"),
+    )
+}
+
 /// Loads the file at `path`. A missing file yields an empty default.
 pub fn load(path: &Path) -> Result<ConnectionsFile, StoreError> {
     load_versioned(path, SCHEMA_VERSION)
