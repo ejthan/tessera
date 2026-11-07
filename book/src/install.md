@@ -1,6 +1,6 @@
 # Install
 
-Tessera runs on macOS 13 or later, on Windows 10 and 11, and on Linux x86_64 with Wayland or X11.
+Tessera is built for macOS 13 or later, for Windows 10 and 11, and for Linux x86_64 with Wayland or X11. So far it has only run on macOS on Apple silicon. Nobody has run the Windows, Linux or Intel builds yet: the first release's installers are their first run.
 
 The installers of a release are built by CI, on each OS, and each release lists them with a `SHA256SUMS` file. Check a download against that file before you open it. The first release's installers come from the first run of that build, so a format below may still have rough edges. Tell us in an issue if one does.
 

@@ -282,7 +282,7 @@ Each module lists acceptance criteria (AC).
 
 ### 7.2 Server and cluster overview (P0)
 
-- Cards for version, Raft role (leader/follower/…), health, uptime (if available), number of collections and documents.
+- Cards for version, Raft role (leader/follower/…), health, uptime (if available; none in v30, D112), number of collections and documents.
 - **Live metrics** from `/metrics.json`: CPU, RAM (system and `typesense_memory_*`), disk, network rx/tx. Configurable polling interval (default 5 s, can be paused). Line charts with 15 minutes of in-memory history.
 - **API stats** (`/stats.json`): requests per second and latency per endpoint as a sortable table.
 - **Cluster view:** all nodes of a profile side by side, polled in parallel, leader highlighted. Clicking a node makes it the active node.

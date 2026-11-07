@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
-use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
+use gpui_kit::{Action, AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
+use tessera_app::actions::{CancelJob, ImportDocuments};
 use tessera_app::connection::{CollectionChanged, ConnectionState};
 use tessera_app::jobs::{JobId, JobStatus, Jobs, JobsGlobal, Live, RunningChanged};
 use tessera_app::state::AppState;
@@ -801,6 +802,26 @@ async fn empty_panel_has_no_import_without_a_connection_tab(cx: &mut TestAppCont
     f.press(cx, TOGGLE_JOBS);
     assert!(f.has(cx, "jobs.empty"));
     assert!(!f.has(cx, "jobs.import"));
+}
+
+#[gpui_kit::test]
+async fn import_action_needs_a_connection_tab(cx: &mut TestAppContext) {
+    let available = |f: &Fixture, action: &dyn Action, cx: &mut TestAppContext| {
+        cx.update_window(f.handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.is_action_available(action, cx)
+        })
+        .unwrap()
+    };
+    let (f, _) = finished_with_a_report(cx).await;
+    f.panel_focus(cx);
+    assert!(available(&f, &ImportDocuments, cx));
+    let id = f.state.read_with(cx, |s, _| s.profiles[0].id);
+    cx.update(|cx| f.state.update(cx, |s, cx| s.disconnect(id, cx)));
+    cx.run_until_parked();
+    // CancelJob proves the focus is still inside the panel.
+    assert!(available(&f, &CancelJob, cx));
+    assert!(!available(&f, &ImportDocuments, cx));
 }
 
 #[gpui_kit::test]

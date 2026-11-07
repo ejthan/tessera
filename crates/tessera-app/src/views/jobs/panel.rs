@@ -1034,6 +1034,7 @@ impl Render for JobsPanel {
                 (no_report, &SaveFailedLines),
             ],
         );
+        let connected = RootView::window_connection(window, cx).is_some();
         v_flex()
             .id("jobs.panel")
             .test_support()
@@ -1043,7 +1044,6 @@ impl Render for JobsPanel {
             .map(|el| match body {
                 None => {
                     let text = t!("jobs.empty").to_string();
-                    let connected = RootView::window_connection(window, cx);
                     el.child(
                         v_flex()
                             .p_3()
@@ -1064,7 +1064,7 @@ impl Render for JobsPanel {
                                     .label(t!("resources.docs").to_string())
                                     .on_click(|_, _, cx| cx.open_url(DOCS_URL)),
                             )
-                            .when(connected.is_some(), |el| {
+                            .when(connected, |el| {
                                 el.child(
                                     Button::new("jobs.import")
                                         .outline()
@@ -1107,9 +1107,12 @@ impl Render for JobsPanel {
             .on_action(cx.listener(|this, _: &ImportSavedLines, window, cx| {
                 this.import_saved(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ImportDocuments, window, cx| {
-                this.import_documents(window, cx);
-            }))
+            // Without a connection tab the palette must not list it: UX rule 4.
+            .when(connected, |el| {
+                el.on_action(cx.listener(|this, _: &ImportDocuments, window, cx| {
+                    this.import_documents(window, cx);
+                }))
+            })
             .on_action(cx.listener(|this, _: &SaveReport, window, cx| this.save(false, window, cx)))
             .on_action(
                 cx.listener(|this, _: &SaveFailedLines, window, cx| this.save(true, window, cx)),

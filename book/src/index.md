@@ -13,7 +13,7 @@ Tessera is not affiliated with or endorsed by Typesense, Inc. "Typesense" is a t
 - A request log with every request Tessera sends, secrets masked.
 - A keyboard shortcut for each action, shown on its control.
 
-Tessera is built for Typesense 30 and is tested on 30.0 and 30.2. It sends no telemetry.
+Tessera is built for Typesense 30 and is tested against 30.2. It sends no telemetry.
 
 ## Finding your way
 
