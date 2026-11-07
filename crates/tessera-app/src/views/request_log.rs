@@ -458,6 +458,17 @@ impl RequestLogPanel {
         cx.notify();
     }
 
+    /// Shows entry `id` whatever hid it: the filter goes back to its default, because any
+    /// other could leave the entry out.
+    pub fn show_entry(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.filter = Filter::default();
+        self.refresh(cx);
+        let rows = &self.table.read(cx).delegate().rows;
+        if let Some(ix) = rows.iter().position(|r| r.id == id) {
+            self.table.update(cx, |t, cx| t.set_selected_row(ix, cx));
+        }
+    }
+
     /// The dialog's view of a full body, while the dialog is open.
     pub fn full_view(&self) -> Option<Entity<BodyView>> {
         self.full_view.as_ref()?.upgrade()

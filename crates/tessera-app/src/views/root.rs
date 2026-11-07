@@ -33,8 +33,8 @@ use super::{env_badge, status_bar};
 use crate::actions::{
     CopyAsCurl, NewConnection, OpenAi, OpenAliases, OpenAnalytics, OpenBackup, OpenConsoleTab,
     OpenCurations, OpenKeys, OpenOperations, OpenPalette, OpenPresetsTab, OpenSearchTab,
-    OpenSettings, OpenStemming, OpenStopwords, OpenSynonyms, QuickSwitch, ToggleJobs,
-    ToggleRequestLog,
+    OpenSettings, OpenStemming, OpenStopwords, OpenSynonyms, QuickSwitch, ShowLastFailure,
+    ToggleJobs, ToggleRequestLog,
 };
 use crate::connection::ConnectionState;
 use crate::jobs::{JobFinished, JobId, JobKind, Jobs, JobsGlobal, RunningChanged};
@@ -302,6 +302,22 @@ impl RootView {
     /// Shows the jobs tab. Focus stays where it is.
     pub fn show_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reveal(self.jobs_id(), window, cx);
+        cx.notify();
+    }
+
+    /// Opens the log on the newest failed request of the active connection, if it has one.
+    fn show_last_failure(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(connection) = self.active_connection(cx) else {
+            return;
+        };
+        let profile = connection.read(cx).profile.id;
+        let Some(id) = self.state.read(cx).log().latest_failed(profile) else {
+            return;
+        };
+        self.reveal(self.log_id(), window, cx);
+        self.log_panel()
+            .clone()
+            .update(cx, |log, cx| log.show_entry(id, cx));
         cx.notify();
     }
 
@@ -759,6 +775,7 @@ impl Render for RootView {
         let unlocked = active.is_some_and(|c| c.writes_unlocked);
         let prod = profile.is_some_and(|p| p.environment.is_prod());
         let log_open = self.bottom_shows(self.log_id(), cx);
+        let last_failure = profile.and_then(|p| self.state.read(cx).log().latest_failed(p.id));
         let jobs = self.running_jobs.map(|running| status_bar::JobsEntry {
             running,
             open: self.bottom_shows(self.jobs_id(), cx),
@@ -836,6 +853,9 @@ impl Render for RootView {
             }))
             .on_action(cx.listener(|this, _: &ToggleRequestLog, window, cx| {
                 this.toggle_bottom(this.log_id(), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowLastFailure, window, cx| {
+                this.show_last_failure(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleJobs, window, cx| {
                 this.toggle_bottom(this.jobs_id(), window, cx);
@@ -939,7 +959,14 @@ impl Render for RootView {
                 )
             })
             .child(div().flex_1().min_h_0().child(self.dock.clone()))
-            .child(status_bar::render(active, log_open, jobs, window, cx))
+            .child(status_bar::render(
+                active,
+                log_open,
+                jobs,
+                last_failure,
+                window,
+                cx,
+            ))
             // Last, so they draw over the content without moving it; they have no listeners,
             // so clicks pass through.
             .when(prod, |el| {

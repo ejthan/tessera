@@ -190,6 +190,16 @@ impl RequestLog {
             .find(|e| e.event.id == id)
     }
 
+    /// Id of the newest failed user request of `connection`. Polling stays out: a user never
+    /// saw those failures.
+    pub fn latest_failed(&self, connection: Uuid) -> Option<u64> {
+        self.user
+            .iter()
+            .rev()
+            .find(|e| e.connection == connection && e.is_error())
+            .map(|e| e.event.id)
+    }
+
     /// The whole text of a cut body, while the budget still holds it.
     pub fn full_body(&self, id: u64, part: BodyPart) -> Option<Arc<str>> {
         let kept = self.full.iter().find(|(i, p, _)| *i == id && *p == part);
@@ -417,5 +427,39 @@ pub(crate) mod tests {
             ..Filter::default()
         };
         assert_eq!(ids(&log, &f), [1, 2, 3]);
+    }
+
+    fn failed(id: u64, connection: Uuid, origin: Origin, status: u16) -> LogEntry {
+        LogEntry {
+            connection,
+            ..entry(id, Method::GET, origin, Some(status))
+        }
+    }
+
+    #[test]
+    fn latest_failed_is_the_newest_of_its_connection() {
+        let (mine, other) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut log = RequestLog::default();
+        assert_eq!(log.latest_failed(mine), None, "an empty log");
+        log.push(failed(1, mine, Origin::User, 200));
+        assert_eq!(log.latest_failed(mine), None, "nothing failed");
+        log.push(failed(2, mine, Origin::User, 404));
+        log.push(failed(3, mine, Origin::User, 500));
+        log.push(failed(4, mine, Origin::User, 200));
+        log.push(failed(5, other, Origin::User, 500));
+        log.push(failed(6, mine, Origin::Polling, 503));
+        assert_eq!(log.latest_failed(mine), Some(3));
+        assert_eq!(log.latest_failed(other), Some(5));
+    }
+
+    #[test]
+    fn latest_failed_goes_with_its_eviction() {
+        let mine = Uuid::from_u128(1);
+        let mut log = RequestLog::new(2, 2);
+        log.push(failed(1, mine, Origin::User, 404));
+        assert_eq!(log.latest_failed(mine), Some(1));
+        log.push(failed(2, mine, Origin::User, 200));
+        log.push(failed(3, mine, Origin::User, 200));
+        assert_eq!(log.latest_failed(mine), None);
     }
 }
