@@ -9,7 +9,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::store::{StoreError, write_atomic};
+use crate::store::{self, StoreError};
 
 /// Schema version written by this build.
 const SCHEMA_VERSION: u32 = 1;
@@ -51,6 +51,9 @@ pub struct ViewsFile {
     /// Views by profile id, then collection name.
     #[serde(default)]
     pub profiles: BTreeMap<Uuid, BTreeMap<String, CollectionView>>,
+    /// The file on disk must stay: [`save`] writes nothing.
+    #[serde(skip)]
+    pub save_blocked: bool,
 }
 
 impl Default for ViewsFile {
@@ -58,6 +61,7 @@ impl Default for ViewsFile {
         Self {
             schema_version: SCHEMA_VERSION,
             profiles: BTreeMap::new(),
+            save_blocked: false,
         }
     }
 }
@@ -91,27 +95,24 @@ pub fn views_path() -> Option<PathBuf> {
 }
 
 /// Loads the file; a missing one gives the default, an unreadable one too (with a warning).
+/// One that is newer or failed to migrate also stops [`save`].
 pub fn load(path: &Path) -> ViewsFile {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            tracing::warn!("ignoring unreadable {}: {e}", path.display());
-            ViewsFile::default()
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ViewsFile::default(),
-        Err(e) => {
-            tracing::warn!("cannot read {}: {e}", path.display());
-            ViewsFile::default()
+    // No migrations yet: `document_views.json` has only ever had version 1.
+    store::load_migrated(path, SCHEMA_VERSION, &[]).unwrap_or_else(|e: StoreError| {
+        tracing::warn!("ignoring {}: {e}", path.display());
+        ViewsFile {
+            save_blocked: e.blocks_saving(),
+            ..ViewsFile::default()
         }
-    }
+    })
 }
 
-/// Writes the file atomically.
+/// Writes the file atomically, unless the file on disk must stay.
 pub fn save(path: &Path, file: &ViewsFile) -> Result<(), StoreError> {
-    let json = serde_json::to_string_pretty(file).map_err(|e| StoreError::Parse {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
-    write_atomic(path, json.as_bytes())
+    if file.save_blocked {
+        return Ok(());
+    }
+    store::save_pretty(path, file)
 }
 
 #[cfg(test)]
@@ -154,5 +155,19 @@ mod tests {
         let p = dir.path().join("document_views.json");
         std::fs::write(&p, "{not json").expect("write");
         assert_eq!(load(&p), ViewsFile::default());
+    }
+
+    #[test]
+    fn newer_file_is_refused_and_never_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("document_views.json");
+        let text = r#"{"schema_version":2,"future":true}"#;
+        std::fs::write(&p, text).expect("write");
+        let mut f = load(&p);
+        assert!(f.save_blocked);
+        assert!(f.profiles.is_empty());
+        f.set_view(Uuid::new_v4(), "books", CollectionView::default());
+        save(&p, &f).expect("no error");
+        assert_eq!(std::fs::read_to_string(&p).expect("read"), text);
     }
 }

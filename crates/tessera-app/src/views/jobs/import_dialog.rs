@@ -28,6 +28,7 @@ use gpui_kit::{
 use rust_i18n::t;
 use serde_json::Value;
 use tessera_client::{Collection, DirtyValues, ImportAction, ImportParams};
+use tessera_core::documents::CONFIRM_ABOVE;
 use tessera_core::documents::export::{Danger, danger_level};
 use tessera_core::schema::{FieldType, SchemaDraft, Severity, validate};
 use tessera_core::transfer::import::ImportJob;
@@ -831,7 +832,7 @@ impl DocumentImportDialog {
         };
         let overwrites = self.new.is_none() && job.params.action != ImportAction::Create;
         let danger = if overwrites {
-            Some(danger_level(estimated, prod))
+            Some(danger_level(estimated, CONFIRM_ABOVE, prod))
         } else {
             prod.then_some(Danger::Medium)
         };

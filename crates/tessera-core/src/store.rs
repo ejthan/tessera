@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::profile::Profile;
@@ -59,7 +60,21 @@ pub enum StoreError {
     /// The file was written by a newer Tessera.
     #[error("file uses schema version {0}, which this version does not understand")]
     NewerSchema(u32),
+    /// A migration failed; the file is left untouched.
+    #[error("cannot migrate the file: {0}")]
+    Migration(String),
 }
+
+impl StoreError {
+    /// Whether the file on disk must not be written over. Only a file that does not parse may
+    /// be, by the two files that are cheap to lose: `document_views.json` and the layout.
+    pub fn blocks_saving(&self) -> bool {
+        !matches!(self, Self::Parse { .. })
+    }
+}
+
+/// One step of a file's format: `migrations[n]` lifts level `n + 1` to `n + 2`.
+pub(crate) type Migration = fn(Value) -> Result<Value, String>;
 
 /// Platform config directory of Tessera, if the home directory is known.
 pub fn config_dir() -> Option<PathBuf> {
@@ -81,14 +96,25 @@ pub fn logs_dir() -> Option<PathBuf> {
 
 /// Loads the file at `path`. A missing file yields an empty default.
 pub fn load(path: &Path) -> Result<ConnectionsFile, StoreError> {
-    load_versioned(path, SCHEMA_VERSION)
+    // No migrations yet: `connections.json` has only ever had version 1.
+    load_migrated(path, SCHEMA_VERSION, &[])
 }
 
-/// Loads a file with a `schema_version` up to `version`. A missing file yields the default; a
-/// bad or newer one is an error, and the caller must not write over it.
-pub(crate) fn load_versioned<T: Default + DeserializeOwned>(
+/// `<name>.bak`, which holds the file from before the last migration.
+fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".bak");
+    name.into()
+}
+
+/// Loads a file with a `schema_version` up to `version`, lifting an older one through
+/// `migrations`: first a copy to `.bak`, then each step, then an atomic write of the new
+/// version. A missing file yields the default. A bad or newer one, or a failed step, is an
+/// error that leaves the file, and the caller must not write over it.
+pub(crate) fn load_migrated<T: Default + Serialize + DeserializeOwned>(
     path: &Path,
     version: u32,
+    migrations: &[Migration],
 ) -> Result<T, StoreError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -100,15 +126,34 @@ pub(crate) fn load_versioned<T: Default + DeserializeOwned>(
         message: e.to_string(),
     };
     // Check the version first: a newer file may not match today's shape.
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(parse_err)?;
-    if let Some(v) = value.get("schema_version").and_then(|v| v.as_u64())
+    let mut value: Value = serde_json::from_str(&text).map_err(parse_err)?;
+    let found = value.get("schema_version").and_then(Value::as_u64);
+    if let Some(v) = found
         && v > u64::from(version)
     {
         return Err(StoreError::NewerSchema(
             u32::try_from(v).unwrap_or(u32::MAX),
         ));
     }
-    serde_json::from_value(value).map_err(parse_err)
+    let Some(found) = found.filter(|v| *v < u64::from(version)) else {
+        return serde_json::from_value(value).map_err(parse_err);
+    };
+    write_atomic(&backup_path(path), text.as_bytes())?;
+    for level in found..u64::from(version) {
+        let step = usize::try_from(level)
+            .ok()
+            .and_then(|level| migrations.get(level.checked_sub(1)?))
+            .ok_or_else(|| StoreError::Migration(format!("no step from version {level}")))?;
+        value = step(value).map_err(StoreError::Migration)?;
+    }
+    let Some(object) = value.as_object_mut() else {
+        return Err(StoreError::Migration("the result is no object".into()));
+    };
+    object.insert("schema_version".into(), version.into());
+    let file: T =
+        serde_json::from_value(value).map_err(|e| StoreError::Migration(e.to_string()))?;
+    save_pretty(path, &file)?;
+    Ok(file)
 }
 
 /// Writes `file` as pretty JSON via [`write_atomic`].
@@ -209,5 +254,147 @@ mod tests {
         )
         .expect("write");
         assert!(matches!(load(&p), Err(StoreError::NewerSchema(2))));
+        let text = r#"{"schema_version": 2, "profiles": [], "future": true}"#;
+        assert_eq!(std::fs::read_to_string(&p).expect("read"), text);
+    }
+
+    #[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
+    struct Fake {
+        schema_version: u32,
+        #[serde(default)]
+        a: u32,
+        #[serde(default)]
+        b: u32,
+    }
+
+    const OLD: &str = "{ \"schema_version\": 1,   \"keep\": true }\n";
+
+    fn fake_file(dir: &tempfile::TempDir, text: &str) -> PathBuf {
+        let p = dir.path().join("fake.json");
+        std::fs::write(&p, text).expect("write");
+        p
+    }
+
+    fn read(p: &Path) -> String {
+        std::fs::read_to_string(p).expect("read")
+    }
+
+    fn step_a(mut v: Value) -> Result<Value, String> {
+        v["a"] = 1.into();
+        Ok(v)
+    }
+
+    fn step_b(mut v: Value) -> Result<Value, String> {
+        v["b"] = (v["a"].as_u64().unwrap_or(0) + 1).into();
+        Ok(v)
+    }
+
+    fn fail(_: Value) -> Result<Value, String> {
+        Err("step failed".into())
+    }
+
+    #[test]
+    fn migrates_from_level_1_through_both_steps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = fake_file(&dir, OLD);
+        let got: Fake = load_migrated(&p, 3, &[step_a, step_b]).expect("load");
+        let want = Fake {
+            schema_version: 3,
+            a: 1,
+            b: 2,
+        };
+        assert_eq!(got, want);
+        assert_eq!(read(&backup_path(&p)), OLD);
+        assert_eq!(serde_json::from_str::<Fake>(&read(&p)).expect("json"), want);
+        // Current now: nothing runs, and the backup stays.
+        let again: Fake = load_migrated(&p, 3, &[fail, fail]).expect("load");
+        assert_eq!(again, want);
+        assert_eq!(read(&backup_path(&p)), OLD);
+    }
+
+    #[test]
+    fn migrates_from_level_2_through_the_last_step() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let text = r#"{"schema_version":2,"a":5}"#;
+        let p = fake_file(&dir, text);
+        let got: Fake = load_migrated(&p, 3, &[fail, step_b]).expect("load");
+        assert_eq!((got.schema_version, got.a, got.b), (3, 5, 6));
+        assert_eq!(read(&backup_path(&p)), text);
+    }
+
+    #[test]
+    fn a_later_migration_replaces_the_backup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = fake_file(&dir, OLD);
+        let _: Fake = load_migrated(&p, 2, &[step_a]).expect("load");
+        let second = read(&p);
+        let _: Fake = load_migrated(&p, 3, &[step_a, step_b]).expect("load");
+        assert_eq!(read(&backup_path(&p)), second);
+    }
+
+    #[test]
+    fn a_failing_step_leaves_the_file_and_the_backup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = fake_file(&dir, OLD);
+        let got = load_migrated::<Fake>(&p, 3, &[step_a, fail]);
+        assert!(matches!(got, Err(StoreError::Migration(m)) if m == "step failed"));
+        assert_eq!(read(&p), OLD);
+        assert_eq!(read(&backup_path(&p)), OLD);
+    }
+
+    #[test]
+    fn a_missing_step_or_a_bad_result_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = fake_file(&dir, OLD);
+        let got = load_migrated::<Fake>(&p, 3, &[step_a]);
+        assert!(matches!(got, Err(StoreError::Migration(_))));
+        assert_eq!(read(&p), OLD);
+        fn to_list(_: Value) -> Result<Value, String> {
+            Ok(serde_json::json!([]))
+        }
+        let got = load_migrated::<Fake>(&p, 2, &[to_list]);
+        assert!(matches!(got, Err(StoreError::Migration(_))));
+        fn wrong_shape(mut v: Value) -> Result<Value, String> {
+            v["a"] = "text".into();
+            Ok(v)
+        }
+        let got = load_migrated::<Fake>(&p, 2, &[wrong_shape]);
+        assert!(matches!(got, Err(StoreError::Migration(_))));
+        assert_eq!(read(&p), OLD);
+        let zero = fake_file(&dir, r#"{"schema_version":0}"#);
+        assert!(matches!(
+            load_migrated::<Fake>(&zero, 2, &[step_a]),
+            Err(StoreError::Migration(_))
+        ));
+    }
+
+    #[test]
+    fn a_backup_that_cannot_be_written_stops_the_migration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = fake_file(&dir, OLD);
+        std::fs::create_dir(backup_path(&p)).expect("mkdir");
+        assert!(load_migrated::<Fake>(&p, 2, &[step_a]).is_err());
+        assert_eq!(read(&p), OLD);
+    }
+
+    #[test]
+    fn a_newer_file_writes_no_backup_and_stays() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let text = r#"{"schema_version":4}"#;
+        let p = fake_file(&dir, text);
+        let got = load_migrated::<Fake>(&p, 3, &[step_a, step_b]);
+        assert!(matches!(got, Err(StoreError::NewerSchema(4))));
+        assert_eq!(read(&p), text);
+        assert!(!backup_path(&p).exists());
+    }
+
+    #[test]
+    fn a_current_file_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let text = r#"{"schema_version":3,"a":1}"#;
+        let p = fake_file(&dir, text);
+        let _: Fake = load_migrated(&p, 3, &[fail, fail]).expect("load");
+        assert_eq!(read(&p), text);
+        assert!(!backup_path(&p).exists());
     }
 }

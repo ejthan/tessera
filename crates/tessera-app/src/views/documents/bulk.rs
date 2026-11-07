@@ -19,6 +19,7 @@ use gpui_kit::{
 use rust_i18n::t;
 use serde_json::Value;
 use tessera_client::{Client, Collection};
+use tessera_core::documents::CONFIRM_ABOVE;
 use tessera_core::documents::export::{Danger, danger_level};
 use tessera_core::documents::filter::names_everything;
 use tessera_core::documents::validate::validate_document;
@@ -392,7 +393,7 @@ impl Bulk {
         let this = cx.entity().downgrade();
         let run = move |window: &mut Window, cx: &mut App| run(this.clone(), &job, window, cx);
         let prod = self.connection.read(cx).profile.environment.is_prod();
-        match danger_level(count, prod) {
+        match danger_level(count, CONFIRM_ABOVE, prod) {
             // The dialog is gone by then, so a failure shows here.
             Danger::Medium => confirm::open(
                 title,

@@ -4,8 +4,6 @@
 
 use serde_json::{Map, Value};
 
-use super::CONFIRM_ABOVE;
-
 /// How hard a bulk action's confirmation is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Danger {
@@ -15,9 +13,9 @@ pub enum Danger {
     High,
 }
 
-/// `High` above [`CONFIRM_ABOVE`] documents or on prod, else `Medium`.
-pub fn danger_level(count: u64, prod: bool) -> Danger {
-    if prod || count > CONFIRM_ABOVE {
+/// `High` above `threshold` documents or on prod at any count, else `Medium`.
+pub fn danger_level(count: u64, threshold: u64, prod: bool) -> Danger {
+    if prod || count > threshold {
         Danger::High
     } else {
         Danger::Medium
@@ -121,8 +119,10 @@ mod tests {
 
     #[test]
     fn danger_levels() {
-        assert_eq!(danger_level(1000, false), Danger::Medium);
-        assert_eq!(danger_level(1001, false), Danger::High);
-        assert_eq!(danger_level(1, true), Danger::High);
+        assert_eq!(danger_level(1000, 1000, false), Danger::Medium);
+        assert_eq!(danger_level(1001, 1000, false), Danger::High);
+        assert_eq!(danger_level(5, 5, false), Danger::Medium);
+        assert_eq!(danger_level(6, 5, false), Danger::High);
+        assert_eq!(danger_level(1, 1000, true), Danger::High);
     }
 }
