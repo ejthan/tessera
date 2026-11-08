@@ -2,6 +2,7 @@
 
 //! Domain logic for Tessera that does not depend on the UI.
 
+pub mod analytics;
 pub mod cli;
 pub mod curl;
 pub mod documents;
@@ -18,6 +19,7 @@ pub mod relevance;
 pub mod schema;
 pub mod search;
 pub mod secrets;
+pub mod stemming;
 pub mod store;
 pub mod transfer;
 

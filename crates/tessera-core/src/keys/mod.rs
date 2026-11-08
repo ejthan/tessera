@@ -63,11 +63,6 @@ impl Template {
             Self::Admin => vec!["*"],
         }
     }
-
-    /// The collections it fills in.
-    pub fn collections(self) -> Vec<&'static str> {
-        vec!["*"]
-    }
 }
 
 /// Why a draft cannot be sent.
@@ -230,9 +225,6 @@ mod tests {
             ["documents:import", "collections:get"]
         );
         assert_eq!(Template::Admin.actions(), ["*"]);
-        for template in [Template::SearchOnly, Template::ImportOnly, Template::Admin] {
-            assert_eq!(template.collections(), ["*"]);
-        }
     }
 
     #[test]

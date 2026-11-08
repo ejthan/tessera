@@ -26,6 +26,7 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use secrecy::{ExposeSecret as _, SecretString};
+use tessera_client::Error;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::secrets::SecretError;
 use uuid::Uuid;
@@ -423,10 +424,12 @@ impl ConnectDialog {
                 },
             };
             let start = Instant::now();
+            let mut limited = false;
             let result = match key {
-                Ok(key) => connect(profile.clone(), key, hook)
-                    .await
-                    .map_err(|e| error_text(&e, &profile)),
+                Ok(key) => connect(profile.clone(), key, hook).await.map_err(|e| {
+                    limited = matches!(e, Error::LimitedKey { .. });
+                    error_text(&e, &profile)
+                }),
                 Err(e) => Err(e),
             };
             let elapsed = start.elapsed();
@@ -436,6 +439,7 @@ impl ConnectDialog {
                     elapsed,
                     profile: profile.clone(),
                     typed: typed.clone(),
+                    limited,
                     result: match &result {
                         Ok(c) => Ok((c.info.clone(), c.access)),
                         Err(e) => Err(e.clone().into()),

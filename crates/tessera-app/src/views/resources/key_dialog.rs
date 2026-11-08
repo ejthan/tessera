@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use chrono::{Local, NaiveDate, TimeZone as _};
+use chrono::{Datelike as _, Local, NaiveDate};
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
@@ -22,7 +22,8 @@ use gpui_kit::{
     ParentElement as _, Render, SharedString, Styled as _, Task, WeakEntity, Window, div,
     prelude::*, px,
 };
-use jiff::Timestamp;
+use jiff::tz::{AmbiguousOffset, TimeZone};
+use jiff::{Timestamp, civil};
 use rust_i18n::t;
 use secrecy::{ExposeSecret as _, SecretString};
 use tessera_client::{CreatedKey, NewKey};
@@ -31,6 +32,7 @@ use uuid::Uuid;
 
 use super::keys::KeysView;
 use super::{client_of, dialog_title, notice};
+use crate::actions::{CopyKey, FinishReveal, KEY_REVEAL};
 use crate::admin::AdminBackendGlobal;
 use crate::connection::{ConnectionState, error_text};
 use crate::state::AppState;
@@ -51,9 +53,21 @@ fn end_of_day(picked: PickedTime) -> Option<i64> {
     let PickedTime::Single(Some(at)) = picked else {
         return None;
     };
-    let end = at.date().and_hms_opt(23, 59, 59)?;
-    let local = Local.from_local_datetime(&end).earliest()?;
-    Some(local.timestamp())
+    Some(end_of_day_in(at.date(), &TimeZone::system()))
+}
+
+/// The last 23:59:59 of `day`. Where the clock skips that time, the instant before the skip,
+/// so a picked date always ends. A failed conversion gives a past date, which the form refuses.
+fn end_of_day_in(day: NaiveDate, zone: &TimeZone) -> i64 {
+    let end = civil::date(day.year() as i16, day.month() as i8, day.day() as i8).at(23, 59, 59, 0);
+    let instants = zone.to_ambiguous_timestamp(end);
+    let skipped = matches!(instants.offset(), AmbiguousOffset::Gap { .. });
+    let last = if skipped {
+        instants.earlier()
+    } else {
+        instants.later()
+    };
+    last.map_or(0, |at| at.as_second())
 }
 
 fn problem_text(problem: KeyProblem) -> String {
@@ -521,7 +535,7 @@ impl RevealDialog {
 }
 
 impl Render for RevealDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let warning = cx.theme().warning;
         let label = if self.masked {
             t!("connect.key.show")
@@ -534,6 +548,9 @@ impl Render for RevealDialog {
             t!("keys.copy")
         };
         v_flex()
+            .key_context(KEY_REVEAL)
+            .on_action(cx.listener(|this, _: &CopyKey, _, cx| this.copy(cx)))
+            .on_action(cx.listener(|this, _: &FinishReveal, window, cx| this.done(window, cx)))
             .gap_2()
             .child(notice(
                 "keys.reveal_warning",
@@ -577,6 +594,7 @@ impl Render for RevealDialog {
                     .child(
                         Button::new("keys.reveal_copy")
                             .label(copy.to_string())
+                            .children(Kbd::binding_for_action(&CopyKey, Some(KEY_REVEAL), window))
                             .track_focus(&self.copy_focus)
                             .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),
                     )
@@ -584,8 +602,49 @@ impl Render for RevealDialog {
                         Button::new("keys.reveal_done")
                             .primary()
                             .label(t!("keys.reveal_done").to_string())
+                            .children(Kbd::binding_for_action(
+                                &FinishReveal,
+                                Some(KEY_REVEAL),
+                                window,
+                            ))
                             .on_click(cx.listener(|this, _, window, cx| this.done(window, cx))),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn end(day: (i32, u32, u32), zone: &str) -> String {
+        let day = NaiveDate::from_ymd_opt(day.0, day.1, day.2).unwrap();
+        let zone = TimeZone::get(zone).unwrap();
+        let at = Timestamp::from_second(end_of_day_in(day, &zone)).unwrap();
+        at.to_zoned(zone).strftime("%F %T %:z").to_string()
+    }
+
+    #[test]
+    fn a_plain_day_ends_at_midnight() {
+        assert_eq!(
+            end((2027, 1, 15), "Europe/Zurich"),
+            "2027-01-15 23:59:59 +01:00"
+        );
+    }
+
+    #[test]
+    fn a_skipped_end_falls_before_the_skip() {
+        assert_eq!(
+            end((2027, 3, 27), "America/Nuuk"),
+            "2027-03-27 22:59:59 -02:00"
+        );
+    }
+
+    #[test]
+    fn a_repeated_end_is_the_later_one() {
+        assert_eq!(
+            end((2027, 10, 30), "America/Nuuk"),
+            "2027-10-30 23:59:59 -02:00"
+        );
     }
 }

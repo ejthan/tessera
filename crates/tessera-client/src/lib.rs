@@ -2,6 +2,7 @@
 
 //! HTTP client for the Typesense API.
 
+mod analytics;
 mod collections;
 mod documents;
 mod error;
@@ -13,6 +14,7 @@ mod raw;
 mod search;
 mod send;
 mod sets;
+mod stemming;
 mod stopwords;
 
 use std::fmt;
@@ -40,6 +42,7 @@ pub use search::{
 use secrecy::SecretString;
 use serde_json::{Value, json};
 pub use sets::{ItemSet, SetKind};
+pub use stemming::{StemmingDictionary, StemmingWord};
 pub use stopwords::StopwordSet;
 use url::Url;
 
@@ -369,6 +372,13 @@ impl Client {
     /// `GET /operations/schema_changes`: schema changes in progress, empty when idle.
     pub async fn schema_changes(&self) -> Result<Vec<SchemaChange>, Error> {
         self.schema_changes_on(None).await
+    }
+
+    /// Whether this client's key begins with `prefix`, the four characters the server keeps of
+    /// a key's value. Answers without giving the key out.
+    pub fn key_starts_with(&self, prefix: &str) -> bool {
+        use secrecy::ExposeSecret as _;
+        !prefix.is_empty() && self.key.expose_secret().starts_with(prefix)
     }
 
     /// `GET /keys`, to learn whether the key is an admin key. Only the status counts:

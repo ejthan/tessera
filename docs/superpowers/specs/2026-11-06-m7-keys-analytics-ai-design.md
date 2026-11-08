@@ -152,7 +152,7 @@ Since a client cannot detect this, the analytics view always shows the two flags
 
 Traps:
 
-- **An import merges into an existing dictionary.** A word already there gets the new root.
+- **An import merges into an existing dictionary, and a word keeps the root it has.** New words are added. A word already there stays as it is, whatever root the file gives it, and the first of a word repeated in one import wins. All of this was measured on 30.0 and 30.2. A changed root needs a delete and a re-import.
 - **A bad line stops the import after the lines before it were stored.** `{"word":"a","root":"b"}\nnot json` answers 400 `Invalid dictionary format.` and the dictionary exists with `a`. A line without `root`: 400 `dictionary lines should contain word and root values.`. `word: 5`: 400 `Bad request.`. So the file is validated first and whole (§5.5).
 - **The server stores what it gets:** case, spaces, an empty `word`, and it drops unknown keys. An empty `id=` is accepted too.
 - **A deleted dictionary leaves collections working.** Search and writes on a collection whose field names it still answer 200. `stem_dictionary: "nope"` at collection create is also accepted, so nothing warns. The delete dialog names the collections that use it.
@@ -310,12 +310,12 @@ pub struct BadLine { pub line: usize, pub problem: LineProblem }
 pub enum LineProblem { NotJson, NotObject, MissingWord, MissingRoot, NotText, Empty }
 pub fn parse_dictionary(text: &str) -> Result<Vec<WordRoot>, Vec<BadLine>>;   // at most 100 BadLine
 pub fn to_jsonl(words: &[WordRoot]) -> String;
-pub struct ImportCheck { pub sent: usize, pub missing: Vec<String>, pub changed_root: usize }
+pub struct ImportCheck { pub sent: usize, pub missing: Vec<String>, pub kept_root: usize }
 pub fn check_import(before: &[WordRoot], sent: &[WordRoot], stored: &[WordRoot]) -> ImportCheck;
 pub fn collections_using(collections: &[Collection], id: &str) -> Vec<String>;
 ```
 
-`parse_dictionary` refuses the file at any bad line, blank lines skipped. An empty `word` or `root` is refused here, though the server would store it. Duplicates in a file stay, and the last wins as on the server. `changed_root` counts words of `before` whose root differs in `stored`: that is the merge the user should hear about.
+`parse_dictionary` refuses the file at any bad line, blank lines skipped. An empty `word` or `root` is refused here, though the server would store it. Duplicates in a file stay, and the first wins as on the server. `kept_root` counts words of `before` that were sent with another root and keep the one they have: that is the merge the user should hear about. `missing` compares a word of `before` with the root it had, and any other word with the first root sent.
 
 ### 5.6 AI (`ai.rs`)
 
@@ -444,7 +444,7 @@ A built-in model note says the first use downloads the model on the server and c
 
 List with prefix `stemming`, column `id`. Right side a list with prefix `stemming.words`, columns `word`, `root`, filterable.
 
-**Import** (`stemming_dialog.rs`, New ⌘⇧N or Import on a selected row): id (new names through `name_ok`, or the selected dictionary), a file by `prompt_for_paths`, read through the backend with `STEMMING_FILE_LIMIT`. `parse_dictionary` runs on the backend, and bad lines show with numbers, at most 100; nothing is sent while any is bad. With an existing id the dialog says the words merge and existing words take the new root, and asks, plain, typed on prod. The result line states `sent`, `changed_root`, and any `missing`.
+**Import** (`stemming_dialog.rs`, New ⌘⇧N or Import on a selected row): id (new names through `name_ok`, or the selected dictionary), a file by `prompt_for_paths`, read through the backend with `STEMMING_FILE_LIMIT`. `parse_dictionary` runs on the backend, and bad lines show with numbers, at most 100; nothing is sent while any is bad. With an existing id the dialog says the words merge and that a word already there keeps its root, so a changed root needs a delete and a re-import, and asks, plain, typed on prod. An empty file is refused. The result line states `sent`, `kept_root`, and any `missing`.
 
 **Delete:** names `collections_using` and says those collections keep working without the mapping; a plain confirmation, typed on prod or when any collection uses it.
 

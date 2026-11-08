@@ -3,6 +3,7 @@
 //! The views of the relevance resources, one tab per connection and kind.
 
 pub mod aliases;
+pub mod analytics;
 pub mod attachment;
 pub mod curation_dialog;
 pub mod curations;
@@ -15,6 +16,8 @@ pub mod reindex;
 pub mod scoped_keys;
 pub mod set_file;
 pub mod sets;
+pub mod stemming;
+pub mod stemming_dialog;
 pub mod stopwords;
 pub mod synonyms;
 pub mod test_panel;
@@ -39,9 +42,11 @@ use tessera_widgets::confirm;
 use tessera_widgets::confirm_danger::{self, DangerOptions};
 
 use self::aliases::AliasesView;
+use self::analytics::AnalyticsView;
 use self::keys::KeysView;
 use self::presets::PresetsView;
 use self::sets::SetsView;
+use self::stemming::StemmingView;
 use self::stopwords::StopwordsView;
 use super::env_badge;
 use crate::actions::{FocusResourceFilter, NewResource, RESOURCES, ReloadResource};
@@ -60,6 +65,10 @@ pub enum ResourceView {
     Sets(Entity<SetsView>),
     /// See [`KeysView`].
     Keys(Entity<KeysView>),
+    /// See [`AnalyticsView`].
+    Analytics(Entity<AnalyticsView>),
+    /// See [`StemmingView`].
+    Stemming(Entity<StemmingView>),
 }
 
 impl ResourceView {
@@ -90,6 +99,12 @@ impl ResourceView {
             ResourceKind::Keys => {
                 Self::Keys(cx.new(|cx| KeysView::new(connection, state, window, cx)))
             }
+            ResourceKind::Analytics => {
+                Self::Analytics(cx.new(|cx| AnalyticsView::new(connection, state, window, cx)))
+            }
+            ResourceKind::Stemming => {
+                Self::Stemming(cx.new(|cx| StemmingView::new(connection, window, cx)))
+            }
         }
     }
 
@@ -101,6 +116,8 @@ impl ResourceView {
             Self::Presets(view) => view.clone().into(),
             Self::Sets(view) => view.clone().into(),
             Self::Keys(view) => view.clone().into(),
+            Self::Analytics(view) => view.clone().into(),
+            Self::Stemming(view) => view.clone().into(),
         }
     }
 
@@ -112,6 +129,8 @@ impl ResourceView {
             Self::Presets(view) => view.focus_handle(cx),
             Self::Sets(view) => view.focus_handle(cx),
             Self::Keys(view) => view.focus_handle(cx),
+            Self::Analytics(view) => view.focus_handle(cx),
+            Self::Stemming(view) => view.focus_handle(cx),
         }
     }
 
@@ -123,6 +142,8 @@ impl ResourceView {
             Self::Presets(view) => view.read(cx).gates(cx),
             Self::Sets(view) => view.read(cx).gates(cx),
             Self::Keys(view) => view.read(cx).gates(cx),
+            Self::Analytics(view) => view.read(cx).gates(cx),
+            Self::Stemming(view) => view.read(cx).gates(cx),
         }
     }
 }
@@ -332,6 +353,17 @@ impl ResourceList {
     /// Whether there are no rows at all.
     pub(super) fn is_empty(&self, cx: &App) -> bool {
         self.table.read(cx).delegate().all.is_empty()
+    }
+
+    /// The filter alone, for a list beside another list's toolbar.
+    pub(super) fn filter_input(
+        this: &Entity<Self>,
+        prefix: &'static str,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        Input::new(&this.read(cx).filter)
+            .id(SharedString::from(format!("{prefix}.filter")))
+            .aria_label(t!(format!("{prefix}.filter")).to_string())
     }
 
     /// Puts the cursor in the filter.

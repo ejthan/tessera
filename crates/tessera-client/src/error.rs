@@ -23,6 +23,15 @@ pub enum Error {
         /// The raw response body.
         body: String,
     },
+    /// `/health` answered and an authenticated read did not. The server gives a wrong key and a
+    /// restricted one, such as a search-only key, the same answer.
+    #[error("HTTP {status}: {message}")]
+    LimitedKey {
+        /// HTTP status code.
+        status: u16,
+        /// Typesense's `message` field, or the raw body if there is none.
+        message: String,
+    },
     /// The response body was not the JSON we expected.
     #[error("unexpected response: {0}")]
     Decode(#[source] serde_json::Error),

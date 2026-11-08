@@ -836,7 +836,7 @@ impl ReindexState {
 
     /// Reads both sides and shows the compare. After the switch only the counts change.
     pub fn compare(&mut self, cx: &mut Context<Self>) {
-        if self.imported.is_none() {
+        if self.imported.is_none() || self.step == Step::Done {
             return;
         }
         let fresh = match self.fresh(cx) {
@@ -1410,7 +1410,10 @@ impl ReindexView {
             (!self.can_back(cx), &StepBack),
             (!(r.step == Step::Schema && r.plan.is_some()), &EditResource),
             (!self.can_delete(cx), &DeleteResource),
-            (r.imported.is_none(), &ReloadResource),
+            (
+                r.imported.is_none() || r.step == Step::Done,
+                &ReloadResource,
+            ),
             (r.imported.is_none(), &SaveReport),
             (running.is_none(), &CancelJob),
             (!stopping, &StopWaiting),

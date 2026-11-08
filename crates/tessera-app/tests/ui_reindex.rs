@@ -942,6 +942,18 @@ async fn delete_old_is_typed_and_ends_the_assistant(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn reload_after_the_end_keeps_the_step(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.copied(cx, 10);
+    f.switch(cx);
+    let reindex = f.reindex(cx).unwrap();
+    f.click(cx, "reindex.keep");
+    cx.update(|cx| reindex.update(cx, |r, cx| r.compare(cx)));
+    f.settle(cx);
+    assert_eq!(cx.read(|cx| reindex.read(cx).step()), Step::Done);
+}
+
+#[gpui_kit::test]
 async fn done_removes_state(cx: &mut TestAppContext) {
     let f = Fixture::new(cx).await;
     f.copied(cx, 10);

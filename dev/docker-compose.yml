@@ -5,7 +5,10 @@
 services:
   typesense:
     image: typesense/typesense:${TYPESENSE_VERSION:-30.2}
-    command: --data-dir /data --api-key=${TYPESENSE_API_KEY:-xyz} --enable-cors=false
+    command: >-
+      --data-dir /data --api-key=${TYPESENSE_API_KEY:-xyz} --enable-cors=false
+      --enable-search-analytics=true --analytics-dir=/data/analytics
+      --analytics-minute-rate-limit=1000
     ports:
       # Set TYPESENSE_PORT if 8108 is taken on your machine.
       - "${TYPESENSE_PORT:-8108}:8108"
