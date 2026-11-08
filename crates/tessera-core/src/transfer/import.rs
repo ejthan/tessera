@@ -158,8 +158,8 @@ pub struct ImportOutcome {
     pub end: JobEnd<TransferError>,
     /// The final numbers.
     pub progress: ImportProgress,
-    /// The failed documents.
-    pub report: Report,
+    /// The failed documents, shared so a saved report can outlive any view.
+    pub report: Arc<Report>,
     /// The first line of the first batch not answered, unless finished.
     pub stopped_at_line: Option<u64>,
     /// `None` when not finished or when the count could not be read.
@@ -428,7 +428,7 @@ pub async fn run_import(
             return ImportOutcome {
                 end: JobEnd::Failed(TransferError::Report(e.to_string())),
                 progress: state,
-                report: Report::without_spool(),
+                report: Arc::new(Report::without_spool()),
                 stopped_at_line: None,
                 count: None,
             };
@@ -589,7 +589,7 @@ pub async fn run_import(
     ImportOutcome {
         end,
         progress: state,
-        report,
+        report: Arc::new(report),
         stopped_at_line,
         count,
     }

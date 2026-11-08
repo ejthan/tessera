@@ -26,15 +26,16 @@ use gpui_kit::component::{
     resizable_panel, v_flex,
 };
 use gpui_kit::{
-    Action, App, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
-    IntoElement, ParentElement as _, Pixels, Point, Render, SharedString, Styled as _,
-    Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
+    Action, App, AppContext as _, Context, DismissEvent, Entity, ExternalPaths, FocusHandle,
+    Focusable as _, IntoElement, ParentElement as _, Pixels, Point, Render, SharedString,
+    Styled as _, Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
 use rust_i18n::t;
 use tessera_client::{Collection, Error};
 use tessera_core::documents::MAX_SELECTION;
 use tessera_core::documents::columns::{columns_from_schema, exclude_fields, merge_keys};
 use tessera_core::documents::template::template;
+use tessera_core::transfer::source::Source;
 use tessera_widgets::{FacetFetch, FilterField, FilterInput, FilterInputEvent, confirm};
 use uuid::Uuid;
 
@@ -42,13 +43,14 @@ use self::bulk::BulkMode;
 use self::inspector::{DocumentSaved, GoToResult, Inspector};
 use self::table::DocRows;
 use super::env_badge;
+use super::jobs::import_dialog::DocumentImportDialog;
 use super::overview::grouped;
 use super::schema_view::COPIED_FOR;
 use crate::actions::{
-    ClearFilter, CopyCell, CopyCsv, CopyCurl, CopyJsonl, CopyRowJson, DOCUMENTS, DeleteByQuery,
-    DeleteDocuments, ExtendRows, FocusSearch, GoToId, NarrowerColumn, NewDocument, OpenDocument,
-    SelectLoaded, SortByColumn, ToggleColumns, ToggleInspector, TogglePinColumn, ToggleRow,
-    UpdateByQuery, WiderColumn, gated,
+    COLLECTION, ClearFilter, CopyCell, CopyCsv, CopyCurl, CopyJsonl, CopyRowJson, DOCUMENTS,
+    DeleteByQuery, DeleteDocuments, ExtendRows, FocusSearch, GoToId, ImportDocuments,
+    NarrowerColumn, NewDocument, OpenDocument, SelectLoaded, SortByColumn, ToggleColumns,
+    ToggleInspector, TogglePinColumn, ToggleRow, UpdateByQuery, WiderColumn, gated,
 };
 use crate::connection::{CollectionChanged, ConnectionState};
 use crate::documents::DocumentsBackendGlobal;
@@ -889,6 +891,19 @@ impl DocumentsView {
         }
     }
 
+    /// Opens the import dialog with this collection as the target, on `source` if a file was
+    /// dropped.
+    pub fn import(&self, source: Option<Source>, window: &mut Window, cx: &mut Context<Self>) {
+        DocumentImportDialog::open(
+            self.state.clone(),
+            self.connection.clone(),
+            Some(self.name.clone()),
+            source,
+            window,
+            cx,
+        );
+    }
+
     /// What the toolbar, the copy menu and the filter disable or do not show now, for
     /// [`gated`].
     fn gates(&self, cx: &App) -> [(bool, &'static dyn Action); 15] {
@@ -1023,6 +1038,20 @@ impl DocumentsView {
                     .dropdown_menu(move |menu, _, _| {
                         copy::entries(menu.action_context(target.clone()), has_rows)
                     }),
+            )
+            .child(
+                Button::new("documents.import")
+                    .ghost()
+                    .small()
+                    .label(t!("documents.import").to_string())
+                    .children(Kbd::binding_for_action(
+                        &ImportDocuments,
+                        Some(COLLECTION),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.import(None, window, cx);
+                    })),
             )
             .child(
                 Button::new("documents.new")
@@ -1186,6 +1215,10 @@ impl Render for DocumentsView {
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(gated(DOCUMENTS, &self.gates(cx)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                let source = paths.paths().first().cloned().map(Source::File);
+                this.import(source, window, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
             )

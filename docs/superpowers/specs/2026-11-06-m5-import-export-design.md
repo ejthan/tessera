@@ -111,7 +111,7 @@ impl ExportStream {
 
 - **A blank line gets no answer line.** Ten input lines with one empty line gave nine answers, so counting would shift every later error by one line (both). A line of spaces does get an answer, a `Bad JSON` error. The reader drops all whitespace-only lines (§5.1) and pairs answers with what it sent.
 - **Invalid UTF-8 is silently truncated.** `{"id":"bad\xff","t":"a"}` answered `{"id":"bad","success":true}` (both): a changed id on a success line. The reader refuses such a line locally (§5.1).
-- **`dirty_values` defaults to rejecting.** Without the parameter `"12"` for an `int32` is a 400, on import and on single documents (both). With `coerce_or_reject` it is stored as 12. So the dialog's default is `coerce_or_reject`, as §7.6 implies, and it is sent explicitly (D46). This also means M3's note "the default `dirty_values` coerces it" (M3 design §5.5) is wrong for the inspector's saves: `validate_document` calls such a value a `Warning` while the server refuses it. Out of scope here; §14 of this design names it.
+- **`dirty_values` defaults to rejecting.** Without the parameter `"12"` for an `int32` is a 400, on import and on single documents (both). With `coerce_or_reject` it is stored as 12. So the dialog's default is `coerce_or_reject`, as §7.6 implies, and it is sent explicitly (D46). M3's note that the default coerces was wrong for the inspector's saves. Fixed in M5: `validate_document` calls such a value an `Error`, and `validate_coerced` keeps the `Warning` for the import preview.
 - **`dirty_values=bogus` is accepted silently** (200, documents stored), and a bad `action` is a 400 whose text omits `emplace`, which works (both). The enums close both.
 - **The failed document echo differs from the success echo.** With `return_doc=true`, a success has `document` as an object and a failure as a JSON string (both). `return_doc` stays off: the client holds the line it sent.
 - **An empty body answers 200 with no lines,** and a body of only rejected rows is not sent at all.
@@ -557,6 +557,6 @@ Recorded in `docs/spec.md` together with this design: §4 (the crates actually u
 | Bottom dock tabs and `ToggleRequestLog` tests assume a single panel | Regressions in ⌘J | One helper, existing `ui_log.rs` tests stay |
 | Dialog stacked on a dialog (`Mode::Pick`) mishandles Esc | Wrong dialog closes | `unlock` already stacks; a UI test covers Esc |
 | The estimate of documents is from 20 lines | Danger level off near 1,000 | It says "about". A mixed file can under-estimate, which is why prod always types the name |
-| `validate_document` warns of coercion, while the server refuses without `coerce_or_reject` | Inspector saves of `"12"` are refused despite a mere warning | Not M5's: the import dialog's default makes the warning true there. Open for the maintainer: M3 design §5.5 and the inspector need a fix |
+| `validate_coerced` warns of coercion, while `reject` and `drop` do not coerce | With those dirty values the preview understates a numeric string | Accepted: `coerce_or_reject` is the default, and the report names the row |
 | `csv 1.4.0` API is unread until the download | Small rename | Task 3 starts with `cargo fetch` and reading it |
 | Full bodies aren't kept for imports | "Copy as curl" is missing on those log entries | Intentional, and said in the detail |

@@ -10,7 +10,7 @@ use tessera_client::{Collection, Field};
 pub enum IssueSeverity {
     /// The server will refuse the document.
     Error,
-    /// The server coerces the value.
+    /// The server coerces the value: only an import with `dirty_values=coerce_or_*` does.
     Warning,
     /// Worth knowing, harmless.
     Info,
@@ -43,9 +43,9 @@ fn lookup<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.').try_fold(doc, |v, part| v.get(part))
 }
 
-/// `Some(Warning)` for a numeric string a numeric field coerces, `Some(Error)` for any other
-/// mismatch, `None` when `v` fits the scalar type `ty`.
-fn scalar_mismatch(ty: &str, v: &Value) -> Option<IssueSeverity> {
+/// `None` when `v` fits the scalar type `ty`. `Some(Warning)` for a numeric string in a
+/// numeric field if `coerce`, `Some(Error)` for any other mismatch.
+fn scalar_mismatch(ty: &str, v: &Value, coerce: bool) -> Option<IssueSeverity> {
     let ok = match ty {
         "string" => v.is_string(),
         "bool" => v.is_boolean(),
@@ -68,21 +68,21 @@ fn scalar_mismatch(ty: &str, v: &Value) -> Option<IssueSeverity> {
         ("float", Some(s)) => s.parse::<f64>().is_ok(),
         _ => false,
     };
-    Some(if coerced {
+    Some(if coerced && coerce {
         IssueSeverity::Warning
     } else {
         IssueSeverity::Error
     })
 }
 
-fn check_value(f: &Field, path: &str, v: &Value, out: &mut Vec<DocIssue>) {
+fn check_value(f: &Field, path: &str, v: &Value, coerce: bool, out: &mut Vec<DocIssue>) {
     let ty = f.r#type.as_str();
     if v.is_null() {
         return;
     }
     // A `geopoint[]` is an array of pairs; any other `x[]` an array of `x`.
     let Some(element) = ty.strip_suffix("[]") else {
-        if let Some(s) = scalar_mismatch(ty, v) {
+        if let Some(s) = scalar_mismatch(ty, v, coerce) {
             out.push(issue(path, "document.wrong_type", s, ty));
         }
         return;
@@ -104,7 +104,7 @@ fn check_value(f: &Field, path: &str, v: &Value, out: &mut Vec<DocIssue>) {
     let bad = items
         .iter()
         .enumerate()
-        .find_map(|(i, item)| scalar_mismatch(element, item).map(|s| (i, s)));
+        .find_map(|(i, item)| scalar_mismatch(element, item, coerce).map(|s| (i, s)));
     if let Some((i, s)) = bad {
         out.push(issue(
             &format!("{path}[{i}]"),
@@ -115,8 +115,20 @@ fn check_value(f: &Field, path: &str, v: &Value, out: &mut Vec<DocIssue>) {
     }
 }
 
-/// Checks `doc` against `c`. Advisory: the server decides.
+/// Checks `doc` against `c` for a request without `dirty_values`, as the inspector and the
+/// bulk update send: the server refuses `"12"` for an `int32` then. Advisory: the server
+/// decides.
 pub fn validate_document(c: &Collection, doc: &Value) -> Vec<DocIssue> {
+    check_document(c, doc, false)
+}
+
+/// Like [`validate_document`], for an import with `dirty_values=coerce_or_*`, where the
+/// server stores `"12"` as 12.
+pub fn validate_coerced(c: &Collection, doc: &Value) -> Vec<DocIssue> {
+    check_document(c, doc, true)
+}
+
+fn check_document(c: &Collection, doc: &Value, coerce: bool) -> Vec<DocIssue> {
     let mut out = Vec::new();
     if !doc.is_object() {
         return out;
@@ -135,7 +147,7 @@ pub fn validate_document(c: &Collection, doc: &Value) -> Vec<DocIssue> {
         .filter(|f| f.name != "id" && !f.name.contains('*'))
     {
         match lookup(doc, &f.name) {
-            Some(v) if !v.is_null() => check_value(f, &f.name, v, &mut out),
+            Some(v) if !v.is_null() => check_value(f, &f.name, v, coerce, &mut out),
             _ => {
                 let parent_present = f
                     .name
@@ -281,7 +293,7 @@ mod tests {
     fn scalar_types() {
         let wrong = |ty: &str, v: Value| check(json!([{"name":"a","type":ty}]), json!({"a":v}));
         assert_eq!(wrong("int32", json!("x"))[0].2, Error);
-        assert_eq!(wrong("int32", json!("12"))[0].2, Warning);
+        assert_eq!(wrong("int32", json!("12"))[0].2, Error);
         assert_eq!(wrong("bool", json!("true"))[0].2, Error);
         assert_eq!(wrong("int32", json!(3_000_000_000_i64))[0].2, Error);
         assert_eq!(wrong("int32", json!(1.5))[0].2, Error);
@@ -290,6 +302,26 @@ mod tests {
         assert!(wrong("string*", json!(5)).is_empty());
         assert!(wrong("geopoint", json!([1.0, 2.0])).is_empty());
         assert_eq!(wrong("geopoint", json!([1.0]))[0].1, "document.wrong_type");
+    }
+
+    /// Without `dirty_values` the server refuses a numeric string (design M5 §4.4), so it must
+    /// not read as harmless; an import that coerces stores it.
+    #[test]
+    fn numeric_string_is_refused_unless_coerced() {
+        let schema = c(json!([{"name":"n","type":"int32"},{"name":"t","type":"float[]"}]));
+        let doc = json!({"n":"12","t":["1.5"]});
+        let severities =
+            |issues: Vec<DocIssue>| -> Vec<_> { issues.into_iter().map(|i| i.severity).collect() };
+        assert_eq!(severities(validate_document(&schema, &doc)), [Error, Error]);
+        assert_eq!(
+            severities(validate_coerced(&schema, &doc)),
+            [Warning, Warning]
+        );
+        let not_a_number = json!({"n":"x","t":[1.5]});
+        assert_eq!(
+            severities(validate_coerced(&schema, &not_a_number)),
+            [Error]
+        );
     }
 
     #[test]

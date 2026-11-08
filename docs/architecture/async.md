@@ -72,4 +72,20 @@ Every `Client` gets a `RequestHook` that runs on tokio threads after each reques
 - No blocking I/O on the main thread. Network calls go through `runtime::spawn`, blocking keychain and file calls through tokio's `spawn_blocking`.
 - CPU-heavy work (large JSON, schema inference) runs on GPUI's background executor or tokio's `spawn_blocking`, never in `render`.
 - UI tests do not perform real network I/O: GPUI's test executor runs on a simulated clock. Views reach the network through the `Connector` global, and tests install a fake that answers immediately.
-- Progress reporting for long jobs (import, export) arrives in M5 with `tokio::sync::watch` and UI updates throttled to 30 per second.
+
+## Jobs
+
+Imports and exports run as jobs, in `tessera_app::jobs`.
+
+```
+spawn_blocking: read_documents ──batch──▶ mpsc (bounded) ──▶ run_import on tokio ──POST──▶ server
+                                                                  │
+GPUI: throttle task ◀── watch ───────────────────────────────────┘
+      outcome task  ◀── background task awaiting the backend future
+```
+
+- **Reader.** `read_documents` blocks, so it runs in `spawn_blocking` and hands batches to the pipeline through a bounded channel, which is the backpressure: at most three batches are in memory. `preview` and `infer` run in `spawn_blocking` too. The seam is `transfer::TransferBackend`; tests install a fake.
+- **Progress.** The pipeline publishes to a `tokio::sync::watch`, which keeps only the newest value, so a slow UI skips states and never queues them. A throttle task per job copies the value into `Jobs` and sleeps `PROGRESS_INTERVAL` (34 ms), which is at most 30 updates a second. The loop ends when the job ends.
+- **Ownership.** `Jobs` is an entity in the global `JobsGlobal`, not a field of a view or of `ConnectionState`. It owns the two GPUI tasks of each job, so closing a dialog or a tab, or disconnecting, drops nothing. A connection that is gone only means no reload at the end.
+- **Redraws.** Only the jobs panel observes `Jobs`. The root subscribes to `RunningChanged`, which fires when the count changes, so progress never redraws the window.
+- **Quit** has no veto. A handler registered with the first job stops every job and waits for a `oneshot` per job, for at most GPUI's `SHUTDOWN_TIMEOUT` (200 ms), so an export can remove its part file. The foreground executor stands still meanwhile, so the backend future runs on the background executor and fires the `oneshot` from there. An import's batch in flight may still finish on the server. A hard kill leaves a `.part` file beside the target.

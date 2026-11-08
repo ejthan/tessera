@@ -10,6 +10,7 @@ mod review;
 mod sync;
 
 use std::cell::Cell;
+use std::rc::Rc;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
@@ -26,6 +27,7 @@ use gpui_kit::{
     prelude::*, px,
 };
 use rust_i18n::t;
+use serde_json::Value;
 use tessera_client::{Collection, SchemaChange};
 use tessera_core::schema::{
     DraftError, FieldDraft, FieldType, Issue, IssuePath, SchemaDraft, Severity, has_errors,
@@ -49,12 +51,17 @@ enum Tab {
     Json,
 }
 
+/// What Pick mode calls with the schema JSON.
+type OnPick = dyn Fn(Value, &mut Window, &mut App);
+
 /// What the dialog does with the draft.
 enum Mode {
     Create,
     /// Changes this collection, masked as the schema view shows it (design §5.4): secrets
     /// never show, and the diff against it never sends an unchanged `embed`.
     Edit(Box<Collection>),
+    /// Hands the validated JSON back and sends nothing.
+    Pick(Rc<OnPick>),
 }
 
 /// Where an edit stands; create and clone stay at `Draft`.
@@ -190,6 +197,31 @@ impl SchemaDialog {
         )
     }
 
+    /// Opens the dialog on `draft` for another dialog: Use schema validates as Create does,
+    /// closes this dialog and calls `on_pick` with the JSON. Nothing reaches the server, so
+    /// nothing needs unlocking.
+    pub fn open_pick(
+        state: Entity<AppState>,
+        connection: Entity<ConnectionState>,
+        draft: SchemaDraft,
+        on_pick: impl Fn(Value, &mut Window, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let title = t!("schema.title_create").to_string();
+        let mode = Mode::Pick(Rc::new(on_pick));
+        Self::open(
+            state,
+            connection,
+            title,
+            mode,
+            draft,
+            Vec::new(),
+            window,
+            cx,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn open(
         state: Entity<AppState>,
@@ -312,7 +344,7 @@ impl SchemaDialog {
     fn first_input(&self) -> Option<Entity<InputState>> {
         match (&self.mode, self.form.rows.first()) {
             (Mode::Edit(_), row) => row.map(|r| r.input(Text::Name).clone()),
-            (Mode::Create, _) => Some(self.form.opt(Opt::Name).clone()),
+            (Mode::Create | Mode::Pick(_), _) => Some(self.form.opt(Opt::Name).clone()),
         }
     }
 
@@ -406,6 +438,14 @@ impl SchemaDialog {
         }
         if self.editing() {
             return self.show_review(window, cx);
+        }
+        if let Mode::Pick(on_pick) = &self.mode {
+            let on_pick = on_pick.clone();
+            if let Ok(draft) = SchemaDraft::from_json(&self.json_text(cx)) {
+                window.close_dialog(cx);
+                on_pick(draft.to_json(), window, cx);
+            }
+            return;
         }
         let this = cx.entity().downgrade();
         self.connection.update(cx, |c, cx| {
@@ -597,10 +637,10 @@ impl SchemaDialog {
             Tab::Json => self.render_json(cx).into_any_element(),
         };
         let danger = cx.theme().danger;
-        let submit_label = if self.editing() {
-            t!("schema.review_changes")
-        } else {
-            t!("schema.create")
+        let submit_label = match self.mode {
+            Mode::Edit(_) => t!("schema.review_changes"),
+            Mode::Pick(_) => t!("schema.use"),
+            Mode::Create => t!("schema.create"),
         };
         v_flex()
             .gap_3()

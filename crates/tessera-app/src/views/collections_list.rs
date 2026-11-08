@@ -12,20 +12,22 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    Action, App, AppContext as _, Context, Entity, Focusable as _, IntoElement, Keystroke,
-    ParentElement as _, Render, SharedString, Stateful, Styled as _, Subscription, Task, Window,
-    div, prelude::*, px, transparent_black,
+    Action, App, AppContext as _, Context, Entity, ExternalPaths, Focusable as _, IntoElement,
+    Keystroke, ParentElement as _, Render, SharedString, Stateful, Styled as _, Subscription, Task,
+    Window, div, prelude::*, px, transparent_black,
 };
 use rust_i18n::t;
 use tessera_client::{Alias, Collection};
 use tessera_core::profile::Node;
+use tessera_core::transfer::source::Source;
 
+use super::jobs::import_dialog::DocumentImportDialog;
 use super::overview::grouped;
 use super::schema_dialog::SchemaDialog;
 use super::{collection_danger, env_badge};
 use crate::actions::{
     COLLECTIONS, COLLECTIONS_HEADER, CloneCollection, DeleteCollection, EditSchema, FocusSearch,
-    NewCollection, OpenCollectionRow, Refresh, ToggleFavorite, TruncateCollection,
+    ImportDocuments, NewCollection, OpenCollectionRow, Refresh, ToggleFavorite, TruncateCollection,
 };
 use crate::collections::{CollectionsBackendGlobal, aliases_of};
 use crate::connection::{ConnectionState, error_text};
@@ -727,6 +729,18 @@ impl CollectionsList {
             .update(cx, |c, cx| c.load_collection_list(cx));
     }
 
+    /// Opens the import dialog, on `source` if a file was dropped.
+    pub fn import(&self, source: Option<Source>, window: &mut Window, cx: &mut Context<Self>) {
+        DocumentImportDialog::open(
+            self.state.clone(),
+            self.connection.clone(),
+            None,
+            source,
+            window,
+            cx,
+        );
+    }
+
     fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locked = self.connection.read(cx).writes_locked();
         let delegate = self.table.read(cx).delegate();
@@ -778,6 +792,20 @@ impl CollectionsList {
                         window,
                     ))
                     .on_click(cx.listener(|this, _, window, cx| this.new_collection(window, cx))),
+            )
+            .child(
+                Button::new("collections.import")
+                    .ghost()
+                    .small()
+                    .label(t!("collections.import").to_string())
+                    .children(Kbd::binding_for_action(
+                        &ImportDocuments,
+                        Some(COLLECTIONS),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.import(None, window, cx);
+                    })),
             )
             .child(
                 Button::new("collections.reload")
@@ -879,6 +907,10 @@ impl Render for CollectionsList {
         };
         v_flex()
             .size_full()
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                let source = paths.paths().first().cloned().map(Source::File);
+                this.import(source, window, cx);
+            }))
             .child(self.toolbar(window, cx))
             .children(
                 self.favorite_error
