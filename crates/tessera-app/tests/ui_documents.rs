@@ -575,7 +575,9 @@ async fn a_jump_at_a_low_per_page_loads_every_page_it_shows(cx: &mut TestAppCont
     *f.docs.found.lock().unwrap() = 10_000;
     cx.update(|cx| {
         f.state.update(cx, |s, cx| {
-            s.settings.per_page = 10;
+            // The test window shows fewer rows on Linux and Windows; 5 per page keeps
+            // more pages on screen than `MAX_INFLIGHT` on all of them.
+            s.settings.per_page = 5;
             s.open_collection(id, "other".into(), cx);
         })
     });
@@ -586,7 +588,7 @@ async fn a_jump_at_a_low_per_page_loads_every_page_it_shows(cx: &mut TestAppCont
     cx.update(|cx| table.update(cx, |t, cx| t.scroll_to_row(5_008, cx)));
     f.settle(cx);
     let rows = cx.update(|cx| table.read(cx).visible_range().rows().clone());
-    let wanted = wanted_pages(rows, 10, 10_000);
+    let wanted = wanted_pages(rows, 5, 10_000);
     assert!(wanted.len() > 4, "more than `MAX_INFLIGHT`: {wanted:?}");
     let fetched = f.docs.page_numbers();
     assert!(wanted.iter().all(|p| fetched.contains(p)), "{fetched:?}");
