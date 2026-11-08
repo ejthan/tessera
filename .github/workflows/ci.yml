@@ -76,6 +76,14 @@ jobs:
           TYPESENSE_API_KEY: xyz
         ports:
           - 18208:8108
+      # live_backup restores into this one, and it must start empty.
+      typesense2:
+        image: typesense/typesense:${{ matrix.typesense }}
+        env:
+          TYPESENSE_DATA_DIR: /tmp
+          TYPESENSE_API_KEY: xyz
+        ports:
+          - 8109:8108
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2.9.3
@@ -100,6 +108,11 @@ jobs:
       - run: cargo test -p tessera-client --test live_operations --locked -- --ignored
         env:
           TESSERA_IT_URL: http://localhost:18208
+          TESSERA_IT_KEY: xyz
+      - run: cargo test -p tessera-core --test live_backup --locked -- --ignored
+        env:
+          TESSERA_IT_URL: http://localhost:8108
+          TESSERA_IT_URL2: http://localhost:8109
           TESSERA_IT_KEY: xyz
       - run: cargo test -p tessera-core --test live_scoped --test live_actions --locked -- --ignored
         env:

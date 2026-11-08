@@ -4,6 +4,7 @@
 
 pub mod ai;
 pub mod analytics;
+pub mod backup;
 pub mod cli;
 pub mod curl;
 pub mod documents;

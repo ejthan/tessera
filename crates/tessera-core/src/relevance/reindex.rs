@@ -58,7 +58,7 @@ pub struct Preflight {
     pub blank_secrets: usize,
 }
 
-fn draft_curation_sets(draft: &SchemaDraft) -> impl Iterator<Item = &str> {
+pub(crate) fn draft_curation_sets(draft: &SchemaDraft) -> impl Iterator<Item = &str> {
     draft
         .extra
         .get("curation_sets")

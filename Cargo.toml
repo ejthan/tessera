@@ -36,6 +36,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = { version = "=0.11.1", default-features = false }
 sys-locale = "=0.3.2"
+tar = { version = "=0.4.46", default-features = false }
 tempfile = "=3.27.0"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "time", "macros", "sync", "fs", "io-util"] }
@@ -46,6 +47,7 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 url = "=2.5.8"
 uuid = { version = "=1.29.0", features = ["v4", "serde"] }
 wiremock = "=0.6.5"
+zstd = { version = "=0.14.3", default-features = false }
 
 [workspace.lints.rust]
 missing_docs = "warn"

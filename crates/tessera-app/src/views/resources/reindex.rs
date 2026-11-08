@@ -1735,6 +1735,7 @@ impl ReindexView {
                     failed = grouped(p.failed),
                     unconfirmed = grouped(p.unconfirmed)
                 ),
+                Live::Backup(_) | Live::Restore(_) => return None,
             }
             .to_string(),
         )

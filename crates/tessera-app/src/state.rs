@@ -134,11 +134,13 @@ pub enum ResourceKind {
     Ai,
     /// Snapshot, vote, compact, cache, runtime config and running schema changes.
     Operations,
+    /// Backups of collections.
+    Backup,
 }
 
 impl ResourceKind {
     /// Every kind, in sidebar order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Aliases,
         Self::Synonyms,
         Self::Curations,
@@ -149,6 +151,7 @@ impl ResourceKind {
         Self::Stemming,
         Self::Ai,
         Self::Operations,
+        Self::Backup,
     ];
 
     /// The part of the ids of its row and tab.
@@ -164,6 +167,7 @@ impl ResourceKind {
             Self::Stemming => "stemming",
             Self::Ai => "ai",
             Self::Operations => "operations",
+            Self::Backup => "backup",
         }
     }
 

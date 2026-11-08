@@ -19,6 +19,7 @@ gpui_kit::actions!(
         ConnectSelected,
         DisconnectSelected,
         EditConnection,
+        EditTransport,
         DeleteConnection,
         ImportProfiles,
         ExportProfiles,
@@ -134,6 +135,7 @@ gpui_kit::actions!(
         OpenStemming,
         OpenAi,
         OpenOperations,
+        OpenBackup,
         RunSnapshot,
         RunCompact,
         RunClearCache,
@@ -492,6 +494,10 @@ const OPEN_RESOURCES: [&str; 10] = [
     "ctrl-alt-0",
 ];
 #[cfg(target_os = "macos")]
+const OPEN_BACKUP: &str = "alt-cmd-b";
+#[cfg(not(target_os = "macos"))]
+const OPEN_BACKUP: &str = "ctrl-alt-b";
+#[cfg(target_os = "macos")]
 const OPEN_TOP: &str = "cmd-alt-g";
 #[cfg(not(target_os = "macos"))]
 const OPEN_TOP: &str = "ctrl-alt-g";
@@ -596,6 +602,10 @@ const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
 const FRAME_OVERLAY: &str = "ctrl-alt-f";
 #[cfg(target_os = "macos")]
+const EDIT_TRANSPORT: &str = "cmd-alt-x";
+#[cfg(not(target_os = "macos"))]
+const EDIT_TRANSPORT: &str = "ctrl-alt-x";
+#[cfg(target_os = "macos")]
 const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
@@ -612,6 +622,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     Quit,
     DisconnectSelected,
     EditConnection,
+    EditTransport,
     DeleteConnection,
     ImportProfiles,
     ExportProfiles,
@@ -667,6 +678,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     OpenStemming,
     OpenAi,
     OpenOperations,
+    OpenBackup,
     RunSnapshot,
     RunCompact,
     RunClearCache,
@@ -873,6 +885,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(REFRESH, Refresh, Some(OVERVIEW)),
         KeyBinding::new(REFRESH, Refresh, Some(COLLECTIONS)),
         KeyBinding::new(REFRESH, Refresh, Some(COLLECTION)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(OVERVIEW)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(COLLECTIONS)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(COLLECTION)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(RESOURCES)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(REINDEX)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(CONSOLE)),
+        KeyBinding::new(EDIT_TRANSPORT, EditTransport, Some(WORKBENCH)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(OVERVIEW)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(COLLECTIONS)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(COLLECTION)),
@@ -950,6 +969,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_RESOURCES[7], OpenStemming, None),
         KeyBinding::new(OPEN_RESOURCES[8], OpenAi, None),
         KeyBinding::new(OPEN_RESOURCES[9], OpenOperations, None),
+        KeyBinding::new(OPEN_BACKUP, OpenBackup, None),
+        KeyBinding::new(OPEN_SAVED, PickImportFile, Some(RESOURCES)),
+        KeyBinding::new(STOP_WAITING, StopWaiting, Some(RESOURCES)),
         KeyBinding::new(SAVE, SaveResource, Some(STEMMING_DIALOG)),
         KeyBinding::new(SAVE, SaveResource, Some(STEMMING_INPUT)),
         KeyBinding::new(OPEN_SAVED, PickImportFile, Some(STEMMING_DIALOG)),

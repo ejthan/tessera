@@ -334,6 +334,8 @@ pub fn tokio_backend(handle: Handle) -> Arc<dyn RelevanceBackend> {
 
 /// What a reindex copy's temp directory is named after.
 const COPY_PREFIX: &str = "tessera-reindex-";
+/// What the temp directory of a backup is named after.
+const BACKUP_PREFIX: &str = tessera_core::backup::run::TEMP_PREFIX;
 
 /// How old a copy must be to go.
 ///
@@ -342,12 +344,12 @@ const COPY_PREFIX: &str = "tessera-reindex-";
 const STALE_COPY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Removes the copies a crash left in the temp directory; each holds every document of its
-/// collection. Blocks, so it does not run on the GPUI thread.
+/// collection, as a backup's does. Blocks, so it does not run on the GPUI thread.
 pub fn sweep_copies() {
     let root = std::env::temp_dir();
     let swept = mine(&root).and_then(|mine| remove_stale_copies(&root, SystemTime::now(), mine));
     if let Err(e) = swept {
-        tracing::warn!("the sweep of old reindex copies failed: {e}");
+        tracing::warn!("the sweep of old temp copies failed: {e}");
     }
 }
 
@@ -372,7 +374,12 @@ fn remove_stale_copies(
     mine: impl Fn(&Metadata) -> bool,
 ) -> std::io::Result<()> {
     for entry in std::fs::read_dir(root)?.flatten() {
-        if !entry.file_name().to_string_lossy().starts_with(COPY_PREFIX) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if ![COPY_PREFIX, BACKUP_PREFIX]
+            .iter()
+            .any(|p| name.starts_with(p))
+        {
             continue;
         }
         // Not followed: a link named like a copy is not a directory here.
@@ -527,6 +534,7 @@ mod tests {
             path
         };
         let (copy, other) = (make("tessera-reindex-old"), make("something-else"));
+        let backup = make("tessera-backup-old");
         let file = root.path().join("tessera-reindex-file");
         std::fs::write(&file, "kept").unwrap();
         #[cfg(unix)]
@@ -540,11 +548,14 @@ mod tests {
         let mine = || mine(root.path()).unwrap();
         remove_stale_copies(root.path(), SystemTime::now(), mine()).unwrap();
         assert!(copy.exists(), "younger than a day");
+        assert!(backup.exists(), "younger than a day");
         remove_stale_copies(root.path(), later, |_| false).unwrap();
         assert!(copy.exists(), "someone else's");
+        assert!(backup.exists(), "someone else's");
 
         remove_stale_copies(root.path(), later, mine()).unwrap();
         assert!(!copy.exists());
+        assert!(!backup.exists());
         assert!(other.join("documents.jsonl").exists());
         assert!(file.exists());
         #[cfg(unix)]

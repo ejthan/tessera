@@ -179,7 +179,7 @@ impl Fixture {
         let calls = self.admin.calls.lock().unwrap();
         calls
             .iter()
-            .filter(|c| !c.starts_with("schema_changes"))
+            .filter(|c| !c.starts_with("schema_changes") && *c != "roles")
             .cloned()
             .collect()
     }
@@ -364,6 +364,83 @@ async fn vote_needs_a_follower(cx: &mut TestAppContext) {
     f.click(cx, "confirm.ok");
     assert_eq!(f.sent(), ["vote 1"]);
     assert!(f.label(cx, "ops.vote.result").contains("ts2:8108"));
+}
+
+#[gpui_kit::test]
+async fn the_tab_reads_the_roles_itself_with_the_overview_closed(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, cluster()).await;
+    let tick = |f: &Fixture, cx: &mut TestAppContext| {
+        cx.executor().advance_clock(Duration::from_secs(3));
+        f.settle(cx);
+    };
+    // What the Overview tab last saw stands still; only the tab's own round moves.
+    f.set_role(cx, 0, RaftState::Leader);
+    assert!(f.has(cx, "ops.vote.block"));
+
+    *f.admin.roles.lock().unwrap() = vec![Some(RaftState::Follower), Some(RaftState::Leader)];
+    tick(&f, cx);
+    assert!(
+        !f.has(cx, "ops.vote.block"),
+        "the old leader may vote again"
+    );
+    let view = f.view(cx);
+    let labels = cx.update(|cx| view.read(cx).node_labels());
+    assert!(labels[0].contains("Follower"), "{labels:?}");
+    assert!(labels[1].contains("Leader"), "{labels:?}");
+
+    // A node that stops answering keeps what it last said.
+    *f.admin.roles.lock().unwrap() = vec![None, Some(RaftState::Leader)];
+    tick(&f, cx);
+    assert!(!f.has(cx, "ops.vote.block"));
+}
+
+#[gpui_kit::test]
+async fn two_nodes_on_one_host_are_told_apart(cx: &mut TestAppContext) {
+    let at = |path: &str| Node {
+        path: path.into(),
+        ..node_at("ts1")
+    };
+    let f = Fixture::with(cx, Profile::new("paths", vec![at("/a"), at("/b")])).await;
+    let view = f.view(cx);
+    let labels = cx.update(|cx| view.read(cx).node_labels());
+    assert!(labels[0].contains("ts1:8108/a"), "{labels:?}");
+    assert!(labels[1].contains("ts1:8108/b"), "{labels:?}");
+    f.pick_node(cx, 1);
+    f.click(cx, "ops.compact.run");
+    f.click(cx, "confirm.ok");
+    assert_eq!(f.sent(), ["compact 1"]);
+    assert!(f.label(cx, "ops.compact.result").contains("ts1:8108/b"));
+}
+
+#[gpui_kit::test]
+async fn a_lost_connection_shows_under_the_row(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, cluster()).await;
+    let view = f.view(cx);
+    cx.update(|cx| {
+        let connection = view.read(cx).connection().clone();
+        connection.update(cx, |c, cx| {
+            c.connected = None;
+            cx.notify();
+        });
+    });
+    f.click(cx, "ops.compact.run");
+    f.click(cx, "confirm.ok");
+    assert!(f.label(cx, "ops.compact.result").contains("Not connected"));
+    assert_eq!(f.sent(), Vec::<String>::new());
+}
+
+#[gpui_kit::test]
+async fn a_single_node_with_a_nearest_node_may_vote(cx: &mut TestAppContext) {
+    let mut profile = Profile::new("near", vec![node_at("ts1")]);
+    profile.nearest_node = Some(node_at("ts1"));
+    let f = Fixture::with(cx, profile).await;
+    assert!(f.has(cx, "ops.vote.block"), "the nearest node is that node");
+
+    let mut profile = Profile::new("near", vec![node_at("ts1")]);
+    profile.nearest_node = Some(node_at("near"));
+    let f = Fixture::with(cx, profile).await;
+    f.set_role(cx, 0, RaftState::Follower);
+    assert!(!f.has(cx, "ops.vote.block"));
 }
 
 #[gpui_kit::test]

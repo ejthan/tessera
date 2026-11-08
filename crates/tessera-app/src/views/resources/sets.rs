@@ -738,12 +738,15 @@ impl SetsView {
                         &EditResource,
                         none,
                     ))
-                    .child(button(
-                        "sets.items.delete",
-                        t!("sets.delete").to_string(),
-                        &DeleteSetItem,
-                        none,
-                    )),
+                    .child(
+                        button(
+                            "sets.items.delete",
+                            t!("sets.delete").to_string(),
+                            &DeleteSetItem,
+                            none,
+                        )
+                        .danger(),
+                    ),
             )
     }
 

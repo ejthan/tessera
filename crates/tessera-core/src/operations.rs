@@ -14,7 +14,7 @@ pub enum PathProblem {
     Empty,
     /// Does not start with `/`.
     NotAbsolute,
-    /// Only slashes.
+    /// Only slashes and `.` segments.
     Root,
     /// A segment is `..`.
     Climbs,
@@ -33,7 +33,7 @@ pub fn check_snapshot_path(path: &str) -> Result<(), PathProblem> {
     if !path.starts_with('/') {
         return Err(PathProblem::NotAbsolute);
     }
-    if path.bytes().all(|b| b == b'/') {
+    if path.split('/').all(|segment| matches!(segment, "" | ".")) {
         return Err(PathProblem::Root);
     }
     if path.split('/').any(|segment| segment == "..") {
@@ -186,6 +186,9 @@ mod tests {
             ("./x", Err(NotAbsolute)),
             ("/", Err(Root)),
             ("///", Err(Root)),
+            ("/.", Err(Root)),
+            ("/./", Err(Root)),
+            ("//.//./", Err(Root)),
             ("/a/../b", Err(Climbs)),
             ("/..", Err(Climbs)),
             ("/a\nb", Err(Control)),

@@ -142,6 +142,19 @@ pub fn check_import(
     }
 }
 
+/// The dictionaries the fields of `collection` name, each once.
+pub fn dictionaries_used(collection: &Collection) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for field in &collection.fields {
+        let name = field.attr("stem_dictionary").and_then(Value::as_str);
+        if let Some(name) = name.filter(|n| !n.is_empty() && !names.iter().any(|known| known == n))
+        {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
 /// The collections with a field that names dictionary `id`.
 pub fn collections_using(collections: &[Collection], id: &str) -> Vec<String> {
     collections
@@ -159,6 +172,22 @@ pub fn collections_using(collections: &[Collection], id: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn dictionaries_used_lists_each_once_and_no_blank() {
+        let collection: Collection = serde_json::from_value(json!({
+            "name": "c",
+            "fields": [
+                {"name": "a", "type": "string", "stem_dictionary": "d"},
+                {"name": "b", "type": "string", "stem_dictionary": "d"},
+                {"name": "c", "type": "string", "stem_dictionary": ""},
+                {"name": "e", "type": "string"},
+                {"name": "f", "type": "string", "stem_dictionary": "g"},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(dictionaries_used(&collection), ["d", "g"]);
+    }
 
     fn w(word: &str, root: &str) -> StemmingWord {
         StemmingWord {

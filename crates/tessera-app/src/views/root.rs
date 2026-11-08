@@ -24,9 +24,9 @@ use super::palette::{self, PaletteMode};
 use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
 use crate::actions::{
-    CopyAsCurl, NewConnection, OpenAi, OpenAliases, OpenAnalytics, OpenConsoleTab, OpenCurations,
-    OpenKeys, OpenOperations, OpenPalette, OpenPresetsTab, OpenSearchTab, OpenStemming,
-    OpenStopwords, OpenSynonyms, QuickSwitch, ToggleJobs, ToggleRequestLog,
+    CopyAsCurl, NewConnection, OpenAi, OpenAliases, OpenAnalytics, OpenBackup, OpenConsoleTab,
+    OpenCurations, OpenKeys, OpenOperations, OpenPalette, OpenPresetsTab, OpenSearchTab,
+    OpenStemming, OpenStopwords, OpenSynonyms, QuickSwitch, ToggleJobs, ToggleRequestLog,
 };
 use crate::connection::ConnectionState;
 use crate::jobs::{JobFinished, JobId, JobKind, Jobs, JobsGlobal, RunningChanged};
@@ -290,18 +290,25 @@ impl RootView {
         }
     }
 
-    /// Reloads what an import wrote, also after a stop or a failure: what arrived stays on the
+    /// Reloads what an import or a restore wrote, also after a stop or a failure: what arrived stays on the
     /// server. By profile, as the connection may be a new one by now.
     fn reload_after(&self, id: JobId, cx: &mut Context<Self>) {
         let jobs: &Jobs = cx.global::<JobsGlobal>().0.read(cx);
         let job = jobs.jobs().iter().find(|job| job.id == id);
-        let Some(job) = job.filter(|job| job.kind == JobKind::Import && job.outcome.is_some())
-        else {
+        let Some(job) = job.filter(|job| job.outcome.is_some()) else {
             return;
         };
-        let name = job.collection.clone();
-        if let Some(connection) = self.state.read(cx).connection(job.connection, cx) {
-            connection.update(cx, |c, cx| c.collection_changed(name, cx));
+        let (kind, name) = (job.kind, job.collection.clone());
+        let connection = self.state.read(cx).connection(job.connection, cx);
+        if let Some(connection) = connection {
+            connection.update(cx, |c, cx| match kind {
+                JobKind::Import => c.collection_changed(name, cx),
+                JobKind::Restore => {
+                    c.load_collection_list(cx);
+                    c.refresh_collections(cx);
+                }
+                JobKind::Export | JobKind::Backup => {}
+            });
         }
     }
 
@@ -785,6 +792,11 @@ impl Render for RootView {
             .when_some(shown(ResourceKind::Operations), |el, id| {
                 el.on_action(cx.listener(move |this, _: &OpenOperations, _, cx| {
                     open(this, id, ResourceKind::Operations, cx);
+                }))
+            })
+            .when_some(shown(ResourceKind::Backup), |el, id| {
+                el.on_action(cx.listener(move |this, _: &OpenBackup, _, cx| {
+                    open(this, id, ResourceKind::Backup, cx);
                 }))
             })
             .when_some(shown(ResourceKind::Ai), |el, id| {

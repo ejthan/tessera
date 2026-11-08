@@ -8,6 +8,7 @@ pub mod ai_test;
 pub mod aliases;
 pub mod analytics;
 pub mod attachment;
+pub mod backup;
 pub mod curation_dialog;
 pub mod curations;
 pub(crate) mod item_save;
@@ -17,6 +18,7 @@ pub mod name_dialog;
 pub mod operations;
 pub mod presets;
 pub mod reindex;
+pub mod restore;
 pub mod scoped_keys;
 pub mod set_file;
 pub mod sets;
@@ -48,6 +50,7 @@ use tessera_widgets::confirm_danger::{self, DangerOptions};
 use self::ai::AiView;
 use self::aliases::AliasesView;
 use self::analytics::AnalyticsView;
+use self::backup::BackupView;
 use self::keys::KeysView;
 use self::operations::OperationsView;
 use self::presets::PresetsView;
@@ -79,6 +82,8 @@ pub enum ResourceView {
     Ai(Entity<AiView>),
     /// See [`OperationsView`].
     Operations(Entity<OperationsView>),
+    /// See [`BackupView`].
+    Backup(Entity<BackupView>),
 }
 
 impl ResourceView {
@@ -119,6 +124,7 @@ impl ResourceView {
             ResourceKind::Operations => {
                 Self::Operations(cx.new(|cx| OperationsView::new(connection, window, cx)))
             }
+            ResourceKind::Backup => Self::Backup(cx.new(|cx| BackupView::new(connection, cx))),
         }
     }
 
@@ -134,6 +140,7 @@ impl ResourceView {
             Self::Stemming(view) => view.clone().into(),
             Self::Ai(view) => view.clone().into(),
             Self::Operations(view) => view.clone().into(),
+            Self::Backup(view) => view.clone().into(),
         }
     }
 
@@ -149,6 +156,7 @@ impl ResourceView {
             Self::Stemming(view) => view.focus_handle(cx),
             Self::Ai(view) => view.focus_handle(cx),
             Self::Operations(view) => view.focus_handle(cx),
+            Self::Backup(view) => view.focus_handle(cx),
         }
     }
 
@@ -164,6 +172,7 @@ impl ResourceView {
             Self::Stemming(view) => view.read(cx).gates(cx),
             Self::Ai(view) => view.read(cx).gates(cx),
             Self::Operations(view) => view.read(cx).gates(cx),
+            Self::Backup(view) => view.read(cx).gates(cx),
         }
     }
 }

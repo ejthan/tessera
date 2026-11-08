@@ -32,7 +32,9 @@ use tessera_app::relevance::{
 use tessera_app::runtime::Tokio;
 use tessera_app::search::{MultiAnswer, SearchAnswer, SearchBackend, SearchBackendGlobal};
 use tessera_app::state::AppState;
-use tessera_app::transfer::{FileStamp, TransferBackend, TransferBackendGlobal, file_stamp};
+use tessera_app::transfer::{
+    FileStamp, OpenedBackup, TransferBackend, TransferBackendGlobal, file_stamp,
+};
 use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::root::RootView;
 use tessera_client::{
@@ -40,6 +42,12 @@ use tessera_client::{
     DocumentQuery, Error, Health, ItemSet, KeyAccess, Metrics, ModelKind, NewKey, NodeClient,
     Origin, SchemaChange, SetKind, Stats, StopwordSet,
 };
+use tessera_core::backup::archive::{ArchiveError, Verified, verify};
+use tessera_core::backup::format::Manifest;
+use tessera_core::backup::restore::{
+    LoadError, Loaded, RestoreJob, RestoreOutcome, RestorePlan, RestoreProgress, RestoreView, plan,
+};
+use tessera_core::backup::run::{BackupOutcome, BackupPlan, BackupProgress};
 use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::relevance::synonym_file::SetFileError;
@@ -814,6 +822,14 @@ enum FakeJob {
         watch::Sender<ExportProgress>,
         oneshot::Sender<ExportOutcome>,
     ),
+    Backup(
+        watch::Sender<BackupProgress>,
+        oneshot::Sender<BackupOutcome>,
+    ),
+    Restore(
+        watch::Sender<RestoreProgress>,
+        oneshot::Sender<RestoreOutcome>,
+    ),
 }
 
 /// What a transfer fake answers and has been asked. Its jobs run until the test ends them.
@@ -836,11 +852,70 @@ pub struct FakeTransfer {
     pub imports: Mutex<Vec<ImportJob>>,
     /// `export` calls.
     pub exports: Mutex<Vec<ExportJob>>,
+    /// `backup` calls.
+    pub backups: Mutex<Vec<BackupPlan>>,
+    /// `restore` calls.
+    pub restores: Mutex<Vec<RestoreJob>>,
+    /// What `open_backup` answers; `None` holds it open.
+    pub open_answer: Mutex<Option<OpenedBackup>>,
+    /// `open_backup` calls.
+    pub opened_paths: Mutex<Vec<PathBuf>>,
+    /// What `load_backup` answers; `None` is an empty backup.
+    pub load_answer: Mutex<Option<Result<Loaded, LoadError>>>,
+    /// The server `plan_backup` compares with.
+    pub server: Mutex<RestoreView>,
+    /// `discard_temp` calls.
+    pub discarded: Mutex<Vec<PathBuf>>,
     /// `save_report` calls: the path and whether only failed lines.
     pub saves: Mutex<Vec<(PathBuf, bool)>>,
 }
 
 impl FakeTransfer {
+    /// The key of the job starting now, which already stands in its list.
+    fn next_id(&self) -> u64 {
+        let started = self.imports.lock().unwrap().len()
+            + self.exports.lock().unwrap().len()
+            + self.backups.lock().unwrap().len()
+            + self.restores.lock().unwrap().len();
+        started as u64 - 1
+    }
+
+    /// Publishes backup progress of job `id`.
+    pub fn backup_progress(&self, id: JobId, progress: BackupProgress) {
+        match self.jobs.lock().unwrap().get(&id.0) {
+            Some(FakeJob::Backup(tx, _)) => {
+                tx.send_replace(progress);
+            }
+            _ => panic!("no backup {id:?}"),
+        }
+    }
+
+    /// Publishes restore progress of job `id`.
+    pub fn restore_progress(&self, id: JobId, progress: RestoreProgress) {
+        match self.jobs.lock().unwrap().get(&id.0) {
+            Some(FakeJob::Restore(tx, _)) => {
+                tx.send_replace(progress);
+            }
+            _ => panic!("no restore {id:?}"),
+        }
+    }
+
+    /// Ends backup `id` with `outcome`.
+    pub fn finish_backup(&self, id: JobId, outcome: BackupOutcome) {
+        match self.jobs.lock().unwrap().remove(&id.0) {
+            Some(FakeJob::Backup(_, done)) => drop(done.send(outcome)),
+            _ => panic!("no backup {id:?}"),
+        }
+    }
+
+    /// Ends restore `id` with `outcome`.
+    pub fn finish_restore(&self, id: JobId, outcome: RestoreOutcome) {
+        match self.jobs.lock().unwrap().remove(&id.0) {
+            Some(FakeJob::Restore(_, done)) => drop(done.send(outcome)),
+            _ => panic!("no restore {id:?}"),
+        }
+    }
+
     /// Publishes import progress of job `id`.
     pub fn progress(&self, id: JobId, progress: ImportProgress) {
         match self.jobs.lock().unwrap().get(&id.0) {
@@ -933,12 +1008,8 @@ impl TransferBackend for FakeTransferBackend {
         progress: watch::Sender<ImportProgress>,
     ) -> tessera_app::collections::BoxFuture<ImportOutcome> {
         let (done, outcome) = oneshot::channel();
-        let id = {
-            let mut imports = self.0.imports.lock().unwrap();
-            imports.push(job);
-            let id = imports.len() + self.0.exports.lock().unwrap().len() - 1;
-            id as u64
-        };
+        self.0.imports.lock().unwrap().push(job);
+        let id = self.0.next_id();
         self.0
             .jobs
             .lock()
@@ -955,18 +1026,101 @@ impl TransferBackend for FakeTransferBackend {
         progress: watch::Sender<ExportProgress>,
     ) -> tessera_app::collections::BoxFuture<ExportOutcome> {
         let (done, outcome) = oneshot::channel();
-        let id = {
-            let mut exports = self.0.exports.lock().unwrap();
-            exports.push(job);
-            let id = exports.len() + self.0.imports.lock().unwrap().len() - 1;
-            id as u64
-        };
+        self.0.exports.lock().unwrap().push(job);
+        let id = self.0.next_id();
         self.0
             .jobs
             .lock()
             .unwrap()
             .insert(id, FakeJob::Export(progress, done));
         Box::pin(async move { outcome.await.unwrap() })
+    }
+
+    fn backup(
+        &self,
+        _: Client,
+        plan: BackupPlan,
+        _: JobControl,
+        progress: watch::Sender<BackupProgress>,
+    ) -> tessera_app::collections::BoxFuture<BackupOutcome> {
+        let (done, outcome) = oneshot::channel();
+        self.0.backups.lock().unwrap().push(plan);
+        let id = self.0.next_id();
+        let job = FakeJob::Backup(progress, done);
+        self.0.jobs.lock().unwrap().insert(id, job);
+        Box::pin(async move { outcome.await.unwrap() })
+    }
+
+    fn restore(
+        &self,
+        _: Client,
+        job: RestoreJob,
+        _: JobControl,
+        progress: watch::Sender<RestoreProgress>,
+    ) -> tessera_app::collections::BoxFuture<RestoreOutcome> {
+        let (done, outcome) = oneshot::channel();
+        self.0.restores.lock().unwrap().push(job);
+        let id = self.0.next_id();
+        let job = FakeJob::Restore(progress, done);
+        self.0.jobs.lock().unwrap().insert(id, job);
+        Box::pin(async move { outcome.await.unwrap() })
+    }
+
+    fn path_taken(&self, path: PathBuf) -> tessera_app::collections::BoxFuture<bool> {
+        let taken = std::fs::symlink_metadata(path).is_ok();
+        Box::pin(async move { taken })
+    }
+
+    fn open_backup(
+        &self,
+        path: PathBuf,
+        _: JobControl,
+    ) -> tessera_app::collections::BoxFuture<OpenedBackup> {
+        self.0.opened_paths.lock().unwrap().push(path);
+        let answer = self.0.open_answer.lock().unwrap().clone();
+        Box::pin(async move {
+            match answer {
+                Some(answer) => answer,
+                None => std::future::pending().await,
+            }
+        })
+    }
+
+    fn verify_backup(
+        &self,
+        folder: PathBuf,
+        manifest: Manifest,
+        control: JobControl,
+    ) -> tessera_app::collections::BoxFuture<Result<Verified, ArchiveError>> {
+        let answer = verify(&folder, &manifest, &control);
+        Box::pin(async move { answer })
+    }
+
+    fn load_backup(
+        &self,
+        _: Verified,
+    ) -> tessera_app::collections::BoxFuture<Result<Loaded, LoadError>> {
+        let answer = self.0.load_answer.lock().unwrap().clone();
+        Box::pin(async move { answer.unwrap_or_else(|| Ok(Loaded::default())) })
+    }
+
+    fn plan_backup(
+        &self,
+        _: Client,
+        backup: Verified,
+        loaded: Loaded,
+    ) -> tessera_app::collections::BoxFuture<Result<RestorePlan, Error>> {
+        let view = self.0.server.lock().unwrap().clone();
+        let answer = plan(backup.manifest(), &loaded, &view);
+        Box::pin(async move { Ok(answer) })
+    }
+
+    fn discard_temp(&self, temp: Arc<tempfile::TempDir>) {
+        self.0
+            .discarded
+            .lock()
+            .unwrap()
+            .push(temp.path().to_path_buf());
     }
 
     fn save_report(
@@ -1687,6 +1841,8 @@ pub struct FakeAdmin {
     pub vote_refused: Mutex<bool>,
     /// What `schema_changes` answers.
     pub schema_changes: Mutex<Vec<SchemaChange>>,
+    /// What `roles` answers.
+    pub roles: Mutex<Vec<Option<tessera_client::RaftState>>>,
     /// The keys on the server.
     pub keys: Mutex<Vec<ApiKey>>,
     /// `keys` fails with this status and Typesense message.
@@ -1947,6 +2103,15 @@ impl AdminBackend for FakeAdminBackend {
         value: Value,
     ) -> tessera_app::collections::BoxFuture<Result<bool, Error>> {
         self.operation(format!("set_config {node} {key} {value}"), true)
+    }
+
+    fn roles(
+        &self,
+        _: Client,
+    ) -> tessera_app::collections::BoxFuture<Vec<Option<tessera_client::RaftState>>> {
+        self.0.calls.lock().unwrap().push("roles".into());
+        let answer = self.0.roles.lock().unwrap().clone();
+        Box::pin(async move { answer })
     }
 
     fn schema_changes(

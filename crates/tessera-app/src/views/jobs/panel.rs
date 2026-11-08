@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The jobs tab of the bottom dock: every import and export of the session, the selected
+//! The jobs tab of the bottom dock: every import, export, backup and restore of the session, the selected
 //! job's numbers and what it could not store.
 
 use std::collections::HashMap;
@@ -23,6 +23,8 @@ use gpui_kit::{
     div, prelude::*, px,
 };
 use rust_i18n::t;
+use tessera_core::backup::restore::{RestoreStep, RowResult};
+use tessera_core::backup::run::BackupStep;
 use tessera_core::transfer::report::Report;
 use tessera_core::transfer::source::Source;
 use tessera_widgets::confirm;
@@ -30,6 +32,7 @@ use tessera_widgets::confirm;
 use super::super::env_badge;
 use super::super::overview::grouped;
 use super::super::request_detail::size;
+use super::super::resources::backup::warning_text;
 use super::import_dialog::DocumentImportDialog;
 use crate::actions::{
     CancelJob, DismissJob, ImportDocuments, ImportSavedLines, JOBS, SaveFailedLines, SaveReport,
@@ -95,9 +98,102 @@ fn eta_text(eta: Duration) -> String {
     }
 }
 
+fn backup_step(step: BackupStep) -> String {
+    match step {
+        BackupStep::Reading => t!("backup.step.reading"),
+        BackupStep::Collections => t!("backup.step.collections"),
+        BackupStep::Resources => t!("backup.step.resources"),
+        BackupStep::Hashing => t!("backup.step.hashing"),
+        BackupStep::Packing => t!("backup.step.packing"),
+    }
+    .to_string()
+}
+
+fn restore_step(step: RestoreStep) -> String {
+    match step {
+        RestoreStep::Checking => t!("restore.step.checking"),
+        RestoreStep::Resources => t!("restore.step.resources"),
+        RestoreStep::Collections => t!("restore.step.collections"),
+        RestoreStep::Aliases => t!("restore.step.aliases"),
+    }
+    .to_string()
+}
+
+/// The numbers of a finished backup or restore.
+fn done_text(outcome: &JobOutcome) -> Option<String> {
+    match outcome {
+        JobOutcome::Backup(o) => {
+            let docs = o.collections.iter().map(|c| c.documents).sum();
+            Some(
+                t!(
+                    "jobs.done_backup",
+                    collections = grouped(o.collections.len() as u64),
+                    docs = grouped(docs)
+                )
+                .to_string(),
+            )
+        }
+        JobOutcome::Restore(o) => {
+            let done = o.rows.iter().filter(|r| r.result == RowResult::Done);
+            Some(t!("jobs.done_restore", rows = grouped(done.count() as u64)).to_string())
+        }
+        _ => None,
+    }
+}
+
 /// What a job's row says about its numbers.
 fn live_text(job: &Job) -> String {
+    if let Some(text) = job.outcome.as_ref().and_then(done_text) {
+        return text;
+    }
     match &job.live {
+        Live::Backup(p) => {
+            let line = t!(
+                "jobs.step_live",
+                step = backup_step(p.step),
+                collection = p.collection,
+                done = grouped(p.done),
+                total = grouped(p.total)
+            );
+            if p.step != BackupStep::Collections {
+                return line.to_string();
+            }
+            let total = p
+                .export
+                .expected
+                .map_or_else(|| t!("figure.missing").to_string(), grouped);
+            let export = t!(
+                "jobs.export_live",
+                docs = grouped(p.export.docs),
+                total = total,
+                bytes = size(p.export.bytes)
+            );
+            format!("{line} · {export}")
+        }
+        Live::Restore(p) => {
+            let line = t!(
+                "jobs.step_live",
+                step = restore_step(p.step),
+                collection = p.collection,
+                done = grouped(p.done),
+                total = grouped(p.total)
+            );
+            if p.step != RestoreStep::Collections {
+                return line.to_string();
+            }
+            let eta = p
+                .import
+                .eta()
+                .map_or_else(|| t!("figure.missing").to_string(), eta_text);
+            let import = t!(
+                "jobs.import_live",
+                docs = grouped(p.import.imported + p.import.failed),
+                rate = grouped(p.import.rate().round() as u64),
+                eta = eta,
+                errors = grouped(p.import.failed)
+            );
+            format!("{line} · {import}")
+        }
         Live::Import(p) if job.is_running() => {
             let eta = p
                 .eta()
@@ -135,6 +231,8 @@ fn kind_text(kind: JobKind) -> String {
     match kind {
         JobKind::Import => t!("jobs.import_row").to_string(),
         JobKind::Export => t!("jobs.export_row").to_string(),
+        JobKind::Backup => t!("jobs.backup_row").to_string(),
+        JobKind::Restore => t!("jobs.restore_row").to_string(),
     }
 }
 
@@ -150,6 +248,10 @@ fn status_text(status: &JobStatus) -> String {
     .to_string()
 }
 
+fn step_fraction(done: u64, total: u64) -> Option<f32> {
+    (total > 0).then(|| (done as f32 / total as f32).clamp(0., 1.))
+}
+
 /// Share of a running job that is done, when its total is known.
 fn fraction(job: &Job) -> Option<f32> {
     if !job.is_running() {
@@ -161,6 +263,8 @@ fn fraction(job: &Job) -> Option<f32> {
             let total = p.expected.filter(|total| *total > 0)?;
             Some((p.docs as f32 / total as f32).clamp(0., 1.))
         }
+        Live::Backup(p) => step_fraction(p.done, p.total),
+        Live::Restore(p) => step_fraction(p.done, p.total),
     }
 }
 
@@ -734,7 +838,8 @@ impl JobsPanel {
         };
         let first_error = match &job.live {
             Live::Import(p) => p.first_error.as_deref().map(str::to_string),
-            Live::Export(_) => None,
+            Live::Restore(p) => p.import.first_error.as_deref().map(str::to_string),
+            Live::Export(_) | Live::Backup(_) => None,
         };
         let errors = failure.into_iter().chain(first_error).collect::<Vec<_>>();
         if !errors.is_empty() {
@@ -766,6 +871,12 @@ impl JobsPanel {
                 _ => {}
             }
         }
+        if let Some(JobOutcome::Backup(outcome)) = &job.outcome {
+            for (i, warning) in outcome.warnings.iter().enumerate() {
+                let id = format!("jobs.backup_warning.{i}").into();
+                notes.push(note(id, warning_text(warning), false));
+            }
+        }
         if let Some(JobOutcome::Export(outcome)) = &job.outcome {
             if outcome.unlisted_values > 0 {
                 let count = grouped(outcome.unlisted_values);
@@ -786,7 +897,14 @@ impl JobsPanel {
                 notes.push(note("jobs.export_mismatch".into(), text.to_string(), false));
             }
         }
-        if job.kind == JobKind::Import {
+        if let Some(JobOutcome::Restore(outcome)) = &job.outcome
+            && !outcome.to_delete.is_empty()
+        {
+            let names = outcome.to_delete.join(", ");
+            let text = t!("restore.to_delete", names = names).to_string();
+            notes.push(note("restore.job_to_delete".into(), text, false));
+        }
+        if matches!(job.kind, JobKind::Import | JobKind::Restore) {
             let text = t!("jobs.stay_note").to_string();
             notes.push(note("jobs.stay_note".into(), text, false));
         }
