@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-pub use collections::{Alias, Collection, Field, SchemaChange};
-pub use documents::{DocumentQuery, SearchPage};
+pub use collections::{Alias, Collection, Field, SchemaChange, collection_path};
+pub use documents::{DocumentQuery, SearchPage, document_path, encode_query};
 pub use error::Error;
 pub use event::{BODY_LIMIT, Body, Origin, RequestEvent, RequestHook};
 pub use models::{CollectionSummary, Debug, Health, KeyAccess, Metrics, RaftState, Stats};
@@ -388,7 +388,7 @@ impl Client {
 
     async fn collection_on(&self, pin: Option<usize>, name: &str) -> Result<Collection, Error> {
         let body = self
-            .get_ok(pin, &collections::collection_path(name, ""), None)
+            .get_ok(pin, &collections::collection_path(name, "")?, None)
             .await?;
         serde_json::from_str(&body).map_err(Error::Decode)
     }
@@ -416,7 +416,7 @@ impl Client {
         name: &str,
         patch: &Value,
     ) -> Result<(), Error> {
-        let path = collections::collection_path(name, "");
+        let path = collections::collection_path(name, "")?;
         let long = Some(LONG_TIMEOUT);
         self.write(pin, Method::PATCH, &path, None, Some(patch), long)
             .await
@@ -424,7 +424,7 @@ impl Client {
     }
 
     async fn delete_collection_on(&self, pin: Option<usize>, name: &str) -> Result<(), Error> {
-        let path = collections::collection_path(name, "");
+        let path = collections::collection_path(name, "")?;
         let long = Some(LONG_TIMEOUT);
         self.write(pin, Method::DELETE, &path, None, None, long)
             .await
@@ -436,7 +436,7 @@ impl Client {
         struct Deleted {
             num_deleted: u64,
         }
-        let path = collections::collection_path(name, "/documents");
+        let path = collections::collection_path(name, "/documents")?;
         let long = Some(LONG_TIMEOUT);
         let query = Some("truncate=true");
         let body = self

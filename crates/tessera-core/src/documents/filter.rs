@@ -182,6 +182,35 @@ pub fn quote_value(value: &str) -> Option<String> {
     }
 }
 
+/// Whether `filter`, the target of a bulk write, names every document instead of some. The
+/// server treats these spellings differently (design §4.4), so none of them may reach it: a
+/// blank filter counts everything and writes nothing, `*` has no count and updates everything,
+/// and a `*` among the values of `id` counts and writes everything.
+///
+/// Everything behind `id:` is searched for a lone `*`, because a quoted value can hold `]` or
+/// `&`, so the end of the list cannot be told without parsing it. A `*` in a later clause is
+/// refused too, which costs only that clause.
+pub fn names_everything(filter: &str) -> bool {
+    let bare: String = filter
+        .chars()
+        .filter(|c| !c.is_whitespace() && !"`()".contains(*c))
+        .collect();
+    let own_field =
+        |at: usize| !filter[..at].ends_with(|c: char| c.is_alphanumeric() || "_.".contains(c));
+    let lone_star = |values: &str| {
+        !values.trim_start().starts_with("!=")
+            && values
+                .split(|c: char| c.is_whitespace() || ",[]&|=`()".contains(c))
+                .any(|value| value == "*")
+    };
+    bare.is_empty()
+        || bare == "*"
+        || filter.match_indices("id").any(|(at, _)| {
+            let values = filter[at + "id".len()..].trim_start().strip_prefix(':');
+            own_field(at) && values.is_some_and(lone_star)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +307,53 @@ mod tests {
     #[test]
     fn a_backtick_cannot_be_quoted() {
         assert_eq!(quote_value("a`b"), None);
+    }
+
+    #[test]
+    fn names_everything_catches_each_spelling_the_server_takes_for_all() {
+        for filter in [
+            "",
+            "  ",
+            "\t",
+            "*",
+            " * ",
+            "()",
+            "id:*",
+            "id: *",
+            "id:=*",
+            "id:= *",
+            "id:`*`",
+            "id:= `*`",
+            "id:[*]",
+            "id:[ * ]",
+            "id:[`*`]",
+            "id:=[*]",
+            "id:[a,*]",
+            "(id:*)",
+            "n:>1 || id:*",
+            "id:* || n:>1",
+        ] {
+            assert!(names_everything(filter), "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn names_everything_leaves_real_filters_alone() {
+        for filter in [
+            "n:>1",
+            "id:a",
+            "id:[a,b]",
+            "id:*a",
+            "id:a*",
+            "id:!=*",
+            "id:!=[*]",
+            "valid:*",
+            "a.id:*",
+            "uuid:=*",
+            "title:=`*`",
+            "n:>=0",
+        ] {
+            assert!(!names_everything(filter), "{filter:?}");
+        }
     }
 }

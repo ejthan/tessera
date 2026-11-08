@@ -2,15 +2,18 @@
 
 //! The documents view of a collection tab.
 
+pub mod bulk;
 pub mod columns;
 pub mod copy;
 pub mod inspector;
 pub mod review;
+pub mod selection;
 pub mod table;
 
 use std::rc::Rc;
 use std::time::Duration;
 
+use gpui_kit::base::actions::Cancel;
 use gpui_kit::base::{POPUP_PRIORITY, TestSupportExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -18,7 +21,8 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu};
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{
-    ActiveTheme as _, Selectable as _, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, h_resizable,
+    resizable_panel, v_flex,
 };
 use gpui_kit::{
     App, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _, IntoElement,
@@ -26,20 +30,24 @@ use gpui_kit::{
     Window, anchored, deferred, div, prelude::*, px,
 };
 use rust_i18n::t;
-use tessera_client::Collection;
+use tessera_client::{Collection, Error};
+use tessera_core::documents::MAX_SELECTION;
 use tessera_core::documents::columns::{columns_from_schema, exclude_fields, merge_keys};
 use tessera_core::documents::template::template;
 use tessera_widgets::{FacetFetch, FilterField, FilterInput, FilterInputEvent, confirm};
 use uuid::Uuid;
 
+use self::bulk::BulkMode;
 use self::inspector::{DocumentSaved, GoToResult, Inspector};
 use self::table::DocRows;
+use super::env_badge;
 use super::overview::grouped;
 use super::schema_view::COPIED_FOR;
 use crate::actions::{
-    ClearFilter, CopyCell, CopyRowJson, DOCUMENTS, FocusSearch, GoToId, NarrowerColumn,
-    NewDocument, OpenDocument, SortByColumn, ToggleColumns, ToggleInspector, TogglePinColumn,
-    WiderColumn,
+    ClearFilter, CopyCell, CopyCsv, CopyCurl, CopyJsonl, CopyRowJson, DOCUMENTS, DeleteByQuery,
+    DeleteDocuments, ExtendRows, FocusSearch, GoToId, NarrowerColumn, NewDocument, OpenDocument,
+    SelectLoaded, SortByColumn, ToggleColumns, ToggleInspector, TogglePinColumn, ToggleRow,
+    UpdateByQuery, WiderColumn,
 };
 use crate::connection::{CollectionChanged, ConnectionState};
 use crate::documents::DocumentsBackendGlobal;
@@ -72,6 +80,22 @@ fn filter_fields(collection: &Collection) -> Vec<FilterField> {
             facet: f.flag("facet"),
         });
     std::iter::once(id).chain(fields).collect()
+}
+
+/// Facet values of `collection` for a filter input, through the user's client.
+fn facet_fetch(connection: Entity<ConnectionState>, collection: String) -> FacetFetch {
+    Rc::new(move |field, prefix, cx: &mut App| {
+        let Some(connected) = &connection.read(cx).connected else {
+            return Task::ready(Vec::new());
+        };
+        let values = cx.global::<DocumentsBackendGlobal>().0.facet_values(
+            connected.client.clone(),
+            collection.clone(),
+            field,
+            prefix,
+        );
+        cx.spawn(async move |_| values.await.unwrap_or_default())
+    })
 }
 
 /// How long a resize waits for the next one before it is saved, so a drag writes once.
@@ -107,6 +131,8 @@ pub struct DocumentsView {
     copied_reset: Option<Task<()>>,
     copy_task: Option<Task<()>>,
     copy_error: Option<SharedString>,
+    /// A delete, or an update by query, is running.
+    deleting: bool,
     /// The open copy menu of a cell, where it was asked for, and its dismissal.
     context_menu: Option<(Entity<PopupMenu>, Point<Pixels>, Subscription)>,
     connection: Entity<ConnectionState>,
@@ -134,19 +160,7 @@ impl DocumentsView {
                 .col_selectable(false)
                 .col_movable(false)
         });
-        let (facets, collection) = (connection.clone(), name.clone());
-        let fetch: FacetFetch = Rc::new(move |field, prefix, cx: &mut App| {
-            let Some(connected) = &facets.read(cx).connected else {
-                return Task::ready(Vec::new());
-            };
-            let values = cx.global::<DocumentsBackendGlobal>().0.facet_values(
-                connected.client.clone(),
-                collection.clone(),
-                field,
-                prefix,
-            );
-            cx.spawn(async move |_| values.await.unwrap_or_default())
-        });
+        let fetch = facet_fetch(connection.clone(), name.clone());
         let filter = cx.new(|cx| FilterInput::new(Vec::new(), fetch, window, cx));
         let inspector = cx.new(|cx| Inspector::new(connection.clone(), name.clone(), window, cx));
         let goto = cx.new(|cx| {
@@ -178,7 +192,7 @@ impl DocumentsView {
                         TableEvent::RightClickedRow(Some(row)) => {
                             let table = this.table.clone();
                             table.update(cx, |t, cx| {
-                                let col = t.selected_cell().map_or(0, |(_, col)| col);
+                                let col = t.selected_cell().map_or(1, |(_, col)| col);
                                 t.set_selected_cell(*row, col, cx);
                             });
                         }
@@ -214,9 +228,10 @@ impl DocumentsView {
                     },
                 ),
                 cx.subscribe(&inspector, |this, _, _: &DocumentSaved, cx| this.reload(cx)),
+                // Not `reload`: a delete reports its failure and then announces the change.
                 cx.subscribe(&connection, |this, _, CollectionChanged(name), cx| {
                     if *name == this.name {
-                        this.reload(cx);
+                        this.reload_rows(cx);
                     }
                 }),
             ],
@@ -238,6 +253,7 @@ impl DocumentsView {
             copied_reset: None,
             copy_task: None,
             copy_error: None,
+            deleting: false,
             context_menu: None,
             connection,
             focus_handle: cx.focus_handle(),
@@ -376,7 +392,7 @@ impl DocumentsView {
     fn widths_changed(&mut self, widths: &[Pixels], cx: &mut Context<Self>) {
         self.table.update(cx, |t, _| {
             let rows = t.delegate_mut();
-            for (column, width) in rows.columns.iter().zip(widths) {
+            for (column, width) in rows.columns.iter().zip(widths.iter().skip(1)) {
                 rows.prefs
                     .widths
                     .insert(column.key.clone(), f32::from(*width));
@@ -389,7 +405,7 @@ impl DocumentsView {
     fn selected_column(&self, cx: &App) -> Option<(String, f32)> {
         let t = self.table.read(cx);
         let (_, col) = t.selected_cell()?;
-        let key = t.delegate().columns.get(col)?.key.clone();
+        let key = t.delegate().column_at(col)?.key.clone();
         Some((key, f32::from(t.col_width(col)?)))
     }
 
@@ -448,12 +464,174 @@ impl DocumentsView {
     /// Drops the pages and loads them again; the rows and the scroll position stay until
     /// the answer.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.set_delete_error(None, cx);
+        self.reload_rows(cx);
+    }
+
+    fn reload_rows(&mut self, cx: &mut Context<Self>) {
         if self.has_schema {
             self.table.update(cx, |t, cx| {
-                t.delegate_mut().requery(cx);
+                t.delegate_mut().reload(cx);
                 cx.notify();
             });
         }
+    }
+
+    /// The ticked rows, else the selected cell's row.
+    fn delete_targets(&self, cx: &App) -> Vec<String> {
+        let ids = self.table.read(cx).delegate().selection.ids();
+        if ids.is_empty() {
+            self.selected_id(cx).into_iter().collect()
+        } else {
+            ids
+        }
+    }
+
+    fn set_delete_error(&mut self, error: Option<SharedString>, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            let rows = t.delegate_mut();
+            rows.delete_error = error;
+            rows.bulk_result = None;
+            cx.notify();
+        });
+    }
+
+    /// Opens the delete or update by query dialog on the table's filter. Not while a new query
+    /// runs or a write is going.
+    fn open_bulk(&mut self, mode: BulkMode, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.table.read(cx).delegate();
+        if !self.has_schema || self.deleting || rows.query_pending() {
+            return;
+        }
+        let filter = rows.filter.clone().unwrap_or_default();
+        let view = cx.entity().downgrade();
+        // It reads this view, which is being updated now.
+        window.defer(cx, move |window, cx| {
+            bulk::open(view, mode, filter, window, cx)
+        });
+    }
+
+    /// Takes in the end of a bulk call: `cleared` when it ran, `result` to report.
+    /// `draft_accepted`: the confirmation said an unsaved draft may go.
+    fn bulk_finished(
+        &mut self,
+        cleared: bool,
+        result: Option<SharedString>,
+        draft_accepted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.deleting = false;
+        // The rows reload on `CollectionChanged`, which the dialog announces after this.
+        self.set_delete_error(None, cx);
+        self.table.update(cx, |t, cx| {
+            let rows = t.delegate_mut();
+            rows.bulk_result = result;
+            if cleared {
+                rows.clear_selection();
+            }
+            cx.notify();
+        });
+        self.refresh_inspector(draft_accepted, window, cx);
+    }
+
+    /// The inspector's document may have changed or gone: closes on a gone one, and a draft
+    /// goes with it only if `draft_accepted`. A kept draft stays as it is; its review compares
+    /// with the server anyway.
+    fn refresh_inspector(
+        &mut self,
+        draft_accepted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inspector = self.inspector.read(cx);
+        let id = inspector.current_id().map(str::to_string);
+        let client = self.connection.read(cx).connected.as_ref();
+        let (Some(id), Some(client), true) = (id, client, self.inspector_open) else {
+            return;
+        };
+        let backend = cx.global::<DocumentsBackendGlobal>().0.clone();
+        let fetch = backend.document(client.client.clone(), self.name.clone(), id.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = fetch.await;
+            this.update_in(cx, |this, window, cx| {
+                let inspector = this.inspector.clone();
+                let dirty = inspector.read(cx).is_dirty(cx);
+                match answer {
+                    Err(Error::Http { status: 404, .. }) if !dirty || draft_accepted => {
+                        inspector.update(cx, |i, cx| i.revert(window, cx));
+                        this.close_inspector(window, cx);
+                    }
+                    Ok(document) if !dirty && !inspector.read(cx).is_busy() => {
+                        inspector.update(cx, |i, cx| i.show_found(id, document, window, cx));
+                    }
+                    _ => {}
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Takes in the end of a delete of `ids`: a failure stays with what is ticked and with the
+    /// draft. `draft_accepted`: the confirmation said a draft of a row in `ids` goes too.
+    fn delete_finished(
+        &mut self,
+        ids: &[String],
+        error: Option<SharedString>,
+        draft_accepted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.deleting = false;
+        let failed = error.is_some();
+        self.set_delete_error(error, cx);
+        cx.notify();
+        if failed {
+            return;
+        }
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().clear_selection();
+            cx.notify();
+        });
+        let shown = self.inspector.read(cx).current_id();
+        if shown.is_some_and(|id| ids.iter().any(|i| i == id)) {
+            if draft_accepted {
+                self.inspector.update(cx, |i, cx| i.revert(window, cx));
+            }
+            self.after_discard(window, cx, |this, window, cx| {
+                this.close_inspector(window, cx)
+            });
+        }
+    }
+
+    /// Ticks the selected cell's row, or with `extend` ticks up to it.
+    fn check_selected(&mut self, extend: bool, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            if let Some((row, _)) = t.selected_cell() {
+                t.delegate_mut().check(row, extend);
+                cx.notify();
+            }
+        });
+    }
+
+    fn check_loaded(&mut self, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().check_loaded();
+            cx.notify();
+        });
+    }
+
+    /// Esc on the table, once the kit has cleared the cell, unticks. Elsewhere it is not ours.
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let table = self.table.read(cx);
+        if table.delegate().selection.is_empty() || !table.focus_handle(cx).is_focused(window) {
+            return cx.propagate();
+        }
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().clear_selection();
+            cx.notify();
+        });
     }
 
     /// Documents matching the query.
@@ -552,6 +730,10 @@ impl DocumentsView {
     /// ⌘W / Ctrl+W: closes the tab, after asking when the inspector holds unsaved changes.
     /// A clean tab goes on to the kit's own handler.
     pub fn close_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Its result has nowhere else to show.
+        if self.deleting {
+            return;
+        }
         if !self.inspector.read(cx).is_dirty(cx) {
             return cx.propagate();
         }
@@ -564,7 +746,7 @@ impl DocumentsView {
 
     /// Whether the tab must not close without asking.
     pub fn shows_unsaved(&self, cx: &App) -> bool {
-        self.inspector.read(cx).shows_unsaved()
+        self.deleting || self.inspector.read(cx).shows_unsaved()
     }
 
     /// Runs `then` now, or once the user agreed to drop the inspector's unsaved changes.
@@ -630,7 +812,7 @@ impl DocumentsView {
         }
         let target = self.table.read(cx).focus_handle(cx);
         let menu = PopupMenu::build(window, cx, move |menu, _, _| {
-            copy::entries(menu.action_context(target))
+            copy::entries(menu.action_context(target), true)
         });
         menu.focus_handle(cx).focus(window, cx);
         let closed = cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
@@ -683,8 +865,7 @@ impl DocumentsView {
             };
             let rows = t.delegate_mut();
             let Some(key) = rows
-                .columns
-                .get(col)
+                .column_at(col)
                 .filter(|c| c.sortable)
                 .map(|c| c.key.clone())
             else {
@@ -747,6 +928,30 @@ impl DocumentsView {
             )
     }
 
+    fn bulk_button(
+        &self,
+        mode: BulkMode,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let idle = !self.deleting && !self.table.read(cx).delegate().query_pending();
+        let (id, label) = match mode {
+            BulkMode::Delete => ("documents.delete_query", t!("documents.delete_query")),
+            BulkMode::Update => ("documents.update_query", t!("documents.update_query")),
+        };
+        let shortcut = match mode {
+            BulkMode::Delete => Kbd::binding_for_action(&DeleteByQuery, Some(DOCUMENTS), window),
+            BulkMode::Update => Kbd::binding_for_action(&UpdateByQuery, Some(DOCUMENTS), window),
+        };
+        Button::new(id)
+            .ghost()
+            .small()
+            .disabled(!idle)
+            .label(label.to_string())
+            .children(shortcut)
+            .on_click(cx.listener(move |this, _, window, cx| this.open_bulk(mode, window, cx)))
+    }
+
     /// The Copy dropdown and the inspector's toggle.
     fn actions(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let label = if self.copied {
@@ -756,8 +961,16 @@ impl DocumentsView {
         };
         // Its shortcuts and actions are the table's, whatever holds the focus.
         let target = self.table.read(cx).focus_handle(cx);
+        let can_delete = !self.deleting
+            && !self.table.read(cx).delegate().query_pending()
+            && (!self.table.read(cx).delegate().selection.is_empty()
+                || self.selected_id(cx).is_some());
+        let has_rows = copy::has_rows(self, cx);
+        let locked = self.connection.read(cx).writes_locked();
         h_flex()
             .gap_2()
+            .flex_wrap()
+            .justify_end()
             .items_center()
             .child(
                 Button::new("documents.copy")
@@ -766,7 +979,7 @@ impl DocumentsView {
                     .dropdown_caret(true)
                     .label(label.to_string())
                     .dropdown_menu(move |menu, _, _| {
-                        copy::entries(menu.action_context(target.clone()))
+                        copy::entries(menu.action_context(target.clone()), has_rows)
                     }),
             )
             .child(
@@ -781,6 +994,32 @@ impl DocumentsView {
                     ))
                     .on_click(cx.listener(|this, _, window, cx| this.new_document(window, cx))),
             )
+            .child(
+                Button::new("documents.delete")
+                    .ghost()
+                    .small()
+                    .disabled(!can_delete)
+                    .label(t!("documents.delete.action").to_string())
+                    .children(Kbd::binding_for_action(
+                        &DeleteDocuments,
+                        Some(DOCUMENTS),
+                        window,
+                    ))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| selection::delete(this, window, cx)),
+                    ),
+            )
+            .when(locked, |el| {
+                el.child(env_badge::lock("documents.delete", false, cx))
+            })
+            .child(self.bulk_button(BulkMode::Delete, window, cx))
+            .when(locked, |el| {
+                el.child(env_badge::lock("documents.delete_query", false, cx))
+            })
+            .child(self.bulk_button(BulkMode::Update, window, cx))
+            .when(locked, |el| {
+                el.child(env_badge::lock("documents.update_query", false, cx))
+            })
             .child(
                 Button::new("documents.toggle_inspector")
                     .ghost()
@@ -815,6 +1054,17 @@ impl DocumentsView {
             parts.push(t!("documents.status_sort", field = key, arrow = arrow).to_string());
         }
         let text = SharedString::from(parts.join(" · "));
+        let ticked = rows.selection.len();
+        let selected = (ticked > 0).then(|| {
+            let text = SharedString::from(
+                t!("documents.selected", count = grouped(ticked as u64)).to_string(),
+            );
+            div()
+                .id("documents.selected")
+                .test_support()
+                .aria_label(text.clone())
+                .child(text)
+        });
         Some(
             h_flex()
                 .gap_2()
@@ -832,16 +1082,33 @@ impl DocumentsView {
                     &SortByColumn,
                     Some(DOCUMENTS),
                     window,
-                )),
+                ))
+                .children(selected),
         )
     }
+}
+
+/// What the last tick could not do.
+fn selection_note(rows: &DocRows) -> Option<(&'static str, SharedString)> {
+    if rows.selection_limit {
+        let text = t!("documents.selection_limit", max = MAX_SELECTION);
+        return Some(("documents.selection_limit", text.to_string().into()));
+    }
+    rows.selection_unloaded.then(|| {
+        let text = t!("documents.selection_unloaded");
+        ("documents.selection_unloaded", text.to_string().into())
+    })
 }
 
 impl Render for DocumentsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = self.table.read(cx).delegate();
         let query_error = rows.query_error.clone();
-        let error = rows.error.clone().or_else(|| self.copy_error.clone());
+        let error = rows.error.clone();
+        let copy_error = self.copy_error.clone();
+        let delete_error = rows.delete_error.clone();
+        let bulk_result = rows.bulk_result.clone();
+        let selection_note = selection_note(rows);
         let picker = self.has_schema.then(|| {
             columns::picker(
                 cx.entity(),
@@ -897,6 +1164,26 @@ impl Render for DocumentsView {
             .on_action(
                 cx.listener(|this, _: &CopyRowJson, window, cx| copy::copy_row(this, window, cx)),
             )
+            .on_action(cx.listener(|this, _: &CopyJsonl, window, cx| {
+                copy::copy_selection(this, copy::CopyFormat::Jsonl, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyCsv, window, cx| {
+                copy::copy_selection(this, copy::CopyFormat::Csv, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyCurl, _, cx| copy::copy_curl(this, cx)))
+            .on_action(cx.listener(|this, _: &ToggleRow, _, cx| this.check_selected(false, cx)))
+            .on_action(cx.listener(|this, _: &ExtendRows, _, cx| this.check_selected(true, cx)))
+            .on_action(cx.listener(|this, _: &SelectLoaded, _, cx| this.check_loaded(cx)))
+            .on_action(cx.listener(|this, _: &Cancel, window, cx| this.cancel(window, cx)))
+            .on_action(cx.listener(|this, _: &DeleteDocuments, window, cx| {
+                selection::delete(this, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DeleteByQuery, window, cx| {
+                this.open_bulk(BulkMode::Delete, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &UpdateByQuery, window, cx| {
+                this.open_bulk(BulkMode::Update, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &SortByColumn, _, cx| this.sort_selected(cx)))
             .on_action(cx.listener(|this, _: &ToggleColumns, _, cx| {
                 this.set_columns_open(!this.columns_open, cx)
@@ -935,8 +1222,32 @@ impl Render for DocumentsView {
                     .justify_between()
                     .items_center()
                     .child(div().children(self.status(window, cx)))
-                    .child(h_flex().gap_2().children(actions).children(picker)),
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .justify_end()
+                            .children(actions)
+                            .children(picker),
+                    ),
             )
+            .children(bulk_result.map(|text| {
+                div()
+                    .id("bulk.result")
+                    .test_support()
+                    .aria_label(text.clone())
+                    .text_sm()
+                    .child(text)
+            }))
+            .children(selection_note.map(|(id, text)| {
+                div()
+                    .id(id)
+                    .test_support()
+                    .aria_label(text.clone())
+                    .text_sm()
+                    .text_color(cx.theme().warning)
+                    .child(text)
+            }))
             .children(save_error.map(|e| {
                 div()
                     .id("documents.columns_error")
@@ -949,6 +1260,24 @@ impl Render for DocumentsView {
             .children(error.map(|e| {
                 div()
                     .id("documents.error")
+                    .test_support()
+                    .aria_label(e.clone())
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(e)
+            }))
+            .children(copy_error.map(|e| {
+                div()
+                    .id("documents.copy.error")
+                    .test_support()
+                    .aria_label(e.clone())
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(e)
+            }))
+            .children(delete_error.map(|e| {
+                div()
+                    .id("documents.delete.error")
                     .test_support()
                     .aria_label(e.clone())
                     .text_sm()

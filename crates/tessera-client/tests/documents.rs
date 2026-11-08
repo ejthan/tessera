@@ -38,6 +38,7 @@ async fn search_builds_the_query_and_decodes_hits() {
         .and(query_param("filter_by", "year:>2000 && a:=b"))
         .and(query_param("sort_by", "price:desc"))
         .and(query_param("exclude_fields", "embedding"))
+        .and(query_param("enable_curations", "false"))
         .respond_with(ResponseTemplate::new(200).set_body_string(SEARCH))
         .expect(1)
         .mount(&server)
@@ -70,6 +71,7 @@ async fn count_uses_per_page_zero() {
         .and(path("/collections/c/documents/search"))
         .and(query_param("per_page", "0"))
         .and(query_param("filter_by", "a:=1"))
+        .and(query_param("enable_curations", "false"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_string(r#"{"found":9,"out_of":9,"page":1,"search_time_ms":0,"hits":[]}"#),
@@ -292,4 +294,134 @@ async fn read_only_client_refuses_document_writes() {
         Err(Error::ReadOnly { .. })
     ));
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn delete_by_filter_sends_the_filter_and_reads_the_count() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/collections/c/documents"))
+        .and(query_param("filter_by", "a:=1 && b:=2"))
+        .and(query_param("batch_size", "1000"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(300))
+                .set_body_string(r#"{"num_deleted":42}"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    // The delay exceeds the profile timeout: the long timeout applies.
+    let client = client(&server.uri()).with_timeout(Duration::from_millis(100));
+    assert_eq!(
+        client.delete_by_filter("c", "a:=1 && b:=2").await.unwrap(),
+        42
+    );
+}
+
+#[tokio::test]
+async fn update_by_filter_sends_the_partial_and_reads_the_count() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/collections/c/documents"))
+        .and(query_param("filter_by", "a:=1"))
+        .and(wiremock::matchers::body_json(serde_json::json!({"x":2})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(300))
+                .set_body_string(r#"{"num_updated":7}"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client(&server.uri()).with_timeout(Duration::from_millis(100));
+    let n = client
+        .update_by_filter("c", "a:=1", &serde_json::json!({"x":2}))
+        .await
+        .unwrap();
+    assert_eq!(n, 7);
+}
+
+#[tokio::test]
+async fn read_only_client_refuses_bulk_writes() {
+    let server = MockServer::start().await;
+    let locked = Client::new(
+        &[&server.uri()],
+        SecretString::from("k"),
+        ClientOptions {
+            read_only: true,
+            ..ClientOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        locked.delete_by_filter("c", "a:=1").await,
+        Err(Error::ReadOnly { .. })
+    ));
+    assert!(matches!(
+        locked
+            .update_by_filter("c", "a:=1", &serde_json::json!({}))
+            .await,
+        Err(Error::ReadOnly { .. })
+    ));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_or_non_numeric_count_is_a_decode_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"num_updated":3}"#))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"num_updated":"x"}"#))
+        .mount(&server)
+        .await;
+    let c = client(&server.uri());
+    assert!(matches!(
+        c.delete_by_filter("c", "a:=1").await,
+        Err(Error::Decode(_))
+    ));
+    assert!(matches!(
+        c.update_by_filter("c", "a:=1", &serde_json::json!({}))
+            .await,
+        Err(Error::Decode(_))
+    ));
+}
+
+#[tokio::test]
+async fn dot_collections_never_reach_the_server() {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = Client::new(&[&server.uri()], "k".to_string().into(), Default::default()).unwrap();
+    for name in ["", ".", ".."] {
+        let refused = |e: &Error| matches!(e, Error::UnaddressableId(n) if n == name);
+        assert!(refused(&client.delete_collection(name).await.unwrap_err()));
+        assert!(refused(&client.document(name, "a").await.unwrap_err()));
+        let filtered = client.delete_by_filter(name, "id:[`a`]").await;
+        assert!(refused(&filtered.unwrap_err()));
+    }
+}
+
+#[tokio::test]
+async fn dot_ids_never_reach_the_server() {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = Client::new(&[&server.uri()], "k".to_string().into(), Default::default()).unwrap();
+    for id in ["", ".", ".."] {
+        let refused = |e: &Error| matches!(e, Error::UnaddressableId(i) if i == id);
+        assert!(refused(&client.document("c", id).await.unwrap_err()));
+        assert!(refused(&client.delete_document("c", id).await.unwrap_err()));
+        let patched = client.patch_document("c", id, &serde_json::json!({})).await;
+        assert!(refused(&patched.unwrap_err()));
+    }
 }

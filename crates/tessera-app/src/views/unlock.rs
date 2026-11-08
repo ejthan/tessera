@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::task::Poll;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::Button;
@@ -60,9 +61,19 @@ pub fn open(
                 return Task::ready(Ok(()));
             }
             if let Some(then) = then.borrow_mut().take() {
-                // The dialog closes when its task is polled, which was queued before this one.
+                // The dialog closes when its task is polled, which is queued after this one, so
+                // one yield: `then` may open a dialog, and the close must not take that one.
                 window
                     .spawn(cx, async move |cx| {
+                        let mut yielded = false;
+                        std::future::poll_fn(|task| {
+                            if std::mem::replace(&mut yielded, true) {
+                                return Poll::Ready(());
+                            }
+                            task.waker().wake_by_ref();
+                            Poll::Pending
+                        })
+                        .await;
                         cx.update(|window, cx| then(window, cx)).ok();
                     })
                     .detach();

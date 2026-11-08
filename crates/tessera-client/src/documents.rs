@@ -6,7 +6,7 @@ use percent_encoding::utf8_percent_encode;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::collections::{SEGMENT, collection_path};
+use crate::collections::{SEGMENT, addressable, collection_path};
 use crate::{Client, Error, LONG_TIMEOUT};
 
 /// Which page of a collection to fetch, and how.
@@ -72,7 +72,7 @@ struct RawCount {
 }
 
 /// `k=v&k=v` with every value percent-encoded as one segment, so `&&` in a filter survives.
-pub(crate) fn encode_query(pairs: &[(&str, &str)]) -> String {
+pub fn encode_query(pairs: &[(&str, &str)]) -> String {
     pairs
         .iter()
         .map(|(k, v)| format!("{k}={}", utf8_percent_encode(v, SEGMENT)))
@@ -85,21 +85,34 @@ pub(crate) fn segment(s: &str) -> String {
     utf8_percent_encode(s, SEGMENT).to_string()
 }
 
+/// `collections/{c}/documents/{id}`, each encoded as one segment. `..` would address the collection itself, and a DELETE
+/// would remove it.
+pub fn document_path(collection: &str, id: &str) -> Result<String, Error> {
+    addressable(id)?;
+    collection_path(collection, &format!("/documents/{}", segment(id)))
+}
+
 impl Client {
     async fn search_raw(&self, collection: &str, pairs: &[(&str, &str)]) -> Result<RawPage, Error> {
-        let path = collection_path(collection, "/documents/search");
+        let path = collection_path(collection, "/documents/search")?;
         let body = self.get_ok(None, &path, Some(&encode_query(pairs))).await?;
         serde_json::from_str(&body).map_err(Error::Decode)
     }
 
-    /// `GET /collections/{c}/documents/search?q=*`: one page of documents.
+    /// `GET /collections/{c}/documents/search?q=*`: one page of documents. Curation sets are
+    /// off, so a rule cannot hide rows and `found` agrees with [`Self::count_documents`].
     pub async fn search_documents(
         &self,
         collection: &str,
         query: &DocumentQuery,
     ) -> Result<SearchPage, Error> {
         let (page, per_page) = (query.page.to_string(), query.per_page.to_string());
-        let mut pairs = vec![("q", "*"), ("per_page", &per_page), ("page", &page)];
+        let mut pairs = vec![
+            ("q", "*"),
+            ("per_page", &per_page),
+            ("page", &page),
+            ("enable_curations", "false"),
+        ];
         for (key, value) in [
             ("filter_by", &query.filter_by),
             ("sort_by", &query.sort_by),
@@ -119,13 +132,14 @@ impl Client {
         })
     }
 
-    /// The number of documents matching `filter_by` (`per_page=0`).
+    /// The number of documents matching `filter_by` (`per_page=0`). Curation sets are off:
+    /// a rule attached to the collection changes `found`, but no write by filter sees it.
     pub async fn count_documents(
         &self,
         collection: &str,
         filter_by: Option<&str>,
     ) -> Result<u64, Error> {
-        let mut pairs = vec![("q", "*"), ("per_page", "0")];
+        let mut pairs = vec![("q", "*"), ("per_page", "0"), ("enable_curations", "false")];
         if let Some(filter) = filter_by {
             pairs.push(("filter_by", filter));
         }
@@ -162,7 +176,7 @@ impl Client {
 
     /// `GET /collections/{c}/documents/{id}`.
     pub async fn document(&self, collection: &str, id: &str) -> Result<Value, Error> {
-        let path = collection_path(collection, &format!("/documents/{}", segment(id)));
+        let path = document_path(collection, id)?;
         let body = self.get_ok(None, &path, None).await?;
         serde_json::from_str(&body).map_err(Error::Decode)
     }
@@ -184,7 +198,7 @@ impl Client {
         collection: &str,
         document: &Value,
     ) -> Result<Value, Error> {
-        let path = collection_path(collection, "/documents");
+        let path = collection_path(collection, "/documents")?;
         self.write_document(crate::Method::POST, &path, None, Some(document))
             .await
     }
@@ -195,7 +209,7 @@ impl Client {
         collection: &str,
         document: &Value,
     ) -> Result<Value, Error> {
-        let path = collection_path(collection, "/documents");
+        let path = collection_path(collection, "/documents")?;
         let query = encode_query(&[("action", "upsert")]);
         self.write_document(crate::Method::POST, &path, Some(&query), Some(document))
             .await
@@ -208,17 +222,67 @@ impl Client {
         id: &str,
         patch: &Value,
     ) -> Result<Value, Error> {
-        let path = collection_path(collection, &format!("/documents/{}", segment(id)));
+        let path = document_path(collection, id)?;
         self.write_document(crate::Method::PATCH, &path, None, Some(patch))
             .await
     }
 
     /// `DELETE /collections/{c}/documents/{id}`.
     pub async fn delete_document(&self, collection: &str, id: &str) -> Result<(), Error> {
-        let path = collection_path(collection, &format!("/documents/{}", segment(id)));
+        let path = document_path(collection, id)?;
         self.write(None, crate::Method::DELETE, &path, None, None, None)
             .await
             .map(drop)
+    }
+
+    async fn by_filter(
+        &self,
+        method: crate::Method,
+        collection: &str,
+        pairs: &[(&str, &str)],
+        body: Option<&Value>,
+        count_key: &str,
+    ) -> Result<u64, Error> {
+        let path = collection_path(collection, "/documents")?;
+        let query = encode_query(pairs);
+        let text = self
+            .write(None, method, &path, Some(&query), body, Some(LONG_TIMEOUT))
+            .await?;
+        let answer: Value = serde_json::from_str(&text).map_err(Error::Decode)?;
+        // A missing or non-numeric count is a decode error, not 0 (0 means a refused value).
+        serde_json::from_value(answer[count_key].clone()).map_err(Error::Decode)
+    }
+
+    /// `DELETE …/documents?filter_by=&batch_size=1000`: the number deleted. Uses [`LONG_TIMEOUT`].
+    pub async fn delete_by_filter(&self, collection: &str, filter_by: &str) -> Result<u64, Error> {
+        let pairs = [("filter_by", filter_by), ("batch_size", "1000")];
+        self.by_filter(
+            crate::Method::DELETE,
+            collection,
+            &pairs,
+            None,
+            "num_deleted",
+        )
+        .await
+    }
+
+    /// `PATCH …/documents?filter_by=`: the number updated; a value of the wrong type answers 0.
+    /// Uses [`LONG_TIMEOUT`].
+    pub async fn update_by_filter(
+        &self,
+        collection: &str,
+        filter_by: &str,
+        partial: &Value,
+    ) -> Result<u64, Error> {
+        let pairs = [("filter_by", filter_by)];
+        self.by_filter(
+            crate::Method::PATCH,
+            collection,
+            &pairs,
+            Some(partial),
+            "num_updated",
+        )
+        .await
     }
 
     /// `GET /collections/{c}/documents/export?filter_by=`: the raw JSONL. Uses [`LONG_TIMEOUT`].
@@ -227,7 +291,7 @@ impl Client {
         collection: &str,
         filter_by: &str,
     ) -> Result<String, Error> {
-        let path = collection_path(collection, "/documents/export");
+        let path = collection_path(collection, "/documents/export")?;
         let query = encode_query(&[("filter_by", filter_by)]);
         match self
             .call(

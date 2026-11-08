@@ -39,6 +39,10 @@ pub enum Error {
         /// The refused method.
         method: Method,
     },
+    /// The id or collection name is empty, `.` or `..`, which a URL cannot hold: it would
+    /// address another resource.
+    #[error("the id {0} cannot be part of a URL")]
+    UnaddressableId(String),
     /// TLS failed: an untrusted or invalid certificate, a failed handshake, or an
     /// unusable CA file.
     #[error("TLS error: {0}")]

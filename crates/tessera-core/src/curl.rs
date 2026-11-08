@@ -4,6 +4,7 @@
 //! placeholder; the event never carries the key, and its key prefix is not used here.
 
 use tessera_client::Method;
+use url::Url;
 
 use crate::log::LogEntry;
 use crate::redact;
@@ -11,35 +12,65 @@ use crate::redact;
 /// A POSIX shell command that repeats the request, with secrets in the body masked.
 pub fn command(entry: &LogEntry) -> String {
     let e = &entry.event;
-    let mut url = e.node.clone();
-    url.set_path(&e.path);
-    url.set_query(e.query.as_deref().map(redact::query).as_deref());
+    let body = e.request_body.as_ref();
+    let mut out = request_with(
+        &e.node,
+        &e.method,
+        &e.path,
+        e.query.as_deref(),
+        &e.request_headers,
+        body.map(|b| &*b.text),
+    );
+    if body.is_some_and(|b| b.original_len > b.text.len()) {
+        out.insert_str(0, ": 'body truncated at 1 MiB'\n");
+    }
+    out
+}
+
+/// The same command for a request that has no log entry, with only the API key header.
+pub fn request(
+    node: &Url,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    body: Option<&str>,
+) -> String {
+    request_with(node, method, path, query, &[], body)
+}
+
+fn request_with(
+    node: &Url,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> String {
+    let mut url = node.clone();
+    url.set_path(path);
+    url.set_query(query.map(redact::query).as_deref());
     url.set_fragment(None);
 
-    let mut head = String::new();
     let mut lines = Vec::new();
     let mut first = String::from("curl");
     // curl waits for a body after `-X HEAD`; `-I` is the right flag.
-    if e.method == Method::HEAD {
+    if *method == Method::HEAD {
         first.push_str(" -I");
-    } else if e.method != Method::GET {
-        first.push_str(&format!(" -X {}", e.method));
+    } else if *method != Method::GET {
+        first.push_str(&format!(" -X {method}"));
     }
     first.push_str(&format!(" {}", quote(url.as_str())));
     lines.push(first);
     lines.push(r#"-H "X-TYPESENSE-API-KEY: $TYPESENSE_API_KEY""#.to_string());
-    for (name, value) in &e.request_headers {
+    for (name, value) in headers {
         lines.push(format!("-H {}", quote(&format!("{name}: {value}"))));
     }
 
     let mut heredoc = None;
-    if let Some(body) = &e.request_body {
-        if body.original_len > body.text.len() {
-            head.push_str(": 'body truncated at 1 MiB'\n");
-        }
+    if let Some(body) = body {
         // shortcut: bodies round-trip through serde_json::Value, so integers beyond i64/u64 and float
         // formatting can change; enable arbitrary_precision if replay fidelity matters.
-        let text = redact::json(&body.text);
+        let text = redact::json(body);
         let mut tag = String::from("EOF");
         while text.lines().any(|l| l == tag) {
             tag.push('_');
@@ -48,7 +79,7 @@ pub fn command(entry: &LogEntry) -> String {
         heredoc = Some((text, tag));
     }
 
-    let mut out = head + &lines.join(" \\\n  ");
+    let mut out = lines.join(" \\\n  ");
     if let Some((text, tag)) = heredoc {
         out.push_str(&format!("\n{text}\n{tag}"));
     }
@@ -141,6 +172,24 @@ mod tests {
         let out = command(&e);
         assert!(!out.contains("s3cr3t"), "{out}");
         assert!(out.contains("q=a&X-Typesense-Api-Key="), "{out}");
+    }
+
+    #[test]
+    fn request_without_an_entry_masks_the_body() {
+        let node: Url = "https://ts.example.net:8443".parse().expect("url");
+        let out = request(
+            &node,
+            &Method::GET,
+            "/collections",
+            Some("q=a"),
+            Some(r#"{"api_key":"s3cr3t"}"#),
+        );
+        assert!(out.contains("$TYPESENSE_API_KEY"), "{out}");
+        assert!(
+            out.contains("'https://ts.example.net:8443/collections?q=a'"),
+            "{out}"
+        );
+        assert!(!out.contains("s3cr3t"), "{out}");
     }
 
     #[test]

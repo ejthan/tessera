@@ -97,7 +97,8 @@ impl Fixture {
     }
 
     fn sort_header(&self, cx: &mut TestAppContext, col: usize) {
-        self.act(cx, |window, cx| window.click(("icon-sort", col), cx));
+        // Column 0 holds the checkboxes.
+        self.act(cx, |window, cx| window.click(("icon-sort", col + 1), cx));
     }
 
     fn profile_id(&self, cx: &mut TestAppContext) -> uuid::Uuid {
@@ -232,7 +233,7 @@ impl Fixture {
         let table = self.table(cx);
         self.act(cx, |window, cx| {
             table.read(cx).focus_handle(cx).focus(window, cx);
-            table.update(cx, |t, cx| t.set_selected_cell(row, 0, cx));
+            table.update(cx, |t, cx| t.set_selected_cell(row, 1, cx));
         });
     }
 
@@ -276,7 +277,86 @@ impl Fixture {
 
     fn select_cell(&self, cx: &mut TestAppContext, col: usize) {
         let table = self.table(cx);
-        cx.update(|cx| table.update(cx, |t, cx| t.set_selected_cell(0, col, cx)));
+        cx.update(|cx| table.update(cx, |t, cx| t.set_selected_cell(0, col + 1, cx)));
+    }
+
+    /// The ticked ids.
+    fn ticked(&self, cx: &mut TestAppContext) -> Vec<String> {
+        let table = self.table(cx);
+        cx.update(|cx| table.read(cx).delegate().selection.ids())
+    }
+
+    /// Clicks the checkbox of document `id`.
+    fn tick(&self, cx: &mut TestAppContext, id: &str) {
+        self.click(cx, &format!("documents.check.{id}"));
+    }
+
+    fn press(&self, cx: &mut TestAppContext, key: &str) {
+        let key = key.to_string();
+        self.act(cx, |window, cx| window.press(&key, cx));
+        self.settle(cx);
+    }
+
+    /// Confirms a delete in the simple dialog.
+    fn confirm_delete(&self, cx: &mut TestAppContext) {
+        self.click(cx, "confirm.ok");
+        self.settle(cx);
+    }
+
+    /// Lets `ms` of the bulk dialog's wait pass.
+    fn wait(&self, cx: &mut TestAppContext, ms: u64) {
+        cx.executor().advance_clock(Duration::from_millis(ms));
+        cx.run_until_parked();
+        self.act(cx, |_, _| {});
+    }
+
+    fn counts(&self) -> Vec<Option<String>> {
+        self.docs.count_calls.lock().unwrap().clone()
+    }
+
+    /// Opens a bulk dialog with `shortcut`, types `filter` and waits for its count.
+    fn bulk(&self, cx: &mut TestAppContext, shortcut: &str, filter: &str) {
+        self.press(cx, shortcut);
+        self.type_bulk_filter(cx, filter);
+        self.wait(cx, 300);
+    }
+
+    /// Replaces the text of the focused input with `text`.
+    fn replace_text(&self, cx: &mut TestAppContext, text: &str) {
+        self.act(cx, |window, cx| {
+            window.press(SELECT_ALL, cx);
+            window.input(text, cx);
+        });
+    }
+
+    fn type_bulk_filter(&self, cx: &mut TestAppContext, text: &str) {
+        self.act(cx, |window, cx| window.input(text, cx));
+    }
+
+    fn type_partial(&self, cx: &mut TestAppContext, text: &str) {
+        self.click(cx, "bulk.editor");
+        self.replace_text(cx, text);
+        self.act(cx, |_, _| {});
+    }
+
+    fn continue_disabled(&self, cx: &mut TestAppContext) -> bool {
+        self.act(cx, |window, _| {
+            window.find("bulk.continue").disabled() == Some(true)
+        })
+    }
+
+    /// Continue, with the second count answered.
+    fn bulk_continue(&self, cx: &mut TestAppContext) {
+        self.click(cx, "bulk.continue");
+        self.settle(cx);
+    }
+
+    /// Scrolls over the first `found` rows so their pages are loaded.
+    fn load_rows(&self, cx: &mut TestAppContext, found: usize) {
+        for row in (0..found).step_by(200) {
+            self.scroll_to(cx, row);
+            self.settle(cx);
+        }
     }
 
     /// Closes the tab and opens the collection again.
@@ -324,10 +404,19 @@ async fn open_profile(
     docs: Arc<FakeDocs>,
     read_only: bool,
 ) -> Fixture {
-    let name = collection.name.clone();
-    let backend = fake_backend(cx, Some((vec![collection], vec![])));
     let mut profile = tessera_core::profile::Profile::new("test", vec![node()]);
     profile.read_only = read_only;
+    open_as(cx, collection, docs, profile).await
+}
+
+async fn open_as(
+    cx: &mut TestAppContext,
+    collection: Collection,
+    docs: Arc<FakeDocs>,
+    profile: tessera_core::profile::Profile,
+) -> Fixture {
+    let name = collection.name.clone();
+    let backend = fake_backend(cx, Some((vec![collection], vec![])));
     let profile_id = profile.id;
     let (handle, state, rt) = {
         fake_connector(cx, |_| Ok(server("30.2", true)));
@@ -517,7 +606,7 @@ async fn header_click_sorts(cx: &mut TestAppContext) {
 async fn sort_shortcut_uses_the_selected_cell(cx: &mut TestAppContext) {
     let f = open_found(cx, plain_schema(), 1_000).await;
     let table = f.table(cx);
-    cx.update(|cx| table.update(cx, |t, cx| t.set_selected_cell(0, 2, cx)));
+    cx.update(|cx| table.update(cx, |t, cx| t.set_selected_cell(0, 3, cx)));
     f.act(cx, |window, cx| window.press(SORT, cx));
     assert_eq!(f.docs.last_sort().as_deref(), Some("price:desc"));
     f.act(cx, |window, cx| {
@@ -534,11 +623,11 @@ async fn unsortable_column_has_no_icon_and_the_shortcut_does_nothing(cx: &mut Te
     let f = open_found(cx, plain_schema(), 1_000).await;
     let asked = f.docs.page_numbers().len();
     f.act(cx, |window, _| {
-        assert!(window.try_find(("icon-sort", 1usize)).is_none());
-        assert!(window.try_find(("icon-sort", 2usize)).is_some());
+        assert!(window.try_find(("icon-sort", 2usize)).is_none());
+        assert!(window.try_find(("icon-sort", 3usize)).is_some());
     });
     let table = f.table(cx);
-    cx.update(|cx| table.update(cx, |t, cx| t.set_selected_cell(0, 1, cx)));
+    cx.update(|cx| table.update(cx, |t, cx| t.set_selected_cell(0, 2, cx)));
     f.act(cx, |window, cx| window.press(SORT, cx));
     assert_eq!(f.docs.page_numbers().len(), asked);
 }
@@ -767,7 +856,7 @@ async fn resized_width_survives_a_refresh(cx: &mut TestAppContext) {
     let f = open_found(cx, plain_schema(), 10).await;
     let table = f.table(cx);
     let width =
-        |cx: &mut TestAppContext| cx.update(|cx| f32::from(table.read(cx).col_width(1).unwrap()));
+        |cx: &mut TestAppContext| cx.update(|cx| f32::from(table.read(cx).col_width(2).unwrap()));
     let before = width(cx);
     f.select_cell(cx, 1);
     f.act(cx, |window, cx| window.press(WIDER, cx));
@@ -1215,7 +1304,7 @@ async fn copy_cell_copies_the_full_value(cx: &mut TestAppContext) {
     let table = f.table(cx);
     f.act(cx, |window, cx| {
         table.read(cx).focus_handle(cx).focus(window, cx);
-        table.update(cx, |t, cx| t.set_selected_cell(0, col, cx));
+        table.update(cx, |t, cx| t.set_selected_cell(0, col + 1, cx));
     });
     f.act(cx, |window, cx| window.press(COPY_CELL, cx));
     assert_eq!(f.clipboard(cx), Some(long));
@@ -1261,14 +1350,14 @@ async fn failed_copy_row_shows_above_the_table(cx: &mut TestAppContext) {
     f.act(cx, |window, cx| window.press(COPY_ROW, cx));
     f.settle(cx);
     f.act(cx, |window, _| {
-        assert!(label(window, "documents.error").contains("boom"));
+        assert!(label(window, "documents.copy.error").contains("boom"));
     });
     assert_eq!(f.clipboard(cx), None);
     *f.docs.document_fail.lock().unwrap() = None;
     f.act(cx, |window, cx| window.press(COPY_ROW, cx));
     f.settle(cx);
     f.act(cx, |window, _| {
-        assert!(window.try_find("documents.error").is_none());
+        assert!(window.try_find("documents.copy.error").is_none());
     });
 }
 
@@ -1281,7 +1370,7 @@ async fn moving_the_selection_clears_a_failed_copy(cx: &mut TestAppContext) {
     f.settle(cx);
     f.select_row(cx, 5);
     f.act(cx, |window, _| {
-        assert!(window.try_find("documents.error").is_none());
+        assert!(window.try_find("documents.copy.error").is_none());
     });
 }
 
@@ -1977,4 +2066,1455 @@ async fn unsaved_changes_veto_the_kits_close(cx: &mut TestAppContext) {
     f.act(cx, |window, cx| window.press(REVERT, cx));
     f.settle(cx);
     cx.update(|cx| assert!(panel.read(cx).closable(cx)));
+}
+
+#[gpui_kit::test]
+async fn checkbox_toggles_and_does_not_select_the_cell(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let table = f.table(cx);
+    f.tick(cx, "3");
+    assert_eq!(f.ticked(cx), ["3"]);
+    assert_eq!(cx.update(|cx| table.read(cx).selected_cell()), None);
+    assert!(f.text_of(cx, "documents.selected").starts_with('1'));
+    f.tick(cx, "3");
+    assert!(f.ticked(cx).is_empty());
+    assert!(!f.has(cx, "documents.selected"));
+}
+
+#[gpui_kit::test]
+async fn shift_click_selects_the_range(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.tick(cx, "5");
+    f.act(cx, |window, cx| {
+        window.click_with_modifiers("documents.check.2", gpui_kit::Modifiers::shift(), cx)
+    });
+    assert_eq!(f.ticked(cx), ["2", "3", "4", "5"]);
+}
+
+#[gpui_kit::test]
+async fn range_over_unloaded_rows_says_so(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 100_000).await;
+    f.tick(cx, "0");
+    f.scroll_to(cx, 50_000);
+    f.settle(cx);
+    let table = f.table(cx);
+    f.act(cx, |window, cx| {
+        table.read(cx).focus_handle(cx).focus(window, cx);
+        window.click_with_modifiers("documents.check.50000", gpui_kit::Modifiers::shift(), cx)
+    });
+    assert!(f.has(cx, "documents.selection_unloaded"));
+    assert!(f.ticked(cx).len() < 1_000);
+    assert!(f.ticked(cx).contains(&"50000".to_string()));
+}
+
+#[gpui_kit::test]
+async fn space_toggles_the_selected_cell_row(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 4);
+    f.press(cx, "space");
+    assert_eq!(f.ticked(cx), ["4"]);
+    f.press(cx, "space");
+    assert!(f.ticked(cx).is_empty());
+    f.press(cx, "space");
+    f.select_row(cx, 6);
+    f.press(cx, "shift-space");
+    assert_eq!(f.ticked(cx), ["4", "5", "6"]);
+}
+
+#[gpui_kit::test]
+async fn space_stays_text_in_the_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 4);
+    f.type_filter(cx, "a");
+    f.press(cx, "space");
+    assert!(f.ticked(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn command_a_selects_loaded_rows(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 900).await;
+    f.select_row(cx, 0);
+    f.press(cx, SELECT_ALL);
+    let table = f.table(cx);
+    let pages = cx.update(|cx| table.read(cx).delegate().cached_pages());
+    assert!(pages < 4, "{pages}");
+    assert_eq!(f.ticked(cx).len(), pages * 250);
+}
+
+#[gpui_kit::test]
+async fn escape_on_the_table_clears_the_selection(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 4);
+    f.press(cx, "space");
+    f.press(cx, "escape");
+    assert_eq!(f.ticked(cx), ["4"], "the kit clears the cell first");
+    f.press(cx, "escape");
+    assert!(f.ticked(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn selection_cap_stops_at_one_thousand_with_a_note(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 2_000).await;
+    f.load_rows(cx, 2_000);
+    f.select_row(cx, 1_999);
+    f.press(cx, SELECT_ALL);
+    assert_eq!(f.ticked(cx).len(), 1_000);
+    assert!(f.text_of(cx, "documents.selection_limit").contains("1000"));
+    let before = f.ticked(cx);
+    let outside = (0..2_000)
+        .map(|n| n.to_string())
+        .find(|id| !before.contains(id))
+        .unwrap();
+    let row: usize = outside.parse().unwrap();
+    f.scroll_to(cx, row);
+    f.settle(cx);
+    f.tick(cx, &outside);
+    assert_eq!(f.ticked(cx), before, "adds nothing more");
+    let back = before.last().unwrap().clone();
+    f.scroll_to(cx, back.parse().unwrap());
+    f.settle(cx);
+    f.tick(cx, &back);
+    assert_eq!(f.ticked(cx).len(), 999);
+    assert!(!f.has(cx, "documents.selection_limit"));
+}
+
+#[gpui_kit::test]
+async fn selection_survives_scrolling_out_of_the_cache(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 200_000).await;
+    f.tick(cx, "3");
+    for jump in 1..=40 {
+        f.scroll_to(cx, jump * 300);
+        f.settle(cx);
+    }
+    assert_eq!(f.ticked(cx), ["3"]);
+    f.select_row(cx, 12_000);
+    f.settle(cx);
+    f.press(cx, DELETE);
+    assert!(f.text_of(cx, "confirm.body").contains("3"));
+    assert!(f.has(cx, "confirm.ok"));
+}
+
+#[gpui_kit::test]
+async fn new_filter_clears_the_selection(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.tick(cx, "3");
+    f.submit_filter(cx, "price:>1");
+    assert!(f.ticked(cx).is_empty());
+    f.tick(cx, "3");
+    f.sort_header(cx, 2);
+    f.settle(cx);
+    assert!(f.ticked(cx).is_empty());
+    f.tick(cx, "3");
+    f.press(cx, CLEAR_FILTER);
+    assert!(f.ticked(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn ticks_made_while_a_new_filter_runs_do_not_survive_it(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let hold = f.docs.hold_next();
+    f.submit_filter(cx, "price:>1");
+    f.tick(cx, "3");
+    assert_eq!(f.ticked(cx), ["3"]);
+    hold.send(()).unwrap();
+    f.settle(cx);
+    assert!(f.ticked(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn refresh_keeps_the_selection(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.tick(cx, "3");
+    f.select_row(cx, 3);
+    f.press(cx, REFRESH);
+    assert_eq!(f.ticked(cx), ["3"]);
+}
+
+#[gpui_kit::test]
+async fn delete_key_in_documents_does_not_open_collection_delete(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    assert!(!f.has(cx, "danger.input"));
+    let body = f.text_of(cx, "confirm.body");
+    assert!(body.contains("document 3"), "{body}");
+    f.click(cx, "confirm.cancel");
+    f.settle(cx);
+    assert!(f.writes().is_empty());
+    assert_eq!(f.backend.deletes.lock().unwrap().len(), 0);
+}
+
+#[gpui_kit::test]
+async fn nothing_to_delete_disables_the_button(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    assert!(f.act(cx, |window, _| {
+        window.find("documents.delete").disabled() == Some(true)
+    }));
+    f.press(cx, DELETE);
+    assert!(!f.has(cx, "confirm.ok"));
+    f.tick(cx, "3");
+    assert!(f.act(cx, |window, _| {
+        window.find("documents.delete").disabled() != Some(true)
+    }));
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    assert!(f.has(cx, "confirm.ok"));
+}
+
+#[gpui_kit::test]
+async fn delete_button_shows_its_shortcut(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let button = f.act(cx, |window, _| window.find("documents.delete").bounds());
+    let chord = key("kbd:cmd-backspace", "kbd:ctrl-backspace");
+    let kbd = gpui_kit::VisualTestContext::from_window(f.handle.into(), cx)
+        .debug_bounds(chord)
+        .unwrap();
+    assert!(button.contains(&kbd.center()));
+}
+
+#[gpui_kit::test]
+async fn single_delete_uses_the_document_endpoint(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    let writes = f.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(
+        (writes[0].0.as_str(), writes[0].1.as_str()),
+        ("delete", "3")
+    );
+}
+
+#[gpui_kit::test]
+async fn single_delete_of_a_gone_document_counts_as_done(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.write_fail.lock().unwrap() = Some((404, "no such document".into()));
+    f.tick(cx, "3");
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    assert!(!f.has(cx, "documents.delete.error"));
+    assert!(f.ticked(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn multi_delete_builds_one_id_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.tick(cx, "1");
+    f.tick(cx, "2");
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    let writes = f.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].0, "delete_by_filter");
+    assert_eq!(writes[0].1, "id:[`1`,`2`]");
+    assert!(f.ticked(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn long_selection_is_batched(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 1_000;
+    *docs.ids.lock().unwrap() = (0..1_000).map(|n| format!("{n:032}")).collect();
+    let f = open_tab(cx, plain_schema(), docs).await;
+    f.load_rows(cx, 1_000);
+    f.select_row(cx, 999);
+    f.press(cx, SELECT_ALL);
+    assert_eq!(f.ticked(cx).len(), 1_000);
+    f.press(cx, DELETE);
+    assert!(f.has(cx, "confirm.ok"), "a thousand is still medium danger");
+    f.confirm_delete(cx);
+    let writes = f.writes();
+    assert!(writes.len() > 1);
+    assert!(writes.iter().all(|w| w.0 == "delete_by_filter"));
+    let ids: usize = writes.iter().map(|w| w.1.matches('`').count() / 2).sum();
+    assert_eq!(ids, 1_000);
+}
+
+#[gpui_kit::test]
+async fn backtick_id_goes_alone(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 3;
+    *docs.ids.lock().unwrap() = ["a", "x`y", "b"].map(String::from).to_vec();
+    let f = open_tab(cx, plain_schema(), docs).await;
+    f.select_row(cx, 0);
+    f.press(cx, SELECT_ALL);
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    let writes = f.writes();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[0].1, "id:[`a`,`b`]");
+    assert_eq!(
+        (writes[1].0.as_str(), writes[1].1.as_str()),
+        ("delete", "x`y")
+    );
+}
+
+#[gpui_kit::test]
+async fn failed_backtick_id_is_reported(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 3;
+    *docs.ids.lock().unwrap() = ["a", "x`y", "b"].map(String::from).to_vec();
+    let f = open_tab(cx, plain_schema(), docs).await;
+    *f.docs.write_fail.lock().unwrap() = Some((500, "boom".into()));
+    *f.docs.pass_deletes.lock().unwrap() = 1;
+    f.select_row(cx, 0);
+    f.press(cx, SELECT_ALL);
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    let text = f.text_of(cx, "documents.delete.error");
+    assert!(
+        text.contains("Deleted 2 of 3") && text.contains("boom"),
+        "{text}"
+    );
+    assert!(f.ticked(cx).contains(&"x`y".to_string()));
+}
+
+#[gpui_kit::test]
+async fn partial_failure_reports_and_reloads(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 1_000;
+    *docs.ids.lock().unwrap() = (0..1_000).map(|n| format!("{n:032}")).collect();
+    let f = open_tab(cx, plain_schema(), docs).await;
+    f.load_rows(cx, 1_000);
+    f.select_row(cx, 999);
+    f.press(cx, SELECT_ALL);
+    *f.docs.write_fail.lock().unwrap() = Some((503, "not ready".into()));
+    *f.docs.pass_deletes.lock().unwrap() = 1;
+    f.press(cx, DELETE);
+    let asked = f.docs.pages.lock().unwrap().len();
+    f.confirm_delete(cx);
+    assert_eq!(f.writes().len(), 2, "stops at the first failure");
+    let text = f.text_of(cx, "documents.delete.error");
+    assert!(
+        text.contains("of 1,000") && text.contains("not ready"),
+        "{text}"
+    );
+    assert!(f.docs.pages.lock().unwrap().len() > asked);
+    assert_eq!(f.ticked(cx).len(), 1_000);
+}
+
+async fn open_prod(cx: &mut TestAppContext, found: u64) -> Fixture {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = found;
+    let mut profile = tessera_core::profile::Profile::new("test", vec![node()]);
+    profile.environment = tessera_core::profile::Environment::Prod;
+    open_as(cx, plain_schema(), docs, profile).await
+}
+
+#[gpui_kit::test]
+async fn prod_needs_the_collection_name(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 10).await;
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    assert!(f.has(cx, "danger.prod"));
+    assert!(!f.has(cx, "confirm.ok"));
+    f.act(cx, |window, _| {
+        assert_eq!(window.find("danger.input").focused(), Some(true));
+        assert!(label(window, "danger.consequence.0").contains("document 3"));
+    });
+    f.act(cx, |window, cx| window.input("products", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "danger.ok".into(), false).await;
+    assert_eq!(f.writes()[0].0, "delete");
+}
+
+#[gpui_kit::test]
+async fn failure_on_prod_stays_in_the_dialog(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 10).await;
+    *f.docs.write_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    f.act(cx, |window, cx| window.input("products", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    let text = f.text_of(cx, "danger.error");
+    assert!(
+        text.contains("Deleted 0 of 1") && text.contains("boom"),
+        "{text}"
+    );
+}
+
+#[gpui_kit::test]
+async fn locked_profile_opens_unlock_first(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 10;
+    let f = open_profile(cx, plain_schema(), docs, true).await;
+    assert!(f.has(cx, "documents.delete.readonly"));
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    assert!(f.has(cx, "danger.input"));
+    assert!(!f.has(cx, "confirm.ok"));
+    f.click(cx, "danger.input");
+    f.act(cx, |window, cx| window.input("test", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "confirm.ok".into(), true).await;
+    assert!(f.writes().is_empty());
+    f.confirm_delete(cx);
+    assert_eq!(f.writes().len(), 1);
+}
+
+#[gpui_kit::test]
+async fn read_only_sends_nothing(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 10;
+    let f = open_profile(cx, plain_schema(), docs, true).await;
+    f.tick(cx, "3");
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    assert!(f.has(cx, "danger.input"));
+    f.press(cx, "escape");
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    assert!(f.writes().is_empty());
+    assert_eq!(f.ticked(cx), ["3"]);
+}
+
+#[gpui_kit::test]
+async fn deleted_row_closes_the_inspector(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    assert!(f.has(cx, "documents.inspector"));
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    f.confirm_delete(cx);
+    assert!(!f.has(cx, "documents.inspector"));
+}
+
+#[gpui_kit::test]
+async fn inspector_on_another_row_stays_open(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.tick(cx, "5");
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    f.confirm_delete(cx);
+    assert!(f.has(cx, "documents.inspector"));
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("3"));
+}
+
+#[gpui_kit::test]
+async fn draft_of_a_doomed_row_is_named_and_goes_only_with_the_row(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    let body = f.text_of(cx, "confirm.body");
+    assert!(
+        body.contains("document 3") && body.contains("unsaved"),
+        "{body}"
+    );
+    f.click(cx, "confirm.cancel");
+    wait_for_element(cx, f.handle, "confirm.ok".into(), false).await;
+    cx.executor().advance_clock(Duration::from_secs(1));
+    f.settle(cx);
+    assert!(f.dirty(cx), "cancelling changes nothing");
+    assert!(f.inspector_text(cx).contains("\"new\""));
+
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    f.confirm_delete(cx);
+    assert_eq!(f.writes()[0].0, "delete");
+    // One question: a second one would keep it from going.
+    wait_for_element(cx, f.handle, "confirm.ok".into(), false).await;
+    assert!(!f.has(cx, "documents.inspector"));
+    assert!(!f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn failed_delete_keeps_the_draft(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.write_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    f.confirm_delete(cx);
+    assert!(f.text_of(cx, "documents.delete.error").contains("boom"));
+    assert!(f.dirty(cx));
+    assert!(f.has(cx, "documents.inspector"));
+}
+
+#[gpui_kit::test]
+async fn cancelling_the_unlock_keeps_the_draft(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 10;
+    let f = open_profile(cx, plain_schema(), docs, true).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    assert!(f.has(cx, "danger.input"));
+    f.click(cx, "danger.cancel");
+    wait_for_element(cx, f.handle, "danger.input".into(), false).await;
+    assert!(f.dirty(cx));
+    assert!(f.writes().is_empty());
+}
+
+#[gpui_kit::test]
+async fn draft_on_prod_is_a_consequence(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    assert!(f.text_of(cx, "danger.consequence.1").contains("unsaved"));
+}
+
+#[gpui_kit::test]
+async fn busy_inspector_says_why_nothing_opens(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    let hold = f.docs.hold_next();
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    assert!(!f.has(cx, "confirm.ok"));
+    assert!(
+        f.text_of(cx, "documents.delete.error")
+            .contains("inspector")
+    );
+    drop(hold);
+}
+
+#[gpui_kit::test]
+async fn short_filter_count_reports_and_keeps_the_ticks(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.filter_short.lock().unwrap() = 1;
+    f.open_document(cx);
+    f.tick(cx, "3");
+    f.tick(cx, "4");
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    f.confirm_delete(cx);
+    let text = f.text_of(cx, "documents.delete.error");
+    assert!(text.contains("Deleted 1 of 2"), "{text}");
+    assert_eq!(f.ticked(cx), ["3", "4"]);
+    assert!(f.has(cx, "documents.inspector"));
+}
+
+#[gpui_kit::test]
+async fn star_and_spaced_ids_never_reach_a_filter(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 4;
+    *docs.ids.lock().unwrap() = ["*", "keep1 ", " lead", "plain"].map(String::from).to_vec();
+    let f = open_tab(cx, plain_schema(), docs).await;
+    f.select_row(cx, 0);
+    f.press(cx, SELECT_ALL);
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    let writes = f.writes();
+    assert_eq!(writes[0].1, "id:[`plain`]");
+    let single: Vec<_> = writes[1..]
+        .iter()
+        .map(|w| (w.0.as_str(), w.1.as_str()))
+        .collect();
+    assert_eq!(
+        single,
+        [("delete", " lead"), ("delete", "*"), ("delete", "keep1 ")]
+    );
+}
+
+#[gpui_kit::test]
+async fn a_lone_dot_id_goes_through_a_filter(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 2;
+    *docs.ids.lock().unwrap() = ["..", "a"].map(String::from).to_vec();
+    let f = open_tab(cx, plain_schema(), docs).await;
+    f.select_row(cx, 0);
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    let writes = f.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].1, "id:[`..`]");
+    assert_eq!(writes[0].0, "delete_by_filter");
+}
+
+#[gpui_kit::test]
+async fn delete_waits_for_a_new_query(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 3);
+    let hold = f.docs.hold_next();
+    f.submit_filter(cx, "price:>1");
+    f.tick(cx, "4");
+    f.press(cx, DELETE);
+    assert!(!f.has(cx, "confirm.ok"));
+    assert!(f.act(cx, |window, _| {
+        window.find("documents.delete").disabled() == Some(true)
+    }));
+    hold.send(()).unwrap();
+    f.settle(cx);
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    assert!(f.has(cx, "confirm.ok"));
+}
+
+#[gpui_kit::test]
+async fn delete_works_again_after_a_refused_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.fail.lock().unwrap() = Some((400, "bad filter".into()));
+    f.submit_filter(cx, "nope:=1");
+    *f.docs.fail.lock().unwrap() = None;
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    assert!(f.has(cx, "confirm.ok"));
+}
+
+#[gpui_kit::test]
+async fn delete_error_goes_with_the_next_query_and_masks_nothing(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1_000).await;
+    *f.docs.write_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    assert!(f.text_of(cx, "documents.delete.error").contains("boom"));
+    *f.docs.fail.lock().unwrap() = Some((500, "pages down".into()));
+    f.scroll_to(cx, 900);
+    f.settle(cx);
+    assert!(f.text_of(cx, "documents.error").contains("pages down"));
+    assert!(f.text_of(cx, "documents.delete.error").contains("boom"));
+
+    *f.docs.fail.lock().unwrap() = None;
+    f.press(cx, REFRESH);
+    assert!(!f.has(cx, "documents.delete.error"), "refresh clears it");
+    f.select_row(cx, 3);
+    f.press(cx, DELETE);
+    f.confirm_delete(cx);
+    assert!(f.has(cx, "documents.delete.error"));
+    f.submit_filter(cx, "price:>1");
+    assert!(
+        !f.has(cx, "documents.delete.error"),
+        "a new query clears it"
+    );
+}
+
+#[gpui_kit::test]
+async fn draft_of_another_row_is_left_alone(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.tick(cx, "5");
+    f.click(cx, "documents.delete");
+    f.settle(cx);
+    assert!(f.text_of(cx, "confirm.body").contains("document 5"));
+    f.confirm_delete(cx);
+    assert!(f.dirty(cx));
+    assert!(f.has(cx, "documents.inspector"));
+}
+
+#[gpui_kit::test]
+async fn closing_the_tab_waits_for_a_running_delete(cx: &mut TestAppContext) {
+    use gpui_kit::component::dock::BasePanel as _;
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.tick(cx, "1");
+    f.tick(cx, "2");
+    f.press(cx, DELETE);
+    let hold = f.docs.hold_next();
+    f.confirm_delete(cx);
+    let panel = f.panel(cx);
+    cx.update(|cx| assert!(!panel.read(cx).closable(cx)));
+    f.act(cx, |window, _| {
+        assert_eq!(window.find("documents.delete").disabled(), Some(true));
+    });
+    f.press(cx, DELETE);
+    assert!(!f.has(cx, "confirm.ok"), "one delete at a time");
+    f.press(cx, CLOSE_TAB);
+    let id = f.profile_id(cx);
+    let tab = format!("tab.{id}.collection.products");
+    assert!(f.act(cx, |window, _| window.try_find(tab.clone()).is_some()));
+    hold.send(()).unwrap();
+    f.settle(cx);
+    cx.update(|cx| assert!(panel.read(cx).closable(cx)));
+    assert!(f.ticked(cx).is_empty());
+}
+
+#[gpui_kit::test]
+async fn count_refreshes_after_delete(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.tick(cx, "1");
+    f.tick(cx, "2");
+    f.press(cx, DELETE);
+    let listed = *f.backend.lists.lock().unwrap();
+    f.confirm_delete(cx);
+    assert!(f.text_of(cx, "documents.status").starts_with("8 of"));
+    assert!(
+        *f.backend.lists.lock().unwrap() > listed,
+        "the list reloads"
+    );
+}
+
+#[gpui_kit::test]
+async fn delete_query_starts_with_the_table_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.submit_filter(cx, "price:>1");
+    f.press(cx, DELETE_QUERY);
+    f.wait(cx, 300);
+    assert_eq!(f.counts(), [Some("price:>1".to_string())]);
+    assert!(f.text_of(cx, "bulk.count").contains("10"));
+    // The focus is in the filter.
+    f.type_bulk_filter(cx, " && price:<9");
+    f.wait(cx, 300);
+    assert_eq!(f.counts()[1].as_deref(), Some("price:>1 && price:<9"));
+}
+
+#[gpui_kit::test]
+async fn bulk_buttons_open_their_dialogs(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.click(cx, "documents.delete_query");
+    f.settle(cx);
+    assert!(!f.has(cx, "bulk.editor"));
+    f.click(cx, "bulk.cancel");
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.click(cx, "documents.update_query");
+    f.settle(cx);
+    assert!(f.has(cx, "bulk.editor"));
+}
+
+#[gpui_kit::test]
+async fn bulk_waits_for_a_new_query(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let hold = f.docs.hold_next();
+    f.type_filter(cx, "price:>1");
+    f.act(cx, |window, cx| window.press("enter", cx));
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.run_until_parked();
+    assert!(f.act(cx, |window, _| {
+        window.find("documents.delete_query").disabled() == Some(true)
+            && window.find("documents.update_query").disabled() == Some(true)
+    }));
+    f.press(cx, DELETE_QUERY);
+    assert!(!f.has(cx, "bulk.continue"));
+    drop(hold);
+    f.settle(cx);
+    f.press(cx, DELETE_QUERY);
+    assert!(f.has(cx, "bulk.continue"));
+}
+
+#[gpui_kit::test]
+async fn count_shows_after_the_debounce(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 7).await;
+    f.press(cx, DELETE_QUERY);
+    f.type_bulk_filter(cx, "price:>1");
+    assert!(f.text_of(cx, "bulk.count").contains("Counting"));
+    f.wait(cx, 200);
+    assert!(f.counts().is_empty());
+    f.wait(cx, 100);
+    assert_eq!(f.counts().len(), 1);
+    assert!(f.text_of(cx, "bulk.count").contains("Affects 7"));
+}
+
+#[gpui_kit::test]
+async fn newer_filter_replaces_a_slow_count(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 7).await;
+    f.press(cx, DELETE_QUERY);
+    f.type_bulk_filter(cx, "price:>1");
+    let hold = f.docs.hold_next();
+    f.wait(cx, 300);
+    *f.docs.found.lock().unwrap() = 3;
+    f.type_bulk_filter(cx, "0");
+    assert!(f.text_of(cx, "bulk.count").contains("Counting"));
+    f.wait(cx, 300);
+    assert!(f.text_of(cx, "bulk.count").contains("Affects 3"));
+    let _ = hold.send(());
+    f.settle(cx);
+    assert!(f.text_of(cx, "bulk.count").contains("Affects 3"));
+    assert_eq!(f.counts().len(), 2);
+}
+
+#[gpui_kit::test]
+async fn empty_filter_disables_continue(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 7).await;
+    f.press(cx, DELETE_QUERY);
+    f.wait(cx, 300);
+    assert!(f.continue_disabled(cx));
+    assert!(f.text_of(cx, "bulk.count").contains("Truncate"));
+    f.type_bulk_filter(cx, "   ");
+    f.wait(cx, 300);
+    assert!(f.continue_disabled(cx));
+    assert!(f.counts().is_empty(), "a blank filter counts everything");
+}
+
+#[gpui_kit::test]
+async fn a_filter_for_everything_never_reaches_the_server(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 7).await;
+    for (shortcut, filter) in [
+        (DELETE_QUERY, "*"),
+        (UPDATE_QUERY, "*"),
+        (UPDATE_QUERY, " * "),
+        (DELETE_QUERY, "id:*"),
+        (UPDATE_QUERY, "id:=[a,*]"),
+        (UPDATE_QUERY, "   "),
+    ] {
+        f.bulk(cx, shortcut, filter);
+        if shortcut == UPDATE_QUERY {
+            f.type_partial(cx, r#"{"title":"x"}"#);
+        }
+        assert!(f.continue_disabled(cx), "{filter:?}");
+        assert!(f.text_of(cx, "bulk.count").contains("Enter a filter"));
+        f.act(cx, |window, cx| window.press(SAVE, cx));
+        f.settle(cx);
+        assert!(!f.has(cx, "confirm.ok"), "{filter:?}");
+        f.click(cx, "bulk.cancel");
+        wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+        // The kit gives the focus back once the dialog's exit has played.
+        f.wait(cx, 1000);
+    }
+    assert!(f.counts().is_empty());
+    assert!(f.writes().is_empty());
+}
+
+#[gpui_kit::test]
+async fn zero_matches_disables_continue(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 3).await;
+    *f.docs.found.lock().unwrap() = 0;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    assert!(f.continue_disabled(cx));
+    assert!(f.text_of(cx, "bulk.count").contains("No documents"));
+}
+
+#[gpui_kit::test]
+async fn bad_filter_shows_the_server_message(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 3).await;
+    f.press(cx, DELETE_QUERY);
+    *f.docs.fail.lock().unwrap() = Some((400, "Could not parse the filter query.".into()));
+    f.type_bulk_filter(cx, "price:");
+    f.wait(cx, 300);
+    let text = f.text_of(cx, "bulk.error");
+    assert!(text.contains("Could not parse the filter query."), "{text}");
+    assert!(f.continue_disabled(cx));
+}
+
+#[gpui_kit::test]
+async fn continue_counts_again(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    *f.docs.found.lock().unwrap() = 8;
+    f.bulk_continue(cx);
+    assert_eq!(f.counts().len(), 2);
+    let body = f.text_of(cx, "confirm.body");
+    assert!(
+        body.contains("Deletes 8 documents from products matching: price:>1"),
+        "{body}"
+    );
+}
+
+#[gpui_kit::test]
+async fn cancel_changes_nothing(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.click(cx, "confirm.cancel");
+    f.settle(cx);
+    assert!(f.writes().is_empty());
+    assert!(
+        !f.continue_disabled(cx),
+        "the dialog is still there to retry"
+    );
+}
+
+#[gpui_kit::test]
+async fn at_one_thousand_uses_the_simple_confirm(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1000).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    assert!(f.has(cx, "confirm.ok"));
+    assert!(!f.has(cx, "danger.input"));
+}
+
+#[gpui_kit::test]
+async fn above_one_thousand_needs_the_name(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1001).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    assert!(!f.has(cx, "confirm.ok"));
+    let line = f.text_of(cx, "danger.consequence.0");
+    assert!(
+        line.contains("1,001") && line.contains("price:>1"),
+        "{line}"
+    );
+    f.act(cx, |window, cx| window.input("products", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "danger.ok".into(), false).await;
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    assert_eq!(f.writes()[0].0, "delete_by_filter");
+    assert_eq!(f.writes()[0].1, "price:>1");
+    assert!(f.text_of(cx, "bulk.result").contains("1,001"));
+}
+
+#[gpui_kit::test]
+async fn stop_waiting_still_closes_with_the_result(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 1001).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.act(cx, |window, cx| window.input("products", cx));
+    let hold = f.docs.hold_next();
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    f.click(cx, "danger.stop_waiting");
+    wait_for_element(cx, f.handle, "danger.ok".into(), false).await;
+    assert!(f.has(cx, "bulk.continue"));
+    drop(hold);
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    assert!(f.has(cx, "bulk.result"));
+}
+
+#[gpui_kit::test]
+async fn prod_needs_the_name(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 2).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    assert!(f.has(cx, "danger.prod"));
+    assert!(!f.has(cx, "confirm.ok"));
+}
+
+#[gpui_kit::test]
+async fn type_to_confirm_is_exact(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 2).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.act(cx, |window, cx| window.input("Products", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    assert!(f.writes().is_empty());
+    assert!(f.has(cx, "danger.ok"));
+}
+
+#[gpui_kit::test]
+async fn delete_reports_the_count_and_reloads(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.tick(cx, "3");
+    let pages = f.docs.pages.lock().unwrap().len();
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert_eq!(f.writes()[0].1, "price:>1");
+    assert!(f.text_of(cx, "bulk.result").contains("Deleted 5"));
+    assert!(f.docs.pages.lock().unwrap().len() > pages);
+    assert!(f.ticked(cx).is_empty());
+    assert!(f.text_of(cx, "documents.status").contains('0'));
+}
+
+#[gpui_kit::test]
+async fn update_sends_filter_and_partial(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    f.type_partial(cx, r#"{"title":"x"}"#);
+    f.bulk_continue(cx);
+    let body = f.text_of(cx, "confirm.body");
+    assert!(
+        body.contains("5") && body.contains("price:>1") && body.contains("Sets: title"),
+        "{body}"
+    );
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    let writes = f.writes();
+    assert_eq!(writes[0].0, "update_by_filter");
+    assert_eq!(writes[0].1, "price:>1");
+    assert_eq!(writes[0].2, json!({"title": "x"}));
+    assert!(f.text_of(cx, "bulk.result").contains("Updated 5"));
+}
+
+#[gpui_kit::test]
+async fn update_with_id_is_refused(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    f.type_partial(cx, r#"{"id":"z","title":"x"}"#);
+    assert!(f.continue_disabled(cx));
+    assert!(f.text_of(cx, "bulk.issues").contains("`id`"));
+}
+
+#[gpui_kit::test]
+async fn update_marks_only_the_keys_present(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    f.type_partial(cx, r#"{"price":"x"}"#);
+    let issues = f.text_of(cx, "bulk.issues");
+    assert!(
+        issues.contains("price") && !issues.contains("title"),
+        "{issues}"
+    );
+    assert!(
+        !f.continue_disabled(cx),
+        "marks advise, §7.8 lets it through"
+    );
+}
+
+// Review focus 2.
+#[gpui_kit::test]
+async fn update_mismatch_stays_open_with_the_warning(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    *f.docs.num_updated.lock().unwrap() = Some(0);
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    f.type_partial(cx, r#"{"price":"x"}"#);
+    f.bulk_continue(cx);
+    f.confirm_delete(cx);
+    f.settle(cx);
+    assert!(f.has(cx, "bulk.continue"), "the dialog stays");
+    let text = f.text_of(cx, "bulk.partial");
+    assert!(text.contains("Updated 0 of 5"), "{text}");
+    assert!(!f.has(cx, "bulk.result"), "not reported as a success");
+}
+
+#[gpui_kit::test]
+async fn update_mismatch_on_prod_comes_back_to_the_dialog(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 5).await;
+    *f.docs.num_updated.lock().unwrap() = Some(0);
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    f.type_partial(cx, r#"{"price":"x"}"#);
+    f.bulk_continue(cx);
+    f.act(cx, |window, cx| window.input("products", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "danger.ok".into(), false).await;
+    f.settle(cx);
+    assert!(f.has(cx, "bulk.continue"));
+    assert!(f.text_of(cx, "bulk.partial").contains("Updated 0 of 5"));
+    assert!(!f.has(cx, "bulk.result"));
+}
+
+#[gpui_kit::test]
+async fn update_invalid_json_disables_continue(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, UPDATE_QUERY, "price:>1");
+    assert!(f.continue_disabled(cx), "{{}} changes nothing");
+    for partial in ["{", "[1]", "{}"] {
+        f.type_partial(cx, partial);
+        assert!(f.continue_disabled(cx), "{partial}");
+    }
+    f.type_partial(cx, r#"{"title":"x"}"#);
+    assert!(!f.continue_disabled(cx));
+}
+
+#[gpui_kit::test]
+async fn locked_profile_unlocks_first_and_sends_nothing_before(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 5;
+    let f = open_profile(cx, plain_schema(), docs, true).await;
+    assert!(f.has(cx, "documents.delete_query.readonly"));
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    assert!(f.has(cx, "danger.input"));
+    assert_eq!(f.counts().len(), 1, "no second count before the unlock");
+    f.click(cx, "danger.input");
+    f.act(cx, |window, cx| window.input("test", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "confirm.ok".into(), true).await;
+    assert_eq!(f.counts().len(), 2);
+    assert!(f.writes().is_empty());
+    f.confirm_delete(cx);
+    assert_eq!(f.writes().len(), 1);
+}
+
+#[gpui_kit::test]
+async fn timeout_uses_the_long_text(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    *f.docs.write_fail.lock().unwrap() = Some((TIMEOUT, String::new()));
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.confirm_delete(cx);
+    f.settle(cx);
+    let text = f.text_of(cx, "bulk.error");
+    assert!(text.contains("did not finish within 30 minutes"), "{text}");
+    assert!(f.has(cx, "bulk.continue"));
+}
+
+#[gpui_kit::test]
+async fn failure_on_prod_shows_in_the_danger_dialog(cx: &mut TestAppContext) {
+    let f = open_prod(cx, 5).await;
+    *f.docs.write_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.act(cx, |window, cx| window.input("products", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    assert!(f.text_of(cx, "danger.error").contains("boom"));
+}
+
+#[gpui_kit::test]
+async fn dialog_buttons_show_their_shortcuts(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    let visual = |f: &Fixture, cx: &mut TestAppContext, id: &'static str, chord: &'static str| {
+        let button = f.act(cx, |window, _| window.find(id).bounds());
+        let kbd = gpui_kit::VisualTestContext::from_window(f.handle.into(), cx)
+            .debug_bounds(chord)
+            .unwrap();
+        assert!(button.contains(&kbd.center()), "{id}");
+    };
+    visual(
+        &f,
+        cx,
+        "documents.delete_query",
+        key("kbd:cmd-shift-k", "kbd:ctrl-shift-k"),
+    );
+    visual(
+        &f,
+        cx,
+        "documents.update_query",
+        key("kbd:cmd-shift-u", "kbd:ctrl-shift-u"),
+    );
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    visual(
+        &f,
+        cx,
+        "bulk.continue",
+        key("kbd:cmd-enter", "kbd:ctrl-enter"),
+    );
+    visual(&f, cx, "bulk.cancel", "kbd:escape");
+}
+
+#[gpui_kit::test]
+async fn short_delete_says_how_many_went(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    *f.docs.filter_short.lock().unwrap() = 2;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.bulk_continue(cx);
+    f.confirm_delete(cx);
+    f.settle(cx);
+    assert!(f.has(cx, "bulk.continue"), "the dialog stays");
+    let text = f.text_of(cx, "bulk.partial");
+    assert!(text.contains("Deleted 3 of 5"), "{text}");
+    assert!(!f.has(cx, "bulk.result"));
+}
+
+#[gpui_kit::test]
+async fn a_draft_is_named_and_goes_only_with_its_row(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.delete_query");
+    f.settle(cx);
+    f.type_bulk_filter(cx, "price:>1");
+    f.wait(cx, 300);
+    f.bulk_continue(cx);
+    assert!(f.text_of(cx, "confirm.body").contains("unsaved"));
+    f.click(cx, "confirm.cancel");
+    wait_for_element(cx, f.handle, "confirm.ok".into(), false).await;
+    f.wait(cx, 1000);
+    assert!(f.dirty(cx), "cancelling changes nothing");
+
+    f.bulk_continue(cx);
+    *f.docs.document_fail.lock().unwrap() = Some((404, "gone".into()));
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert!(!f.has(cx, "documents.inspector"));
+    assert!(!f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn a_draft_of_a_row_that_stayed_is_kept(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.delete_query");
+    f.settle(cx);
+    f.type_bulk_filter(cx, "price:>1");
+    f.wait(cx, 300);
+    f.bulk_continue(cx);
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert!(f.has(cx, "documents.inspector"));
+    assert!(f.inspector_text(cx).contains("\"new\""));
+}
+
+#[gpui_kit::test]
+async fn an_update_never_mentions_a_draft_and_keeps_it(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "documents.update_query");
+    f.settle(cx);
+    f.type_bulk_filter(cx, "price:>1");
+    f.wait(cx, 300);
+    f.type_partial(cx, r#"{"title":"x"}"#);
+    f.bulk_continue(cx);
+    assert!(!f.text_of(cx, "confirm.body").contains("unsaved"));
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert!(f.inspector_text(cx).contains("\"new\""));
+}
+
+#[gpui_kit::test]
+async fn a_clean_inspector_shows_the_stored_document_after_an_update(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.open_document(cx);
+    f.click(cx, "documents.update_query");
+    f.settle(cx);
+    f.type_bulk_filter(cx, "price:>1");
+    f.wait(cx, 300);
+    f.type_partial(cx, r#"{"title":"x"}"#);
+    f.bulk_continue(cx);
+    *f.docs.stored.lock().unwrap() = Some(json!({"id": "3", "title": "x"}));
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert!(f.inspector_text(cx).contains("\"x\""));
+    assert!(!f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn a_clean_inspector_closes_on_a_deleted_document(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.open_document(cx);
+    f.click(cx, "documents.delete_query");
+    f.settle(cx);
+    f.type_bulk_filter(cx, "price:>1");
+    f.wait(cx, 300);
+    f.bulk_continue(cx);
+    assert!(!f.text_of(cx, "confirm.body").contains("unsaved"));
+    *f.docs.document_fail.lock().unwrap() = Some((404, "gone".into()));
+    f.confirm_delete(cx);
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.settle(cx);
+    assert!(!f.has(cx, "documents.inspector"));
+}
+
+#[gpui_kit::test]
+async fn closing_the_dialog_gives_the_keyboard_back(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.press(cx, "escape");
+    wait_for_element(cx, f.handle, "bulk.continue".into(), false).await;
+    f.wait(cx, 1000);
+    f.press(cx, UPDATE_QUERY);
+    assert!(f.has(cx, "bulk.editor"));
+}
+
+#[gpui_kit::test]
+async fn command_enter_continues_from_the_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 5).await;
+    f.bulk(cx, DELETE_QUERY, "price:>1");
+    f.press(cx, SAVE);
+    assert!(f.has(cx, "confirm.ok"));
+}
+
+fn lines(text: &str) -> Vec<serde_json::Value> {
+    text.lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[gpui_kit::test]
+async fn jsonl_copies_the_selection(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.tick(cx, "1");
+    f.tick(cx, "3");
+    f.press(cx, COPY_JSONL);
+    let text = f.clipboard(cx).unwrap();
+    let docs = lines(&text);
+    assert_eq!(
+        docs.iter()
+            .map(|d| d["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["1", "3"]
+    );
+    assert_eq!(*f.docs.export_calls.lock().unwrap(), ["id:[`1`,`3`]"]);
+    assert!(f.docs.document_calls.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn jsonl_of_the_selected_row_when_nothing_is_ticked(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 4);
+    f.press(cx, COPY_JSONL);
+    let docs = lines(&f.clipboard(cx).unwrap());
+    assert_eq!(docs[0]["id"], "4");
+    // One id takes the document endpoint, which also carries the vector fields.
+    assert!(docs[0].get("embedding").is_some());
+    assert!(f.docs.export_calls.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn csv_uses_the_visible_columns_in_order(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.tick(cx, "1");
+    f.tick(cx, "2");
+    f.press(cx, COPY_CSV);
+    let keys = f.column_keys(cx);
+    let text = f.clipboard(cx).unwrap();
+    let rows: Vec<&str> = text.lines().collect();
+    assert_eq!(rows[0], keys.join(","));
+    assert!(!rows[0].contains("__select"));
+    assert_eq!(rows.len(), 3);
+    let cell = |row: &str, key: &str| {
+        row.split(',')
+            .nth(keys.iter().position(|k| k == key).unwrap())
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(cell(rows[1], "title"), "t1");
+    assert_eq!(cell(rows[2], "id"), "2");
+}
+
+#[gpui_kit::test]
+async fn csv_quotes_values(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.stored.lock().unwrap() =
+        Some(json!({"id": "7", "title": "say \"hi\", ok", "price": 1.5}));
+    f.select_row(cx, 7);
+    f.press(cx, COPY_CSV);
+    let text = f.clipboard(cx).unwrap();
+    assert!(text.contains("\"say \"\"hi\"\", ok\""), "{text}");
+    assert!(text.contains("1.5"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn selection_is_batched_for_export(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 250).await;
+    // Long ids, so one filter cannot hold them all.
+    *f.docs.ids.lock().unwrap() = (0..250).map(|i| format!("doc-{i:0>40}")).collect();
+    f.change_schema(cx, plain_schema());
+    f.select_row(cx, 0);
+    f.press(cx, SELECT_ALL);
+    f.press(cx, COPY_JSONL);
+    let calls = f.docs.export_calls.lock().unwrap().clone();
+    assert!(calls.len() >= 2, "{}", calls.len());
+    assert!(calls.iter().all(|c| c.len() < 7_500 * 2));
+    assert_eq!(lines(&f.clipboard(cx).unwrap()).len(), 250);
+}
+
+#[gpui_kit::test]
+async fn backtick_id_uses_the_document_endpoint(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.ids.lock().unwrap() = vec!["a`b".into(), "1".into(), "x*".into()];
+    f.change_schema(cx, plain_schema());
+    f.tick(cx, "a`b");
+    f.tick(cx, "x*");
+    f.tick(cx, "1");
+    f.press(cx, COPY_JSONL);
+    assert_eq!(*f.docs.export_calls.lock().unwrap(), ["id:[`1`]"]);
+    assert_eq!(*f.docs.document_calls.lock().unwrap(), ["a`b", "x*"]);
+    assert_eq!(lines(&f.clipboard(cx).unwrap()).len(), 3);
+}
+
+#[gpui_kit::test]
+async fn dot_ids_are_exported_by_their_own_filter(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.ids.lock().unwrap() = vec![".".into(), "..".into()];
+    f.change_schema(cx, plain_schema());
+    f.tick(cx, ".");
+    f.press(cx, COPY_JSONL);
+    assert_eq!(*f.docs.export_calls.lock().unwrap(), ["id:[`.`]"]);
+    assert!(f.docs.document_calls.lock().unwrap().is_empty());
+}
+
+#[gpui_kit::test]
+async fn copy_error_shows_inline(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.export_fail.lock().unwrap() = Some((500, "boom".into()));
+    f.tick(cx, "1");
+    f.tick(cx, "2");
+    f.press(cx, COPY_JSONL);
+    f.act(cx, |window, _| {
+        assert!(label(window, "documents.copy.error").contains("boom"));
+    });
+    assert_eq!(f.clipboard(cx), None);
+    *f.docs.export_fail.lock().unwrap() = None;
+    f.press(cx, COPY_JSONL);
+    f.act(cx, |window, _| {
+        assert!(window.try_find("documents.copy.error").is_none());
+    });
+}
+
+#[gpui_kit::test]
+async fn curl_for_a_row_has_the_placeholder_key(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 2);
+    f.press(cx, COPY_DOC_CURL);
+    let text = f.clipboard(cx).unwrap();
+    assert!(text.starts_with("curl "), "{text}");
+    assert!(
+        text.contains("/collections/products/documents/2'"),
+        "{text}"
+    );
+    assert!(
+        text.contains("X-TYPESENSE-API-KEY: $TYPESENSE_API_KEY"),
+        "{text}"
+    );
+    assert!(!text.contains("-X"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn curl_for_a_dot_id_is_refused_inline(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.ids.lock().unwrap() = vec!["..".into()];
+    f.change_schema(cx, plain_schema());
+    f.select_row(cx, 0);
+    f.press(cx, COPY_DOC_CURL);
+    assert_eq!(f.clipboard(cx), None);
+    f.act(cx, |window, _| {
+        assert!(!label(window, "documents.copy.error").is_empty());
+    });
+}
+
+#[gpui_kit::test]
+async fn curl_without_a_row_repeats_the_search(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.submit_filter(cx, "price:>1 && title:=a");
+    f.press(cx, COPY_DOC_CURL);
+    let text = f.clipboard(cx).unwrap();
+    assert!(
+        text.contains("/collections/products/documents/search?"),
+        "{text}"
+    );
+    for part in [
+        "q=%2A",
+        "per_page=250",
+        "enable_curations=false",
+        "filter_by=price%3A%3E1%20%26%26%20title%3A%3Da",
+    ] {
+        assert!(text.contains(part), "{part} in {text}");
+    }
+    assert!(!text.contains("sort_by"), "{text}");
+}
+
+#[gpui_kit::test]
+async fn selection_entries_are_disabled_without_rows(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.click(cx, "documents.copy");
+    f.wait_for_menu(cx).await;
+    f.act(cx, |window, cx| {
+        let mut menu = window.within("popup-menu");
+        assert_eq!(menu.find(2).label(), Some("Copy selection as JSONL"));
+        assert_eq!(menu.find(4).label(), Some("Copy as curl"));
+        // A disabled entry does not dismiss the menu.
+        menu.click(2, cx);
+    });
+    f.act(cx, |window, _| {
+        assert!(window.try_find("popup-menu").is_some())
+    });
+    f.act(cx, |window, cx| window.within("popup-menu").click(4, cx));
+    f.act(cx, |window, _| {
+        assert!(window.try_find("popup-menu").is_none())
+    });
+    assert!(f.clipboard(cx).unwrap().contains("documents/search"));
+}
+
+#[gpui_kit::test]
+async fn copy_menu_lists_the_new_shortcuts(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.select_row(cx, 1);
+    f.click(cx, "documents.copy");
+    f.wait_for_menu(cx).await;
+    f.act(cx, |_, _| {});
+    for chord in [
+        key("kbd:alt-cmd-j", "kbd:ctrl-alt-j"),
+        key("kbd:alt-cmd-s", "kbd:ctrl-alt-s"),
+        key("kbd:alt-cmd-u", "kbd:ctrl-alt-u"),
+    ] {
+        gpui_kit::VisualTestContext::from_window(f.handle.into(), cx)
+            .debug_bounds(chord)
+            .unwrap_or_else(|| panic!("no Kbd for {chord}"));
+    }
 }

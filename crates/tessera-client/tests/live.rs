@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use secrecy::SecretString;
-use tessera_client::{Client, ClientOptions, Error, KeyAccess, RaftState};
+use tessera_client::{Client, ClientOptions, DocumentQuery, Error, KeyAccess, RaftState};
 
 fn url() -> String {
     std::env::var("TESSERA_IT_URL").unwrap_or_else(|_| "http://localhost:18108".into())
@@ -479,4 +479,245 @@ async fn live_document_writes() {
     ));
     deleted.unwrap();
     assert!(matches!(again, Err(Error::Http { status: 404, .. })));
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_bulk_by_filter() {
+    use serde_json::json;
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_bulk";
+    let _ = client.delete_collection(name).await;
+    client
+        .create_collection(&json!({"name":name,"fields":[
+            {"name":"n","type":"int32"},{"name":"tag","type":"string"}
+        ]}))
+        .await
+        .unwrap();
+    let docs: String = (0..2500)
+        .map(|i| json!({"id":format!("doc-{i:05}"),"n":i,"tag":"t"}).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let imported = admin_request(
+        reqwest::Method::POST,
+        &format!("/collections/{name}/documents/import?action=create"),
+    )
+    .body(docs)
+    .send()
+    .await
+    .expect("import");
+    assert!(imported.status().is_success());
+    let updated = client
+        .update_by_filter(name, "n:<10", &json!({"tag":"u"}))
+        .await;
+    let wrong_type = client
+        .update_by_filter(name, "n:<10", &json!({"n":"text"}))
+        .await;
+    let unknown = client.delete_by_filter(name, "nope:=1").await;
+    let deleted = client.delete_by_filter(name, "n:<5").await;
+    // 2,000 ids: the filter is well over 4,000 bytes, which GET search refuses.
+    let ids: Vec<String> = (10..2010).map(|i| format!("`doc-{i:05}`")).collect();
+    let filter = format!("id:=[{}]", ids.join(","));
+    assert!(filter.len() > 4000);
+    let many = client.delete_by_filter(name, &filter).await;
+    let left = client.count_documents(name, None).await;
+    let _ = client.delete_collection(name).await;
+    assert_eq!(updated.unwrap(), 10);
+    assert_eq!(wrong_type.unwrap(), 0);
+    assert!(matches!(unknown, Err(Error::Http { status: 400, .. })));
+    assert_eq!(deleted.unwrap(), 5);
+    assert_eq!(many.unwrap(), 2000);
+    assert_eq!(left.unwrap(), 2500 - 5 - 2000);
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_odd_ids_delete_only_themselves() {
+    use serde_json::json;
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_odd_ids";
+    let _ = client.delete_collection(name).await;
+    client
+        .create_collection(&json!({"name":name,"fields":[{"name":"t","type":"string"}]}))
+        .await
+        .unwrap();
+    let odd = ["*", "keep1 ", " lead", "trail ", "  "];
+    let others = ["keep1", "other", ".", ".."];
+    for id in odd.iter().chain(&others) {
+        client
+            .create_document(name, &json!({"id":id,"t":"x"}))
+            .await
+            .unwrap();
+    }
+    for id in odd {
+        client.delete_document(name, id).await.unwrap();
+    }
+    let left = client.count_documents(name, None).await;
+    let bystander = client.document(name, "keep1").await;
+    // A URL cannot hold these two: `..` would reach the collection itself.
+    let dots = [
+        client.delete_document(name, "..").await,
+        client.delete_document(name, ".").await,
+    ];
+    let by_filter = client.delete_by_filter(name, "id:[`.`,`..`]").await;
+    let after = client.count_documents(name, None).await;
+    let _ = client.delete_collection(name).await;
+    assert_eq!(left.unwrap(), others.len() as u64);
+    assert_eq!(bystander.unwrap()["id"], "keep1");
+    for dot in dots {
+        assert!(matches!(dot, Err(Error::UnaddressableId(_))), "{dot:?}");
+    }
+    assert_eq!(by_filter.unwrap(), 2);
+    assert_eq!(after.unwrap(), 2);
+}
+
+/// What "Copy selection" exports for the ids it puts in a filter, `.` and `..` included.
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_export_by_id_filter_returns_only_those() {
+    use serde_json::json;
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_export_ids";
+    let _ = client.delete_collection(name).await;
+    client
+        .create_collection(&json!({"name":name,"fields":[{"name":"t","type":"string"}]}))
+        .await
+        .unwrap();
+    for id in [".", "..", "a", "b"] {
+        client
+            .create_document(name, &json!({"id":id,"t":"x"}))
+            .await
+            .unwrap();
+    }
+    let dot = client.export_documents(name, "id:[`.`]").await;
+    let dots = client.export_documents(name, "id:[`..`]").await;
+    let some = client.export_documents(name, "id:[`a`,`b`]").await;
+    let _ = client.delete_collection(name).await;
+    let ids = |text: String| -> Vec<String> {
+        let mut ids: Vec<String> = text
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["id"].to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(ids(dot.unwrap()), ["\".\""]);
+    assert_eq!(ids(dots.unwrap()), ["\"..\""]);
+    assert_eq!(ids(some.unwrap()), ["\"a\"", "\"b\""]);
+}
+
+/// What the bulk dialog refuses and why: the count and the write disagree on these filters.
+#[tokio::test]
+#[ignore = "needs a Typesense server"]
+async fn live_filters_that_name_everything() {
+    let client = client();
+    let name = "tessera_live_all_filters";
+    let _ = client.delete_collection(name).await;
+    let schema = serde_json::json!({"name": name, "fields": [
+        {"name": "n", "type": "int32"},
+        {"name": "t", "type": "string", "optional": true},
+    ]});
+    client.create_collection(&schema).await.unwrap();
+    let import = "{\"id\":\"1\",\"n\":1}\n{\"id\":\"2\",\"n\":2}\n{\"id\":\"3\",\"n\":3}";
+    let imported = admin_request(
+        reqwest::Method::POST,
+        &format!("/collections/{name}/documents/import?action=create"),
+    )
+    .body(import)
+    .send()
+    .await
+    .expect("import");
+    assert!(imported.status().is_success());
+    let partial = serde_json::json!({"t": "u"});
+
+    let blank_count = client.count_documents(name, Some("  ")).await;
+    let blank_delete = client.delete_by_filter(name, "  ").await;
+    let blank_update = client.update_by_filter(name, "  ", &partial).await;
+    let star_count = client.count_documents(name, Some("*")).await;
+    let star_delete = client.delete_by_filter(name, "*").await;
+    let star_update = client.update_by_filter(name, " * ", &partial).await;
+    let id_count = client.count_documents(name, Some("id:[a,*]")).await;
+    let id_delete = client.delete_by_filter(name, "id:[a,*]").await;
+    let left = client.count_documents(name, None).await;
+    let _ = client.delete_collection(name).await;
+
+    assert_eq!(blank_count.unwrap(), 3);
+    assert_eq!(blank_delete.unwrap(), 0);
+    assert_eq!(blank_update.unwrap(), 0);
+    assert!(matches!(star_count, Err(Error::Http { status: 400, .. })));
+    assert!(matches!(star_delete, Err(Error::Http { status: 400, .. })));
+    assert_eq!(star_update.unwrap(), 3);
+    assert_eq!(id_count.unwrap(), 3);
+    assert_eq!(id_delete.unwrap(), 3);
+    assert_eq!(left.unwrap(), 0);
+}
+
+/// The bulk dialog's preview must be what the write takes, whatever is attached.
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_count_is_what_a_delete_removes_under_a_curation_set() {
+    let client = client();
+    let (name, set) = ("tessera_it_curated", "tessera_it_curated_set");
+    let _ = client.delete_collection(name).await;
+    let rules = [
+        r#"{"items":[{"id":"r","rule":{"query":"*","match":"exact"},"filter_by":"n:<3"}]}"#,
+        r#"{"items":[{"id":"r","rule":{"query":"*","match":"exact"},
+            "excludes":[{"id":"1"},{"id":"2"}]}]}"#,
+        r#"{"items":[{"id":"r","rule":{"query":"*","match":"exact"},
+            "includes":[{"id":"1","position":1}]}]}"#,
+    ];
+    let mut seen = Vec::new();
+    for rule in rules {
+        admin(
+            reqwest::Method::PUT,
+            &format!("/curation_sets/{set}"),
+            Some(rule),
+        )
+        .await;
+        client
+            .create_collection(&serde_json::json!({
+                "name": name,
+                "fields": [{"name": "n", "type": "int32"}],
+                "curation_sets": [set],
+            }))
+            .await
+            .unwrap();
+        let docs: Vec<String> = (1..=12)
+            .map(|i| serde_json::json!({"id": i.to_string(), "n": i}).to_string())
+            .collect();
+        let imported = admin_request(
+            reqwest::Method::POST,
+            &format!("/collections/{name}/documents/import?action=create"),
+        )
+        .body(docs.join("\n"))
+        .send()
+        .await
+        .expect("import");
+        assert!(imported.status().is_success());
+        let counted = client.count_documents(name, Some("n:>5")).await;
+        // The table's page must show the same figure.
+        let query = DocumentQuery {
+            page: 1,
+            per_page: 250,
+            filter_by: Some("n:>5".into()),
+            sort_by: None,
+            exclude_fields: None,
+        };
+        let paged = client.search_documents(name, &query).await;
+        let deleted = client.delete_by_filter(name, "n:>5").await;
+        let _ = client.delete_collection(name).await;
+        let paged = paged.unwrap();
+        assert_eq!(paged.documents.len() as u64, paged.found);
+        seen.push((counted.unwrap(), paged.found, deleted.unwrap()));
+    }
+    admin(
+        reqwest::Method::DELETE,
+        &format!("/curation_sets/{set}"),
+        None,
+    )
+    .await;
+    assert_eq!(seen, [(7, 7, 7), (7, 7, 7), (7, 7, 7)]);
 }

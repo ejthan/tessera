@@ -21,7 +21,7 @@ use rust_i18n::t;
 use serde_json::Value;
 use tessera_client::{Client, Collection, Error};
 use tessera_core::documents::edit::{diff_entries, merge_patch};
-use tessera_core::documents::validate::{IssueSeverity, key_position, validate_document};
+use tessera_core::documents::validate::{DocIssue, IssueSeverity, key_position, validate_document};
 use tessera_widgets::{JsonEditor, JsonEditorEvent, JsonMark, MarkSeverity};
 
 use super::copy::pretty;
@@ -59,6 +59,33 @@ pub enum InspectorMode {
 pub struct DocumentSaved;
 
 impl EventEmitter<DocumentSaved> for Inspector {}
+
+/// The editor marks of `issues` in `text`, and their lines for the list underneath.
+pub(super) fn marks_and_lines(
+    issues: Vec<DocIssue>,
+    text: &str,
+) -> (Vec<JsonMark>, Vec<SharedString>) {
+    let (mut marks, mut lines) = (Vec::new(), Vec::new());
+    for issue in issues {
+        let message = t!(issue.key, detail = issue.detail).to_string();
+        lines.push(format!("{}: {message}", issue.path).into());
+        let key = issue.path.split('[').next().unwrap_or_default();
+        if let Some((line, start, end)) = key_position(text, key) {
+            marks.push(JsonMark {
+                line,
+                start,
+                end,
+                message,
+                severity: match issue.severity {
+                    IssueSeverity::Error => MarkSeverity::Error,
+                    IssueSeverity::Warning => MarkSeverity::Warning,
+                    IssueSeverity::Info => MarkSeverity::Info,
+                },
+            });
+        }
+    }
+    (marks, lines)
+}
 
 /// The last check of the editor's text.
 #[derive(Default)]
@@ -347,27 +374,11 @@ impl Inspector {
         self.check_task = None;
         let text = self.editor.read(cx).text(cx);
         let parsed = serde_json::from_str::<Value>(&text).ok();
-        let (mut marks, mut issues) = (Vec::new(), Vec::new());
-        if let (Some(document), Some(schema)) = (&parsed, &self.schema) {
-            for issue in validate_document(schema, document) {
-                let message = t!(issue.key, detail = issue.detail).to_string();
-                issues.push(format!("{}: {message}", issue.path).into());
-                let key = issue.path.split('[').next().unwrap_or_default();
-                if let Some((line, start, end)) = key_position(&text, key) {
-                    marks.push(JsonMark {
-                        line,
-                        start,
-                        end,
-                        message,
-                        severity: match issue.severity {
-                            IssueSeverity::Error => MarkSeverity::Error,
-                            IssueSeverity::Warning => MarkSeverity::Warning,
-                            IssueSeverity::Info => MarkSeverity::Info,
-                        },
-                    });
-                }
-            }
-        }
+        let found = match (&parsed, &self.schema) {
+            (Some(document), Some(schema)) => validate_document(schema, document),
+            _ => Vec::new(),
+        };
+        let (marks, issues) = marks_and_lines(found, &text);
         self.editor.update(cx, |e, cx| e.set_marks(marks, cx));
         self.check = Check {
             dirty: self.differs(&text, parsed.as_ref()),

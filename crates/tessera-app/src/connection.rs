@@ -433,6 +433,7 @@ pub fn node_error_text(err: &Error, host: &str, profile: &Profile) -> String {
         Error::Tls(detail) => t!("connect.error.tls", host = host, detail = detail).to_string(),
         Error::ReadOnly { method } => t!("connect.error.read_only", method = method).to_string(),
         Error::InvalidKey => t!("connect.error.invalid_key").to_string(),
+        Error::UnaddressableId(id) => t!("connect.error.unaddressable_id", id = id).to_string(),
     }
 }
 

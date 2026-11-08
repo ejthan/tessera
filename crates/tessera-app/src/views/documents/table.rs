@@ -2,6 +2,7 @@
 
 //! The documents table: pages load as they become visible.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -9,11 +10,12 @@ use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::{
-    App, Context, Div, Entity, IntoElement, ParentElement as _, SharedString, Stateful,
+    App, ClickEvent, Context, Div, Entity, IntoElement, ParentElement as _, SharedString, Stateful,
     Styled as _, Task, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
@@ -26,6 +28,7 @@ use tessera_core::profile::Node;
 
 use super::columns::{MIN_WIDTH, visible_columns};
 use super::copy;
+use super::selection::Selection;
 use crate::connection::{ConnectionState, error_text};
 use crate::documents::{DocumentsBackendGlobal, PageResult};
 
@@ -37,6 +40,9 @@ const MAX_INFLIGHT: usize = 4;
 const DEFAULT_WIDTH: f32 = 160.;
 const ID_WIDTH: f32 = 120.;
 const NUMERIC_WIDTH: f32 = 100.;
+/// Column 0 holds the checkboxes; `columns` starts at table column 1.
+const SELECT_COLUMN: usize = 0;
+const SELECT_WIDTH: f32 = 36.;
 /// Where the empty state points to.
 const DOCS_URL: &str = "https://typesense.org/docs/30.2/api/documents.html";
 
@@ -74,6 +80,18 @@ pub struct DocRows {
     pub answered: bool,
     /// A new filter or sort failed; the old rows stay.
     pub query_error: Option<SharedString>,
+    /// The ticked rows.
+    pub selection: Selection,
+    /// How the last delete failed.
+    pub delete_error: Option<SharedString>,
+    /// What the last delete or update by query did.
+    pub bulk_result: Option<SharedString>,
+    /// The last tick ran into `MAX_SELECTION`.
+    pub selection_limit: bool,
+    /// The last range passed over rows that are not loaded.
+    pub selection_unloaded: bool,
+    /// The query changed: what gets ticked on the old rows goes with them.
+    query_changed: bool,
     /// The cached pages belong to the previous query.
     replacing: bool,
     generation: u64,
@@ -101,6 +119,12 @@ impl DocRows {
             first_load: true,
             answered: false,
             query_error: None,
+            selection: Selection::default(),
+            delete_error: None,
+            bulk_result: None,
+            selection_limit: false,
+            selection_unloaded: false,
+            query_changed: false,
             replacing: false,
             generation: 0,
             pages: PageCache::new(PAGE_CACHE),
@@ -126,8 +150,62 @@ impl DocRows {
         self.generation
     }
 
-    /// Starts over with the current query. The old rows stay until it answers.
+    /// A new query has not answered yet, so the rows on screen are not its rows.
+    pub fn query_pending(&self) -> bool {
+        self.query_changed
+    }
+
+    /// Column `col_ix` of the table, unless it is the checkboxes'.
+    pub fn column_at(&self, col_ix: usize) -> Option<&ColumnDef> {
+        self.columns.get(col_ix.checked_sub(1)?)
+    }
+
+    /// Ticks or unticks row `row_ix`, or with `extend` ticks up to it from the anchor.
+    pub fn check(&mut self, row_ix: usize, extend: bool) {
+        self.selection_unloaded = false;
+        if extend {
+            let skipped = Cell::new(false);
+            let mut selection = std::mem::take(&mut self.selection);
+            self.selection_limit = selection.extend(row_ix, |row| {
+                let id = self.row(row).map(|r| r.id.to_string());
+                skipped.set(skipped.get() || id.is_none());
+                id
+            });
+            self.selection = selection;
+            self.selection_unloaded = skipped.get();
+        } else if let Some(id) = self.row(row_ix).map(|r| r.id.clone()) {
+            self.selection_limit = self.selection.toggle(&id, row_ix);
+        }
+    }
+
+    /// Ticks every row of the loaded pages.
+    pub fn check_loaded(&mut self) {
+        let last = (self.found as usize).div_ceil(ROWS_PER_PAGE) as u32;
+        let pages = (1..=last).filter_map(|page| self.pages.get(page));
+        let ids = pages.flat_map(|page| page.rows.iter().map(|r| r.id.to_string()));
+        self.selection_limit = self.selection.add_all(ids);
+        self.selection_unloaded = false;
+    }
+
+    /// Unticks everything.
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+        self.selection_limit = false;
+        self.selection_unloaded = false;
+    }
+
+    /// Starts over with a new query, whose rows the selection does not apply to. The old rows
+    /// stay until it answers.
     pub fn requery(&mut self, cx: &mut Context<TableState<Self>>) {
+        self.clear_selection();
+        self.delete_error = None;
+        self.bulk_result = None;
+        self.query_changed = true;
+        self.reload(cx);
+    }
+
+    /// Asks the same query again; the rows stay until it answers.
+    pub fn reload(&mut self, cx: &mut Context<TableState<Self>>) {
         self.generation += 1;
         self.inflight.clear();
         self.throttle = None;
@@ -200,6 +278,10 @@ impl DocRows {
         }
         self.inflight.remove(&page);
         self.first_load = false;
+        // A refused query answers too: the old rows are then all there is.
+        if std::mem::take(&mut self.query_changed) {
+            self.clear_selection();
+        }
         match result {
             Ok(answer) => {
                 self.answered = true;
@@ -243,20 +325,50 @@ impl DocRows {
     }
 
     fn text(&self, row_ix: usize, col_ix: usize) -> SharedString {
+        if col_ix == SELECT_COLUMN {
+            return SharedString::default();
+        }
         let Some(row) = self.row(row_ix) else {
             return t!("documents.loading_row").to_string().into();
         };
-        self.columns
-            .get(col_ix)
+        self.column_at(col_ix)
             .and_then(|c| row.cells.get(&c.key))
             .map(|cell| SharedString::from(cell.to_string()))
             .unwrap_or_default()
     }
 }
 
+impl DocRows {
+    /// The checkbox of a loaded row. The click is the wrapper's: the checkbox gives no shift
+    /// state, and the cell must not take it.
+    fn render_check(
+        &self,
+        row_ix: usize,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement + use<> {
+        let check = self.row(row_ix).map(|row| {
+            Checkbox::new(SharedString::from(format!("documents.check.{}", row.id)))
+                .accessibility_label(row.id.to_string())
+                .checked(self.selection.contains(&row.id))
+        });
+        div()
+            .id(("documents.select", row_ix))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(move |t, event: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                t.delegate_mut().check(row_ix, event.modifiers().shift);
+                cx.notify();
+            }))
+            .children(check)
+    }
+}
+
 impl TableDelegate for DocRows {
     fn columns_count(&self, _: &App) -> usize {
-        self.columns.len()
+        self.columns.len() + 1
     }
 
     fn rows_count(&self, _: &App) -> usize {
@@ -264,7 +376,15 @@ impl TableDelegate for DocRows {
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
-        let Some(def) = self.columns.get(col_ix) else {
+        if col_ix == SELECT_COLUMN {
+            return Column::new("__select", "")
+                .width(px(SELECT_WIDTH))
+                .fixed_left()
+                .selectable(false)
+                .resizable(false)
+                .p_0();
+        }
+        let Some(def) = self.column_at(col_ix) else {
             return Column::default();
         };
         let default = match (def.key.as_str(), def.numeric) {
@@ -301,7 +421,7 @@ impl TableDelegate for DocRows {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        let Some(key) = self.columns.get(col_ix).map(|c| c.key.clone()) else {
+        let Some(key) = self.column_at(col_ix).map(|c| c.key.clone()) else {
             return;
         };
         self.sort = match sort {
@@ -316,10 +436,14 @@ impl TableDelegate for DocRows {
         &mut self,
         row_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
         match self.row(row_ix) {
-            Some(row) => div().id(SharedString::from(format!("documents.row.{}", row.id))),
+            Some(row) => div()
+                .id(SharedString::from(format!("documents.row.{}", row.id)))
+                .when(self.selection.contains(&row.id), |tr| {
+                    tr.bg(cx.theme().tokens.table_active)
+                }),
             None => div().id(("documents.placeholder", row_ix)),
         }
     }
@@ -331,8 +455,11 @@ impl TableDelegate for DocRows {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        if col_ix == SELECT_COLUMN {
+            return self.render_check(row_ix, cx).into_any_element();
+        }
         let text = self.text(row_ix, col_ix);
-        let (Some(row), Some(column)) = (self.row(row_ix), self.columns.get(col_ix)) else {
+        let (Some(row), Some(column)) = (self.row(row_ix), self.column_at(col_ix)) else {
             return div()
                 .text_color(cx.theme().muted_foreground)
                 .child(text)
@@ -432,7 +559,7 @@ impl TableDelegate for DocRows {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
-        copy::entries(menu)
+        copy::entries(menu, true)
     }
 
     fn loading(&self, _: &App) -> bool {

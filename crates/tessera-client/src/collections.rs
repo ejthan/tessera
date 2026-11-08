@@ -6,6 +6,8 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::Error;
+
 /// Everything but the unreserved characters, so a name stays one path segment.
 pub(crate) const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -13,9 +15,22 @@ pub(crate) const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 
+/// Refuses what a URL cannot hold as one segment: it drops `.` and `..`, percent-encoded or
+/// not, and an empty one is the parent, so the request would address something else.
+pub(crate) fn addressable(segment: &str) -> Result<(), Error> {
+    if matches!(segment, "" | "." | "..") {
+        return Err(Error::UnaddressableId(segment.to_string()));
+    }
+    Ok(())
+}
+
 /// `collections/{name}{rest}` with `name` encoded as one path segment.
-pub(crate) fn collection_path(name: &str, rest: &str) -> String {
-    format!("collections/{}{rest}", utf8_percent_encode(name, SEGMENT))
+pub fn collection_path(name: &str, rest: &str) -> Result<String, Error> {
+    addressable(name)?;
+    Ok(format!(
+        "collections/{}{rest}",
+        utf8_percent_encode(name, SEGMENT)
+    ))
 }
 
 /// A collection schema. Attributes this version does not know are kept in `extra`.

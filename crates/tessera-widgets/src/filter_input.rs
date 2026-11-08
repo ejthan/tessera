@@ -249,6 +249,14 @@ impl FilterInput {
         self.state.update(cx, |state, cx| state.focus(window, cx));
     }
 
+    /// Puts the keyboard focus in the input, with the cursor behind the text.
+    pub fn focus_end(&self, window: &mut Window, cx: &mut App) {
+        self.state.update(cx, |state, cx| {
+            let end = state.text().offset_to_position(state.value().len());
+            state.set_cursor_position(end, window, cx);
+        });
+    }
+
     /// The editor underneath, for reading its completion menu.
     pub fn state(&self) -> &Entity<EditorState> {
         &self.state

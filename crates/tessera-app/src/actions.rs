@@ -51,11 +51,21 @@ gpui_kit::actions!(
         GoToId,
         CopyCell,
         CopyRowJson,
+        CopyJsonl,
+        CopyCsv,
+        CopyCurl,
         NewDocument,
         ReviewDocument,
         ToggleSaveMode,
         RevertDocument,
-        ApplyDocument
+        ApplyDocument,
+        ToggleRow,
+        ExtendRows,
+        SelectLoaded,
+        DeleteDocuments,
+        DeleteByQuery,
+        UpdateByQuery,
+        BulkContinue
     ]
 );
 
@@ -82,6 +92,10 @@ pub const DOCUMENTS_TABLE: &str = "Documents > DataTable";
 pub const INSPECTOR: &str = "Inspector";
 /// Key context of the inspector's editor, whose own ⌘↩ / Ctrl+↩ would add a line.
 const INSPECTOR_EDITOR: &str = "Inspector > Input";
+/// Key context of the delete and update by query dialog.
+pub const BULK_DIALOG: &str = "BulkDialog";
+/// An input in that dialog, which has its own ⌘↩.
+const BULK_INPUT: &str = "BulkDialog > Input";
 /// Key context of the document review.
 pub const DOCUMENT_REVIEW: &str = "DocumentReview";
 /// Key context of the collections table; Enter opens the selected row only there, so a
@@ -219,6 +233,18 @@ const COPY_ROW: &str = "cmd-alt-c";
 #[cfg(not(target_os = "macos"))]
 const COPY_ROW: &str = "ctrl-alt-c";
 #[cfg(target_os = "macos")]
+const COPY_JSONL: &str = "cmd-alt-j";
+#[cfg(not(target_os = "macos"))]
+const COPY_JSONL: &str = "ctrl-alt-j";
+#[cfg(target_os = "macos")]
+const COPY_CSV: &str = "cmd-alt-s";
+#[cfg(not(target_os = "macos"))]
+const COPY_CSV: &str = "ctrl-alt-s";
+#[cfg(target_os = "macos")]
+const COPY_DOC_CURL: &str = "cmd-alt-u";
+#[cfg(not(target_os = "macos"))]
+const COPY_DOC_CURL: &str = "ctrl-alt-u";
+#[cfg(target_os = "macos")]
 const SAVE_MODE: &str = "cmd-shift-m";
 #[cfg(not(target_os = "macos"))]
 const SAVE_MODE: &str = "ctrl-shift-m";
@@ -226,6 +252,18 @@ const SAVE_MODE: &str = "ctrl-shift-m";
 const REVERT: &str = "cmd-shift-r";
 #[cfg(not(target_os = "macos"))]
 const REVERT: &str = "ctrl-shift-r";
+#[cfg(target_os = "macos")]
+const SELECT_ALL: &str = "cmd-a";
+#[cfg(not(target_os = "macos"))]
+const SELECT_ALL: &str = "ctrl-a";
+#[cfg(target_os = "macos")]
+const DELETE_QUERY: &str = "cmd-shift-k";
+#[cfg(not(target_os = "macos"))]
+const DELETE_QUERY: &str = "ctrl-shift-k";
+#[cfg(target_os = "macos")]
+const UPDATE_QUERY: &str = "cmd-shift-u";
+#[cfg(not(target_os = "macos"))]
+const UPDATE_QUERY: &str = "ctrl-shift-u";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -292,6 +330,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(TOGGLE_INSPECTOR, ToggleInspector, Some(DOCUMENTS)),
         KeyBinding::new(GO_TO_ID, GoToId, Some(DOCUMENTS)),
         KeyBinding::new(COPY_ROW, CopyRowJson, Some(DOCUMENTS)),
+        KeyBinding::new(COPY_JSONL, CopyJsonl, Some(DOCUMENTS)),
+        KeyBinding::new(COPY_CSV, CopyCsv, Some(DOCUMENTS)),
+        KeyBinding::new(COPY_DOC_CURL, CopyCurl, Some(DOCUMENTS)),
         // The same chord as New collection, which is bound only in COLLECTIONS.
         KeyBinding::new(NEW_COLLECTION, NewDocument, Some(DOCUMENTS)),
         KeyBinding::new(SAVE, ReviewDocument, Some(INSPECTOR)),
@@ -302,11 +343,20 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", OpenDocument, Some(DOCUMENTS_TABLE)),
         // Only on the table: elsewhere ⌘C copies the selected text.
         KeyBinding::new(COPY_CELL, CopyCell, Some(DOCUMENTS_TABLE)),
+        // Only on the table: in an input these are text and select all.
+        KeyBinding::new("space", ToggleRow, Some(DOCUMENTS_TABLE)),
+        KeyBinding::new("shift-space", ExtendRows, Some(DOCUMENTS_TABLE)),
+        KeyBinding::new(SELECT_ALL, SelectLoaded, Some(DOCUMENTS_TABLE)),
         // Schema actions must not fire from the documents view, where they are not shown.
         KeyBinding::new(EDIT, NoAction, Some(DOCUMENTS)),
         KeyBinding::new(CLONE, NoAction, Some(DOCUMENTS)),
         KeyBinding::new(TRUNCATE, NoAction, Some(DOCUMENTS)),
-        KeyBinding::new(DELETE, NoAction, Some(DOCUMENTS)),
+        // Deeper than COLLECTION, so here ⌘⌫ never reaches the collection's delete.
+        KeyBinding::new(DELETE, DeleteDocuments, Some(DOCUMENTS)),
+        KeyBinding::new(DELETE_QUERY, DeleteByQuery, Some(DOCUMENTS)),
+        KeyBinding::new(UPDATE_QUERY, UpdateByQuery, Some(DOCUMENTS)),
+        KeyBinding::new(SAVE, BulkContinue, Some(BULK_DIALOG)),
+        KeyBinding::new(SAVE, BulkContinue, Some(BULK_INPUT)),
         KeyBinding::new(SHOW_FORM, ShowForm, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SHOW_JSON, ShowJson, Some(SCHEMA_DIALOG)),
         KeyBinding::new(SAVE, SubmitSchema, Some(SCHEMA_DIALOG)),

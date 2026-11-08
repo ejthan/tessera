@@ -78,6 +78,47 @@ pub trait DocumentsBackend: Send + Sync {
         id: String,
         patch: Value,
     ) -> BoxFuture<Result<Value, Error>>;
+
+    /// Deletes document `id`.
+    fn delete(
+        &self,
+        client: Client,
+        collection: String,
+        id: String,
+    ) -> BoxFuture<Result<(), Error>>;
+
+    /// Deletes the documents matching `filter` and answers how many went.
+    fn delete_by_filter(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+    ) -> BoxFuture<Result<u64, Error>>;
+
+    /// How many documents match `filter`.
+    fn count(
+        &self,
+        client: Client,
+        collection: String,
+        filter: Option<String>,
+    ) -> BoxFuture<Result<u64, Error>>;
+
+    /// Merges `partial` into the documents matching `filter` and answers how many took it.
+    fn update_by_filter(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+        partial: Value,
+    ) -> BoxFuture<Result<u64, Error>>;
+
+    /// The documents matching `filter` as JSONL, as the server exports them.
+    fn export(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+    ) -> BoxFuture<Result<String, Error>>;
 }
 
 /// The backend the views use.
@@ -155,6 +196,56 @@ impl DocumentsBackend for TokioBackend {
         patch: Value,
     ) -> BoxFuture<Result<Value, Error>> {
         self.run(async move { client.patch_document(&collection, &id, &patch).await })
+    }
+
+    fn delete(
+        &self,
+        client: Client,
+        collection: String,
+        id: String,
+    ) -> BoxFuture<Result<(), Error>> {
+        self.run(async move { client.delete_document(&collection, &id).await })
+    }
+
+    fn delete_by_filter(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+    ) -> BoxFuture<Result<u64, Error>> {
+        self.run(async move { client.delete_by_filter(&collection, &filter).await })
+    }
+
+    fn count(
+        &self,
+        client: Client,
+        collection: String,
+        filter: Option<String>,
+    ) -> BoxFuture<Result<u64, Error>> {
+        self.run(async move { client.count_documents(&collection, filter.as_deref()).await })
+    }
+
+    fn update_by_filter(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+        partial: Value,
+    ) -> BoxFuture<Result<u64, Error>> {
+        self.run(async move {
+            client
+                .update_by_filter(&collection, &filter, &partial)
+                .await
+        })
+    }
+
+    fn export(
+        &self,
+        client: Client,
+        collection: String,
+        filter: String,
+    ) -> BoxFuture<Result<String, Error>> {
+        self.run(async move { client.export_documents(&collection, &filter).await })
     }
 }
 
