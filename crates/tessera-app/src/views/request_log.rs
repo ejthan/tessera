@@ -3,6 +3,8 @@
 //! The request log panel in the bottom dock: filters, the table of requests and the detail
 //! of the selected one.
 
+use std::cell::Cell;
+
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
@@ -11,24 +13,28 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, h_resizable,
-    resizable_panel, v_flex,
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, WindowExt as _, h_flex,
+    h_resizable, resizable_panel, v_flex,
 };
 use gpui_kit::{
     App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, ParentElement as _, Render, SharedString, Stateful, Styled as _, Subscription,
-    Task, Window, div, prelude::*, px,
+    Task, WeakEntity, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
-use tessera_client::Method;
-use tessera_core::log::{Filter, LogEntry};
+use tessera_client::{FULL_BODY_MAX, Method};
+use tessera_core::log::{BodyPart, Filter, LogEntry};
 use tessera_core::{curl, redact};
+use tessera_widgets::BodyView;
 use uuid::Uuid;
 
+use super::env_badge;
 use super::request_detail::{self, Detail};
-use crate::actions::CopyAsCurl;
+use crate::actions::{CopyAsCurl, REQUEST_LOG, ShowFullBody};
 use crate::state::AppState;
 
+/// Part of the window a full body's dialog takes.
+const FULL_VIEW_SHARE: f32 = 0.8;
 /// Initial width of the detail split.
 const DETAIL_WIDTH: f32 = 420.;
 /// The methods the method menu offers.
@@ -250,6 +256,9 @@ pub struct RequestLogPanel {
     selected: Option<u64>,
     detail: Option<Detail>,
     detail_task: Option<Task<()>>,
+    /// The dialog's view of a full body. The dialog owns it, so closing frees the text.
+    full_view: Option<WeakEntity<BodyView>>,
+    full_task: Option<Task<()>>,
     /// What the rows were built from; an unchanged stamp skips the rebuild.
     stamp: Option<Stamp>,
     focus_handle: FocusHandle,
@@ -283,6 +292,8 @@ impl RequestLogPanel {
             selected: None,
             detail: None,
             detail_task: None,
+            full_view: None,
+            full_task: None,
             stamp: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -412,6 +423,168 @@ impl RequestLogPanel {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// The dialog's view of a full body, while the dialog is open.
+    pub fn full_view(&self) -> Option<Entity<BodyView>> {
+        self.full_view.as_ref()?.upgrade()
+    }
+
+    /// Opens the selected entry's response if its full text is kept, else its request.
+    pub fn show_full_body(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else {
+            return;
+        };
+        let log = self.state.read(cx).log();
+        let kept = detail
+            .cut
+            .iter()
+            .map(|(part, _)| *part)
+            .find(|part| log.full_body(detail.id, *part).is_some());
+        if let Some(part) = kept {
+            self.open_full(part, window, cx);
+        }
+    }
+
+    /// Shows `part` of the selected entry in a dialog, masked off the UI thread. An evicted body
+    /// opens nothing: its place in the detail says so.
+    fn open_full(&mut self, part: BodyPart, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else {
+            return;
+        };
+        let state = self.state.read(cx);
+        let (Some(text), Some(entry)) = (state.log().full_body(id, part), state.log().get(id))
+        else {
+            return;
+        };
+        let name = entry.connection_name.to_string();
+        let open = state.connections.iter().map(|c| &c.read(cx).profile);
+        let env = open
+            .filter(|p| p.id == entry.connection)
+            .map(|p| env_badge::label(&p.environment))
+            .next();
+        let connection = env.map_or_else(|| name.clone(), |env| format!("{name} · {env}"));
+        let title = SharedString::from(
+            match part {
+                BodyPart::Response => t!("log.detail.full_response", connection = connection),
+                BodyPart::Request => t!("log.detail.full_request", connection = connection),
+            }
+            .to_string(),
+        );
+        let view = cx.new(|cx| BodyView::new(window, cx));
+        self.full_view = Some(view.downgrade());
+        let target = view.downgrade();
+        // Once: paging walks this text and masks nothing again.
+        self.full_task = Some(cx.spawn_in(window, async move |_, cx| {
+            let masked = cx
+                .background_spawn(async move { redact::json(&text) })
+                .await;
+            target
+                .update_in(cx, |v, window, cx| v.set_body(masked.into(), window, cx))
+                .ok();
+        }));
+        let viewport = window.viewport_size();
+        let first_build = Cell::new(true);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if first_build.replace(false) {
+                // So its paging shortcuts work from the start.
+                view.read(cx).focus_handle(cx).focus(window, cx);
+            }
+            dialog
+                .title(
+                    div()
+                        .id("log.full.title")
+                        .test_support()
+                        .aria_label(title.clone())
+                        .child(title.clone()),
+                )
+                .w(viewport.width * FULL_VIEW_SHARE)
+                .child(
+                    div()
+                        .h(viewport.height * FULL_VIEW_SHARE)
+                        .child(view.clone()),
+                )
+        });
+    }
+
+    /// The Full body buttons of the selected entry, or why a text is not there.
+    fn full_body_bar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let detail = self.detail.as_ref()?;
+        if detail.cut.is_empty() {
+            return None;
+        }
+        let log = self.state.read(cx).log();
+        let kept: Vec<BodyPart> = detail
+            .cut
+            .iter()
+            .map(|(part, _)| *part)
+            .filter(|part| log.full_body(detail.id, *part).is_some())
+            .collect();
+        let missing = detail.cut.iter().filter(|(part, _)| !kept.contains(part));
+        let too_large = missing.clone().any(|(_, len)| *len > FULL_BODY_MAX);
+        let gone = missing.into_iter().any(|(_, len)| *len <= FULL_BODY_MAX);
+        let muted = cx.theme().muted_foreground;
+        let note = move |id: &'static str, text: String| {
+            let text = SharedString::from(text);
+            div()
+                .id(id)
+                .test_support()
+                .aria_label(text.clone())
+                .text_color(muted)
+                .child(text)
+        };
+        let buttons: Vec<_> = kept
+            .iter()
+            .enumerate()
+            .map(|(index, part)| {
+                let part = *part;
+                let (id, label) = match part {
+                    BodyPart::Response => {
+                        ("log.detail.full.response", t!("log.detail.show_response"))
+                    }
+                    BodyPart::Request => ("log.detail.full.request", t!("log.detail.show_request")),
+                };
+                // The shortcut opens the first one, so only that one shows it.
+                let kbd = (index == 0)
+                    .then(|| Kbd::binding_for_action(&ShowFullBody, Some(REQUEST_LOG), window))
+                    .flatten();
+                Button::new(id)
+                    .ghost()
+                    .xsmall()
+                    .label(label.to_string())
+                    .children(kbd)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_full(part, window, cx);
+                    }))
+            })
+            .collect();
+        Some(
+            h_flex()
+                .flex_none()
+                .flex_wrap()
+                .gap_2()
+                .px_3()
+                .pt_1()
+                .items_center()
+                .text_xs()
+                .children(buttons)
+                .when(gone, |el| {
+                    el.child(note(
+                        "log.detail.full_gone",
+                        t!("log.detail.full_gone").to_string(),
+                    ))
+                })
+                .when(too_large, |el| {
+                    el.child(note(
+                        "log.detail.full_too_large",
+                        t!("log.detail.full_too_large").to_string(),
+                    ))
+                }),
+        )
     }
 
     fn deselect(&mut self, cx: &mut Context<Self>) {
@@ -601,6 +774,7 @@ impl Panel for RequestLogPanel {
 
 impl Render for RequestLogPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let full_body = self.full_body_bar(window, cx);
         let filters = self.render_filters(window, cx);
         let table = DataTable::new(&self.table)
             .xsmall()
@@ -610,6 +784,7 @@ impl Render for RequestLogPanel {
             .id("dock.bottom")
             .test_support()
             .track_focus(&self.focus_handle)
+            .key_context(REQUEST_LOG)
             .size_full()
             .child(filters)
             .child(
@@ -622,10 +797,20 @@ impl Render for RequestLogPanel {
                                 .size(px(DETAIL_WIDTH))
                                 .border_l_1()
                                 .border_color(cx.theme().border)
-                                .child(request_detail::render(self.detail.as_ref(), cx)),
+                                .child(
+                                    v_flex().size_full().children(full_body).child(
+                                        div().flex_1().min_h_0().child(request_detail::render(
+                                            self.detail.as_ref(),
+                                            cx,
+                                        )),
+                                    ),
+                                ),
                         ),
                 ),
             )
+            .on_action(cx.listener(|this, _: &ShowFullBody, window, cx| {
+                this.show_full_body(window, cx);
+            }))
     }
 }
 

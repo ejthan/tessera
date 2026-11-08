@@ -56,7 +56,7 @@ struct Provider {
 }
 
 /// Completions showing `label` and replacing `range` with `new_text`.
-fn response(range: Range, candidates: Vec<(String, String)>) -> CompletionResponse {
+pub(crate) fn response(range: Range, candidates: Vec<(String, String)>) -> CompletionResponse {
     let item = |(label, new_text)| CompletionItem {
         label,
         text_edit: Some(CompletionTextEdit::Edit(TextEdit { range, new_text })),

@@ -37,7 +37,7 @@ use tessera_core::search::params::{
     ParamError, SearchDraft, SideEffect, params_text, parse_params, side_effects, to_pairs,
 };
 use tessera_core::search::results::{ItemError, MultiResult, SearchResult};
-use tessera_widgets::{BodyView, JsonEditor, JsonEditorEvent};
+use tessera_widgets::{BodyView, JsonEditor, JsonEditorEvent, NextChunk, PreviousChunk};
 
 use self::export::ExportState;
 use self::form::{FormEvent, SearchForm};
@@ -980,6 +980,12 @@ impl Render for SearchWorkbench {
             }))
             .on_action(cx.listener(|this, _: &ShowRawResult, window, cx| {
                 this.show_view(ResultView::Raw, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousChunk, window, cx| {
+                this.raw.update(cx, |r, cx| r.previous_chunk(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &NextChunk, window, cx| {
+                this.raw.update(cx, |r, cx| r.next_chunk(window, cx));
             }))
             .on_action(cx.listener(|this, _: &ToggleInstant, _, cx| this.toggle_instant(cx)))
             .on_action(cx.listener(|this, _: &FocusQuery, window, cx| this.focus_query(window, cx)))

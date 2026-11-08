@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use secrecy::SecretString;
-use tessera_client::{Client, ClientOptions, DocumentQuery, Error, RequestEvent, RequestHook};
+use tessera_client::{
+    BODY_LIMIT, Client, ClientOptions, DocumentQuery, Error, RequestEvent, RequestHook,
+};
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -198,6 +200,38 @@ async fn quiet_client_logs_size_but_no_body() {
     assert!(events[1].response_body.is_none());
     assert_eq!(events[1].size, Some(SEARCH.len() as u64));
     assert_eq!(events[1].status, Some(200));
+}
+
+#[tokio::test]
+async fn quiet_client_keeps_no_full_body() {
+    let server = MockServer::start().await;
+    let long = SEARCH.replacen(
+        "\"found\":2",
+        &format!("\"pad\":\"{}\",\"found\":2", "a".repeat(BODY_LIMIT)),
+        1,
+    );
+    mock(&server, "/collections/c/documents/search", &long).await;
+    let events = Arc::new(Mutex::new(Vec::<RequestEvent>::new()));
+    let sink = events.clone();
+    let hook: RequestHook = Arc::new(move |e: &RequestEvent| sink.lock().unwrap().push(e.clone()));
+    let plain = client(&server.uri()).with_hook(hook);
+    let query = DocumentQuery {
+        page: 1,
+        per_page: 10,
+        filter_by: None,
+        sort_by: None,
+        exclude_fields: None,
+    };
+    plain.search_documents("c", &query).await.unwrap();
+    plain
+        .without_response_bodies()
+        .search_documents("c", &query)
+        .await
+        .unwrap();
+    let events = events.lock().unwrap();
+    let kept = events[0].response_body.as_ref().unwrap();
+    assert_eq!(kept.full.as_deref(), Some(long.as_str()));
+    assert!(events[1].response_body.is_none());
 }
 
 #[tokio::test]

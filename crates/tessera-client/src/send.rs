@@ -29,6 +29,24 @@ impl Client {
         body: Option<&Value>,
         timeout: Option<Duration>,
     ) -> Result<(u16, String), Error> {
+        let body = body.map(|body| (body.to_string(), "application/json"));
+        let (status, _, text) = self
+            .send_with(node, method, path, query, body, timeout)
+            .await?;
+        Ok((status, text))
+    }
+
+    /// [`Self::send`] with the body already serialized under its content type, returning the
+    /// response headers too. Header values that are not UTF-8 show lossily.
+    pub(crate) async fn send_with(
+        &self,
+        node: usize,
+        method: Method,
+        path: &str,
+        query: Option<&str>,
+        body: Option<(String, &'static str)>,
+        timeout: Option<Duration>,
+    ) -> Result<(u16, Vec<(String, String)>, String), Error> {
         if self.is_read_only()
             && !crate::READ_METHODS.contains(&method)
             && !(self.read_post && method == Method::POST)
@@ -47,21 +65,18 @@ impl Client {
         key_header.set_sensitive(true);
         let mut request_headers = Vec::new();
         // Event copies of the body are only made when someone listens.
-        let body = body.map(Value::to_string);
         let request_body = self
             .hook
             .as_ref()
-            .and_then(|_| body.as_deref().map(Body::new));
+            .and_then(|_| body.as_ref().map(|(text, _)| Body::new(text)));
         let mut request = self
             .http
             .request(method.clone(), url.clone())
             .header("X-TYPESENSE-API-KEY", key_header)
             .timeout(timeout.unwrap_or(self.timeout));
-        if let Some(body) = body {
-            request_headers.push(("content-type".to_string(), "application/json".to_string()));
-            request = request
-                .header("content-type", "application/json")
-                .body(body);
+        if let Some((body, content_type)) = body {
+            request_headers.push(("content-type".to_string(), content_type.to_string()));
+            request = request.header("content-type", content_type).body(body);
         }
         let id = next_id();
         let started_at = SystemTime::now();
@@ -72,8 +87,16 @@ impl Client {
             let response = request.send().await.map_err(Error::from_reqwest)?;
             let code = response.status().as_u16();
             status = Some(code);
+            let headers = response
+                .headers()
+                .iter()
+                .map(|(name, value)| {
+                    let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
+                    (name.to_string(), value)
+                })
+                .collect();
             let text = response.text().await.map_err(Error::from_reqwest)?;
-            Ok((code, text))
+            Ok((code, headers, text))
         }
         .await;
         let duration = start.elapsed();
@@ -85,7 +108,7 @@ impl Client {
             "typesense request"
         );
         if let Some(hook) = &self.hook {
-            let text = result.as_ref().ok().map(|(_, text)| text);
+            let text = result.as_ref().ok().map(|(_, _, text)| text);
             hook(&RequestEvent {
                 id,
                 started_at,

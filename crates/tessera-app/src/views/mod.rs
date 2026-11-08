@@ -5,6 +5,7 @@
 pub mod collection_danger;
 pub mod collections_list;
 pub mod connect_dialog;
+pub mod console;
 pub mod dock;
 pub mod documents;
 pub mod env_badge;

@@ -5,6 +5,7 @@
 use gpui_kit::base::actions::{SelectDown, SelectUp};
 use gpui_kit::component::dock::{ClosePanel, ToggleZoom};
 use gpui_kit::{App, KeyBinding, NoAction};
+use tessera_widgets::{BODY_VIEW, NextChunk, PreviousChunk};
 
 gpui_kit::actions!(
     tessera,
@@ -68,6 +69,17 @@ gpui_kit::actions!(
         UpdateByQuery,
         BulkContinue,
         OpenSearchTab,
+        OpenConsoleTab,
+        StopWaiting,
+        RemoveBodyFile,
+        ShowResponseBody,
+        ShowResponseHeaders,
+        ShowFullBody,
+        SendRequest,
+        AddQueryRow,
+        AttachFile,
+        FavoriteRequest,
+        RevealSecrets,
         RunSearch,
         ShowHits,
         ShowRawResult,
@@ -142,7 +154,13 @@ const WORKBENCH_INPUT: &str = "Workbench > Input";
 pub const CONDITION_ROW: &str = "ConditionRow";
 /// The value input of that row.
 const CONDITION_INPUT: &str = "ConditionRow > Input";
-/// Key context of a list in a search tab's toolbar.
+/// Key context of the request log panel.
+pub const REQUEST_LOG: &str = "RequestLog";
+/// Key context of the raw console.
+pub const CONSOLE: &str = "Console";
+/// Key context of an input in the console, where ⌘↩ / Ctrl+↩ still sends.
+const CONSOLE_INPUT: &str = "Console > Input";
+/// Key context of a list in a toolbar.
 pub const QUERY_LIST: &str = "QueryList";
 /// The filter of that list, which keeps the focus while the arrows move the selection.
 const QUERY_LIST_INPUT: &str = "QueryList > Input";
@@ -306,6 +324,34 @@ const UPDATE_QUERY: &str = "cmd-shift-u";
 #[cfg(not(target_os = "macos"))]
 const UPDATE_QUERY: &str = "ctrl-shift-u";
 #[cfg(target_os = "macos")]
+const STOP_WAITING: &str = "alt-cmd-.";
+#[cfg(not(target_os = "macos"))]
+const STOP_WAITING: &str = "ctrl-alt-.";
+#[cfg(target_os = "macos")]
+const REMOVE_FILE: &str = "alt-cmd-o";
+#[cfg(not(target_os = "macos"))]
+const REMOVE_FILE: &str = "ctrl-alt-o";
+#[cfg(target_os = "macos")]
+const PREVIOUS_CHUNK: &str = "alt-cmd-[";
+#[cfg(not(target_os = "macos"))]
+const PREVIOUS_CHUNK: &str = "ctrl-alt-[";
+#[cfg(target_os = "macos")]
+const NEXT_CHUNK: &str = "alt-cmd-]";
+#[cfg(not(target_os = "macos"))]
+const NEXT_CHUNK: &str = "ctrl-alt-]";
+#[cfg(target_os = "macos")]
+const SHOW_FULL_BODY: &str = "cmd-shift-b";
+#[cfg(not(target_os = "macos"))]
+const SHOW_FULL_BODY: &str = "ctrl-shift-b";
+#[cfg(target_os = "macos")]
+const OPEN_CONSOLE: &str = "cmd-shift-y";
+#[cfg(not(target_os = "macos"))]
+const OPEN_CONSOLE: &str = "ctrl-shift-y";
+#[cfg(target_os = "macos")]
+const ADD_QUERY_ROW: &str = "cmd-shift-a";
+#[cfg(not(target_os = "macos"))]
+const ADD_QUERY_ROW: &str = "ctrl-shift-a";
+#[cfg(target_os = "macos")]
 const OPEN_SEARCH: &str = "cmd-shift-e";
 #[cfg(not(target_os = "macos"))]
 const OPEN_SEARCH: &str = "ctrl-shift-e";
@@ -464,6 +510,27 @@ pub fn bind_keys(cx: &mut App) {
         // Deeper than the dialog, so in the last row ⌘↩ adds a field instead of creating.
         KeyBinding::new(SAVE, AddField, Some(SCHEMA_LAST_FIELD)),
         KeyBinding::new(OPEN_SEARCH, OpenSearchTab, None),
+        KeyBinding::new(OPEN_CONSOLE, OpenConsoleTab, None),
+        KeyBinding::new(SHOW_FULL_BODY, ShowFullBody, Some(REQUEST_LOG)),
+        KeyBinding::new(LOCK_AGAIN, LockAgain, Some(CONSOLE)),
+        KeyBinding::new(SAVE, SendRequest, Some(CONSOLE)),
+        KeyBinding::new(SAVE, SendRequest, Some(CONSOLE_INPUT)),
+        KeyBinding::new(ADD_QUERY_ROW, AddQueryRow, Some(CONSOLE)),
+        KeyBinding::new(STOP_WAITING, StopWaiting, Some(CONSOLE)),
+        KeyBinding::new(REMOVE_FILE, RemoveBodyFile, Some(CONSOLE)),
+        KeyBinding::new(SHOW_HITS, ShowResponseBody, Some(CONSOLE)),
+        KeyBinding::new(SHOW_RAW, ShowResponseHeaders, Some(CONSOLE)),
+        KeyBinding::new(PREVIOUS_CHUNK, PreviousChunk, Some(BODY_VIEW)),
+        KeyBinding::new(NEXT_CHUNK, NextChunk, Some(BODY_VIEW)),
+        KeyBinding::new(PREVIOUS_CHUNK, PreviousChunk, Some(CONSOLE)),
+        KeyBinding::new(NEXT_CHUNK, NextChunk, Some(CONSOLE)),
+        KeyBinding::new(PREVIOUS_CHUNK, PreviousChunk, Some(WORKBENCH)),
+        KeyBinding::new(NEXT_CHUNK, NextChunk, Some(WORKBENCH)),
+        KeyBinding::new(OPEN_SAVED, AttachFile, Some(CONSOLE)),
+        KeyBinding::new(TOGGLE_FAVORITE, FavoriteRequest, Some(CONSOLE)),
+        KeyBinding::new(TOGGLE_KEY, RevealSecrets, Some(CONSOLE)),
+        KeyBinding::new(OPEN_HISTORY, OpenHistory, Some(CONSOLE)),
+        KeyBinding::new(COPY_DOC_CURL, CopyCurl, Some(CONSOLE)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(WORKBENCH)),
         KeyBinding::new(SAVE, RunSearch, Some(WORKBENCH)),
         KeyBinding::new(SAVE, RunSearch, Some(WORKBENCH_INPUT)),

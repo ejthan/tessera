@@ -19,6 +19,7 @@ use rust_i18n::t;
 
 use super::collections_list::CollectionsList;
 use super::connect_dialog::ConnectDialog;
+use super::console::ConsoleView;
 use super::documents::DocumentsView;
 use super::import_dialog::ImportDialog;
 use super::overview::Overview;
@@ -27,9 +28,9 @@ use super::search::SearchWorkbench;
 use super::sidebar::Sidebar;
 use super::{env_badge, unlock, welcome};
 use crate::actions::{
-    COLLECTION, COLLECTIONS, CloneCollection, DeleteCollection, EditSchema, FocusSearch, LockAgain,
-    NewCollection, OVERVIEW, OpenCollectionRow, Refresh, ShowDocuments, ShowSchema, ToggleFavorite,
-    TogglePolling, TruncateCollection, WORKBENCH,
+    COLLECTION, COLLECTIONS, CONSOLE, CloneCollection, DeleteCollection, EditSchema, FocusSearch,
+    LockAgain, NewCollection, OVERVIEW, OpenCollectionRow, Refresh, ShowDocuments, ShowSchema,
+    ToggleFavorite, TogglePolling, TruncateCollection, WORKBENCH,
 };
 use crate::connection::ConnectionState;
 use crate::poller::Poller;
@@ -627,6 +628,95 @@ impl Render for SearchPanel {
             .border_color(edge)
             .children(unlock::banner(&self.connection, WORKBENCH, window, cx))
             .child(div().flex_1().min_h_0().child(self.workbench.clone()))
+    }
+}
+
+/// A center tab sending raw requests to one connection.
+pub struct ConsolePanel {
+    connection: Entity<ConnectionState>,
+    view: Entity<ConsoleView>,
+    focus_handle: FocusHandle,
+    _subscription: Subscription,
+}
+
+impl ConsolePanel {
+    /// The console of `connection`.
+    pub fn new(
+        connection: Entity<ConnectionState>,
+        state: Entity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
+            view: cx.new(|cx| ConsoleView::new(state, connection.clone(), window, cx)),
+            connection,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    /// The connection this tab talks to.
+    pub fn connection(&self) -> &Entity<ConnectionState> {
+        &self.connection
+    }
+
+    /// The console.
+    pub fn view(&self) -> &Entity<ConsoleView> {
+        &self.view
+    }
+}
+
+impl EventEmitter<PanelEvent> for ConsolePanel {}
+
+impl Focusable for ConsolePanel {
+    /// The console: its shortcuts work from the moment the tab shows.
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.view.focus_handle(cx)
+    }
+}
+
+impl BasePanel for ConsolePanel {
+    fn panel_name(&self) -> &'static str {
+        "Console"
+    }
+}
+
+impl Panel for ConsolePanel {
+    /// Color dot, "Console" and environment badge (UX rule 1).
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let conn = self.connection.read(cx);
+        let (profile, unlocked) = (&conn.profile, conn.writes_unlocked);
+        let tab_id = format!("tab.{}.console", profile.id);
+        let name = SharedString::from(t!("sidebar.console").to_string());
+        h_flex()
+            .id(SharedString::from(tab_id.clone()))
+            .test_support()
+            .aria_label(name.clone())
+            .gap_2()
+            .items_center()
+            .child(env_badge::dot(profile.color, cx))
+            .child(name)
+            .child(env_badge::render(&profile.environment, cx))
+            .when(profile.read_only, |el| {
+                el.child(env_badge::lock(&tab_id, unlocked, cx))
+            })
+    }
+}
+
+impl Render for ConsolePanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let edge = env_badge::color(self.connection.read(cx).profile.color, cx.theme());
+        v_flex()
+            .track_focus(&self.focus_handle)
+            .key_context(CONSOLE)
+            .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
+                this.connection.update(cx, |c, cx| c.lock(cx));
+            }))
+            .size_full()
+            .border_t_2()
+            .border_color(edge)
+            .children(unlock::banner(&self.connection, CONSOLE, window, cx))
+            .child(div().flex_1().min_h_0().child(self.view.clone()))
     }
 }
 

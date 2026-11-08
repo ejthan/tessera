@@ -69,7 +69,7 @@ fn lower_contains(text: &str, needle: &str) -> bool {
 
 /// Whether `item` matches `needle`, which is in lower case: `q`, `filter_by` or the collection
 /// of a search, the method, path or query of a raw request.
-fn matches(item: &HistoryItem, needle: &str) -> bool {
+pub fn matches(item: &HistoryItem, needle: &str) -> bool {
     match &item.entry {
         HistoryEntry::Search { searches, .. } => searches.iter().any(|draft| {
             let text = |key| draft.params.get(key).and_then(|v| v.as_str()).unwrap_or("");

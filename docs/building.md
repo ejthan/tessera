@@ -87,6 +87,10 @@ The cluster uses the fixed subnet 172.30.111.0/24 (static peering IPs); if Docke
 
 Run them single-threaded: two tests stop and restart ts3. `TESSERA_CLUSTER_URLS` (comma separated, in the order ts1, ts2, ts3) overrides the URLs. With the override set, the two stop/start tests skip (they print why), because they stop the local compose ts3, not a node of the other cluster. CI runs them nightly (`.github/workflows/nightly.yml`).
 
+## Where the request log keeps bodies
+
+Everything stays in memory; nothing about a request reaches the disk. An entry holds its bodies cut to 1 MiB. A body up to 32 MiB also keeps its whole text beside the entries, 64 MiB over all of them, oldest out first, so the entry says "Full body no longer kept" once its text is gone. Document pages keep no response body at all. Show full (⇧⌘B / Ctrl+Shift+B in the log) masks the text on the background executor before it shows, and pages through it in chunks of 512 KiB; Copy all takes the whole masked text.
+
 ## Manual checks of the document browser (M3)
 
 Nothing here runs in CI or from a script: it needs a person at the machine, because the numbers come from the frame overlay on screen. NF2 is **not measured** until someone records the results below in PR C's description.

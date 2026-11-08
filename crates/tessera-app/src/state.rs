@@ -93,6 +93,9 @@ pub struct OpenCollection(pub Uuid, pub String);
 /// Asks the window to show the search tab of a profile, with `.1` loaded into it when given.
 pub struct OpenSearch(pub Uuid, pub Option<SearchDraft>);
 
+/// Asks the window to show the console tab of a profile.
+pub struct OpenConsole(pub Uuid);
+
 /// Asks the window to close the tab of one collection of a profile, which no longer exists.
 pub struct CloseCollection(pub Uuid, pub String);
 
@@ -823,6 +826,13 @@ impl AppState {
         cx.notify();
     }
 
+    /// Asks for the console tab of profile `id`.
+    pub fn open_console(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.selected = Some(id);
+        cx.emit(OpenConsole(id));
+        cx.notify();
+    }
+
     /// Asks for the tab of collection `name` of profile `id` to close.
     pub fn close_collection(&mut self, id: Uuid, name: String, cx: &mut Context<Self>) {
         cx.emit(CloseCollection(id, name));
@@ -869,6 +879,7 @@ impl EventEmitter<OpenOverview> for AppState {}
 impl EventEmitter<OpenCollections> for AppState {}
 impl EventEmitter<OpenCollection> for AppState {}
 impl EventEmitter<OpenSearch> for AppState {}
+impl EventEmitter<OpenConsole> for AppState {}
 impl EventEmitter<CloseCollection> for AppState {}
 
 /// Runs a blocking secret-store or file call on tokio's blocking pool.

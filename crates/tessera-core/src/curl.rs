@@ -87,7 +87,7 @@ fn request_with(
 }
 
 /// Single-quotes `s` for a POSIX shell.
-fn quote(s: &str) -> String {
+pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
@@ -102,6 +102,7 @@ mod tests {
         Body {
             text: text.into(),
             original_len,
+            full: None,
         }
     }
 

@@ -725,7 +725,7 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D39 | What enters history | A run started by the user, or an instant run that stood for 2 s. 500 per kind (search, console). Console queries and bodies are redacted, bodies over 64 KiB are not kept, temporary connections write nothing, Clear history exists |
 | D40 | Confirmations in the raw console | `DELETE` of a collection or of its documents by filter or truncate: type the name, everywhere. Other `DELETE` and `POST operations/*`: confirm, and type the last path segment on prod. Other writes: nothing, and confirm on prod. `POST /multi_search` is a read |
 | D41 | Secrets in console responses | Masked by default, with Reveal until the next Send, because `POST /keys` answers with the only copy of a key. Workbench results are never masked: `value` is an ordinary document field there |
-| D42 | Keeping full bodies for §7.19 | In memory, at most 32 MiB per body and 64 MiB in all, oldest evicted. Refetching would show a different answer and cannot repeat a write. Disk is ruled out by §9 |
+| D42 | Keeping full bodies for §7.19 | In memory, at most 32 MiB per body and 64 MiB in all, oldest evicted, released with their entry. The console holds at most 32 MiB of an answer and says when it cut one. Refetching would show a different answer and cannot repeat a write. Disk is ruled out by §9 |
 | D43 | `keymap.toml` shape | `[[binding]]` with `key`, `action` (`tessera::Name`), optional `context`. No action unbinds. Loaded once at start, on top of the defaults. A bad entry is skipped and named in a toast |
 | D44 | Settings in the palette, and §7.21's milestone | No entry until a settings view exists (UX rule 4). §14 names no milestone for §7.21. Recommendation: M8. Open for the maintainer |
 
