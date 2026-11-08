@@ -25,9 +25,9 @@ use super::env_badge;
 use super::import_dialog::ImportDialog;
 use crate::actions::{
     ConnectSelected, DeleteConnection, DisconnectSelected, EditConnection, ExportProfiles,
-    ImportProfiles, NewConnection, OpenAliases, OpenAnalytics, OpenConsoleTab, OpenCurations,
-    OpenKeys, OpenLink, OpenPresetsTab, OpenSearchTab, OpenStemming, OpenStopwords, OpenSynonyms,
-    SIDEBAR_ENTRY, SIDEBAR_ENTRY_BUTTON, SIDEBAR_LINK, ToggleReopenLast,
+    ImportProfiles, NewConnection, OpenAi, OpenAliases, OpenAnalytics, OpenConsoleTab,
+    OpenCurations, OpenKeys, OpenLink, OpenPresetsTab, OpenSearchTab, OpenStemming, OpenStopwords,
+    OpenSynonyms, SIDEBAR_ENTRY, SIDEBAR_ENTRY_BUTTON, SIDEBAR_LINK, ToggleReopenLast,
 };
 use crate::state::{AppState, ResourceKind};
 use tessera_widgets::confirm;
@@ -608,6 +608,7 @@ fn resource_shortcut(kind: ResourceKind, window: &Window) -> Option<Kbd> {
         ResourceKind::Keys => Kbd::global_binding_for_action(&OpenKeys, window),
         ResourceKind::Analytics => Kbd::global_binding_for_action(&OpenAnalytics, window),
         ResourceKind::Stemming => Kbd::global_binding_for_action(&OpenStemming, window),
+        ResourceKind::Ai => Kbd::global_binding_for_action(&OpenAi, window),
     }
 }
 

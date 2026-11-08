@@ -29,6 +29,7 @@ use gpui_kit::{
 use rust_i18n::t;
 use serde_json::Value;
 use tessera_client::{Collection, SchemaChange};
+use tessera_core::redact::contains_mask;
 use tessera_core::schema::{
     DraftError, FieldDraft, FieldType, Issue, IssuePath, SchemaDraft, Severity, has_errors,
 };
@@ -490,7 +491,47 @@ impl SchemaDialog {
         if sync::metadata(&self.form.opt(Opt::Metadata).read(cx).value()).is_none() {
             out.push(t!("schema.metadata_invalid").to_string());
         }
+        // A mask that lost its field, by a rename in the JSON tab, would be stored as the key.
+        // Edit mode has `blanked` for this.
+        if !self.editing() {
+            let masked = |f: &FieldDraft| f.embed.as_ref().is_some_and(contains_mask);
+            out.extend(
+                self.draft
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| masked(f))
+                    .map(|(i, _)| {
+                        self.issue_line(i, t!("schema.field.secret_blanked").to_string())
+                    }),
+            );
+        }
         out
+    }
+
+    /// A remote model without a key may still work against an `openai_url`-style server, so
+    /// this warns and does not stop anything.
+    fn embed_warnings(&self) -> Vec<String> {
+        if self.editing() || self.locked() {
+            return Vec::new();
+        }
+        let keyless = |f: &FieldDraft| {
+            let Some(embed) = &f.embed else {
+                return false;
+            };
+            let config = &embed["model_config"];
+            let model = config["model_name"].as_str().unwrap_or_default();
+            let key = config["api_key"].as_str().unwrap_or_default();
+            !model.is_empty()
+                && !model.starts_with("ts/")
+                && key.is_empty()
+                && !self.blanked.contains(&f.name)
+        };
+        let fields = self.draft.fields.iter().enumerate();
+        fields
+            .filter(|(_, f)| keyless(f))
+            .map(|(i, _)| self.issue_line(i, t!("schema.embed.no_key").to_string()))
+            .collect()
     }
 
     fn issue_line(&self, i: usize, message: String) -> String {
@@ -549,7 +590,7 @@ impl SchemaDialog {
         }
         if let Mode::Pick(on_pick) = &self.mode {
             let on_pick = on_pick.clone();
-            if let Ok(draft) = SchemaDraft::from_json(&self.json_text(cx)) {
+            if let Some(draft) = self.sendable(cx) {
                 window.close_dialog(cx);
                 on_pick(draft.to_json(), window, cx);
             }
@@ -563,12 +604,27 @@ impl SchemaDialog {
         });
     }
 
+    /// The JSON tab's content as it is now, with the credentials it shows as a mask.
+    fn sendable(&self, cx: &App) -> Option<SchemaDraft> {
+        let mut draft = SchemaDraft::from_json(&self.json_text(cx)).ok()?;
+        draft.restore_secrets(&self.draft);
+        Some(draft)
+    }
+
+    /// Whether `name` is a field of the collection being changed.
+    fn stored_field(&self, name: &str) -> bool {
+        match &self.mode {
+            Mode::Edit(old) => old.fields.iter().any(|f| f.name == name),
+            _ => false,
+        }
+    }
+
     /// Sends the JSON tab's content as it is now.
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_submit(cx) {
             return;
         }
-        let Ok(draft) = SchemaDraft::from_json(&self.json_text(cx)) else {
+        let Some(draft) = self.sendable(cx) else {
             return;
         };
         let conn = self.connection.read(cx);
@@ -675,6 +731,11 @@ impl SchemaDialog {
                     )
                 }))
                 .map(|l| (l, theme.danger)),
+        );
+        lines.extend(
+            self.embed_warnings()
+                .into_iter()
+                .map(|l| (l, theme.warning)),
         );
         if lines.is_empty() {
             return None;

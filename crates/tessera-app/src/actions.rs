@@ -132,6 +132,7 @@ gpui_kit::actions!(
         OpenKeys,
         OpenAnalytics,
         OpenStemming,
+        OpenAi,
         FlushAnalytics,
         SendTestEvent,
         OpenTopInSearch,
@@ -153,6 +154,7 @@ gpui_kit::actions!(
         CreateMissingSet,
         ShowTest,
         RunTest,
+        NewConversation,
         MoveRowUp,
         MoveRowDown,
         NextControl,
@@ -483,6 +485,10 @@ const OPEN_RESOURCES: [&str; 9] = [
     "ctrl-alt-9",
 ];
 #[cfg(target_os = "macos")]
+const OPEN_TOP: &str = "cmd-alt-g";
+#[cfg(not(target_os = "macos"))]
+const OPEN_TOP: &str = "ctrl-alt-g";
+#[cfg(target_os = "macos")]
 const ADD_QUERY_ROW: &str = "cmd-shift-a";
 #[cfg(not(target_os = "macos"))]
 const ADD_QUERY_ROW: &str = "ctrl-shift-a";
@@ -652,6 +658,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     OpenKeys,
     OpenAnalytics,
     OpenStemming,
+    OpenAi,
     FlushAnalytics,
     SendTestEvent,
     OpenTopInSearch,
@@ -673,6 +680,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     CreateMissingSet,
     ShowTest,
     RunTest,
+    NewConversation,
     StopWaiting,
     RemoveBodyFile,
     ShowResponseBody,
@@ -928,12 +936,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_RESOURCES[5], OpenKeys, None),
         KeyBinding::new(OPEN_RESOURCES[6], OpenAnalytics, None),
         KeyBinding::new(OPEN_RESOURCES[7], OpenStemming, None),
+        KeyBinding::new(OPEN_RESOURCES[8], OpenAi, None),
         KeyBinding::new(SAVE, SaveResource, Some(STEMMING_DIALOG)),
         KeyBinding::new(SAVE, SaveResource, Some(STEMMING_INPUT)),
         KeyBinding::new(OPEN_SAVED, PickImportFile, Some(STEMMING_DIALOG)),
         KeyBinding::new(UPDATE_QUERY, FlushAnalytics, Some(ANALYTICS)),
         KeyBinding::new(TEST, SendTestEvent, Some(ANALYTICS)),
-        KeyBinding::new(OPEN_SEARCH, OpenTopInSearch, Some(ANALYTICS)),
+        KeyBinding::new(OPEN_TOP, OpenTopInSearch, Some(ANALYTICS)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(RESOURCES)),
         KeyBinding::new(REVERT, ReindexAlias, Some(RESOURCES)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(REINDEX)),
@@ -972,14 +981,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(DELETE, DeleteSetItem, Some(SET_ITEMS)),
         KeyBinding::new(SHOW_FORM, ShowItems, Some(RESOURCES)),
         KeyBinding::new(SHOW_JSON, ShowSetJson, Some(RESOURCES)),
-        KeyBinding::new(COPY_CURL, CopyKey, Some(SCOPED_KEYS)),
-        KeyBinding::new(COPY_CURL, CopyKey, Some(KEY_REVEAL)),
+        // Not COPY_CURL, which stays Copy as curl here.
+        KeyBinding::new(COPY_ROW, CopyKey, Some(SCOPED_KEYS)),
+        KeyBinding::new(COPY_ROW, CopyKey, Some(KEY_REVEAL)),
         KeyBinding::new(SAVE, FinishReveal, Some(KEY_REVEAL)),
         KeyBinding::new(SHOW_FORM, ShowDocuments, Some(RESOURCES)),
         KeyBinding::new(SHOW_JSON, ShowSchema, Some(RESOURCES)),
         KeyBinding::new(SHOW_HITS, ShowAttachment, Some(RESOURCES)),
         KeyBinding::new(SHOW_RAW, ShowTest, Some(RESOURCES)),
         KeyBinding::new(SAVE, RunTest, Some(TEST_PANEL)),
+        KeyBinding::new(ADD_QUERY_ROW, NewConversation, Some(TEST_PANEL)),
         KeyBinding::new(SAVE, RunTest, Some(TEST_PANEL_INPUT)),
         KeyBinding::new(FIND, FocusQuery, Some(TEST_PANEL)),
         KeyBinding::new(IMPORT_DOCUMENTS, ImportResource, Some(RESOURCES)),

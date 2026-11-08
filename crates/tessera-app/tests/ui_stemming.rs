@@ -266,6 +266,86 @@ async fn import_into_an_existing_id_says_it_merges(cx: &mut TestAppContext) {
     assert!(f.imported().is_empty());
     f.click(cx, "confirm.ok");
     assert_eq!(f.imported(), ["import english 1"]);
+    assert!(!f.has(cx, "stemming.dialog.id"));
+    assert!(f.has(cx, "stemming.result"));
+}
+
+#[gpui_kit::test]
+async fn an_id_that_appeared_after_opening_still_asks(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    f.prepare(cx, "english");
+    f.admin.dictionaries.lock().unwrap().push(english());
+    f.click(cx, "stemming.dialog.import");
+    assert!(f.label(cx, "confirm.body").contains("keeps its root"));
+    assert!(f.imported().is_empty());
+}
+
+#[gpui_kit::test]
+async fn an_unreadable_list_sends_nothing(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![english()]).await;
+    f.prepare(cx, "english");
+    *f.admin.fail_dictionaries.lock().unwrap() = Some((503, "Not Ready".into()));
+    f.click(cx, "stemming.dialog.import");
+    assert!(f.label(cx, "stemming.dialog.error").contains("Not Ready"));
+    assert!(!f.has(cx, "confirm.ok"));
+    assert!(f.imported().is_empty());
+    let dialog = f.dialog(cx);
+    assert!(cx.read(|cx| dialog.read(cx).can_import(cx)));
+}
+
+#[gpui_kit::test]
+async fn merge_on_prod_is_typed_and_closes_the_form(cx: &mut TestAppContext) {
+    let mut profile = Profile::new("test", vec![node()]);
+    profile.environment = Environment::Prod;
+    profile.read_only = false;
+    let f = Fixture::with(cx, profile, vec![], vec![english()]).await;
+    f.prepare(cx, "english");
+    f.click(cx, "stemming.dialog.import");
+    f.fill(cx, "danger.input", "english");
+    f.click(cx, "danger.ok");
+    assert_eq!(f.imported(), ["import english 2"]);
+    assert!(!f.has(cx, "danger.input"));
+    assert!(!f.has(cx, "stemming.dialog.id"));
+}
+
+#[gpui_kit::test]
+async fn failed_merge_shows_on_the_form_and_keeps_the_file(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![english()]).await;
+    f.prepare(cx, "english");
+    *f.admin.fail_import.lock().unwrap() = Some(tessera_client::Error::Timeout);
+    f.click(cx, "stemming.dialog.import");
+    f.click(cx, "confirm.ok");
+    assert!(
+        f.label(cx, "stemming.dialog.error")
+            .contains("may still be applying")
+    );
+    let dialog = f.dialog(cx);
+    assert!(cx.read(|cx| dialog.read(cx).can_import(cx)));
+}
+
+#[gpui_kit::test]
+async fn a_timeout_says_the_server_may_still_be_working(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    f.prepare(cx, "fresh");
+    *f.admin.fail_import.lock().unwrap() = Some(tessera_client::Error::Timeout);
+    f.click(cx, "stemming.dialog.import");
+    assert!(
+        f.label(cx, "stemming.dialog.error")
+            .contains("may still be applying")
+    );
+}
+
+#[gpui_kit::test]
+async fn enter_twice_imports_once(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    f.prepare(cx, "fresh");
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        window.press(SAVE, cx);
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    f.settle(cx);
+    assert_eq!(f.imported(), ["import fresh 2"]);
 }
 
 #[gpui_kit::test]
@@ -275,6 +355,9 @@ async fn cancel_sends_nothing(cx: &mut TestAppContext) {
     f.click(cx, "stemming.dialog.import");
     f.click(cx, "confirm.cancel");
     assert!(f.imported().is_empty());
+    assert!(f.has(cx, "stemming.dialog.id"));
+    let dialog = f.dialog(cx);
+    assert!(cx.read(|cx| dialog.read(cx).can_import(cx)));
 }
 
 #[gpui_kit::test]

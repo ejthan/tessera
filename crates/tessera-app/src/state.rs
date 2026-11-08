@@ -130,11 +130,13 @@ pub enum ResourceKind {
     Analytics,
     /// Stemming dictionaries.
     Stemming,
+    /// Conversation and NL search models.
+    Ai,
 }
 
 impl ResourceKind {
     /// Every kind, in sidebar order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Aliases,
         Self::Synonyms,
         Self::Curations,
@@ -143,6 +145,7 @@ impl ResourceKind {
         Self::Keys,
         Self::Analytics,
         Self::Stemming,
+        Self::Ai,
     ];
 
     /// The part of the ids of its row and tab.
@@ -156,6 +159,7 @@ impl ResourceKind {
             Self::Keys => "keys",
             Self::Analytics => "analytics",
             Self::Stemming => "stemming",
+            Self::Ai => "ai",
         }
     }
 
@@ -165,12 +169,12 @@ impl ResourceKind {
     }
 
     /// Whether a server of that support gets a row: synonym sets, curation sets, these
-    /// analytics rules and stemming dictionaries do not exist below v30.
+    /// analytics rules, stemming dictionaries and AI models do not exist below v30.
     pub fn shown(self, supported: bool) -> bool {
         supported
             || !matches!(
                 self,
-                Self::Synonyms | Self::Curations | Self::Analytics | Self::Stemming
+                Self::Synonyms | Self::Curations | Self::Analytics | Self::Stemming | Self::Ai
             )
     }
 }

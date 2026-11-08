@@ -559,7 +559,8 @@ async fn schema_view_clone_sends_unmasked_values(cx: &mut TestAppContext) {
     f.act(cx, show_schema);
     wait_for_element(cx, f.handle, "schema.clone".into(), true).await;
     f.act(cx, |window, cx| window.click("schema.clone", cx));
-    f.act(cx, |window, cx| window.click("schema.submit", cx));
+    // The embedding block makes the dialog taller than the test window; the keys reach it.
+    f.act(cx, |window, cx| window.press(SUBMIT, cx));
     let sent = f.creates();
     // The view masks `value`; the clone must not send the mask.
     assert_eq!(sent[0]["metadata"], json!({"value": "x"}));
@@ -1286,4 +1287,232 @@ async fn infer_drops_a_sorting_field_the_file_lacks(cx: &mut TestAppContext) {
             .get("default_sorting_field")
             .is_none_or(|v| v == "")
     );
+}
+
+/// A new dialog with a `float[]` field `e` beside a string field `title`, auto-embedded.
+fn embed_form(f: &Fixture, cx: &mut TestAppContext) -> Entity<SchemaDialog> {
+    let dialog = f.create(cx);
+    f.edit_json(cx, &dialog, |j| {
+        *j = json!({"name": "c", "fields": [
+            {"name": "title", "type": "string"},
+            {"name": "e", "type": "float[]"},
+        ]});
+    });
+    f.act(cx, |window, cx| window.click("schema.field.1.embed", cx));
+    dialog
+}
+
+fn type_model(f: &Fixture, cx: &mut TestAppContext, model: &str) {
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.1.embed.model", model, cx);
+    });
+}
+
+#[gpui_kit::test]
+async fn auto_embed_writes_the_embed_json(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = embed_form(&f, cx);
+    assert_eq!(
+        f.json(cx, &dialog)["fields"][1]["embed"],
+        json!({"from": [], "model_config": {"model_name": ""}})
+    );
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.1.embed.from", "title", cx);
+    });
+    type_model(&f, cx, "ts/all-MiniLM-L12-v2");
+    assert_eq!(
+        f.json(cx, &dialog)["fields"][1]["embed"],
+        json!({"from": ["title"], "model_config": {"model_name": "ts/all-MiniLM-L12-v2"}})
+    );
+    assert!(!f.submit_disabled(cx));
+    // Unchecking what holds something asks first.
+    f.act(cx, |window, cx| window.click("schema.field.1.embed", cx));
+    assert!(f.json(cx, &dialog)["fields"][1].get("embed").is_some());
+    f.act(cx, |window, cx| window.click("confirm.ok", cx));
+    assert!(f.json(cx, &dialog)["fields"][1].get("embed").is_none());
+    assert!(f.query(cx, |w| w.try_find("schema.field.1.embed.model").is_none()));
+}
+
+#[gpui_kit::test]
+async fn model_field_offers_built_ins(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = embed_form(&f, cx);
+    let models = cx.update(|cx| dialog.read(cx).embed_models(1, cx));
+    for model in [
+        "ts/all-MiniLM-L12-v2",
+        "ts/e5-small",
+        "openai/text-embedding-3-small",
+        "azure/text-embedding-ada-002",
+    ] {
+        assert!(models.iter().any(|m| m == model), "{model}: {models:?}");
+    }
+}
+
+#[gpui_kit::test]
+async fn key_field_is_masked_and_hidden_for_ts_models(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = embed_form(&f, cx);
+    type_model(&f, cx, "openai/text-embedding-3-small");
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.1.embed.key", "sk-typed", cx);
+        fill(window, "schema.field.1.embed.url", "http://stub", cx);
+    });
+    // A masked field reports no value.
+    f.query(cx, |w| {
+        assert_eq!(w.find("schema.field.1.embed.key").value(), None);
+        assert!(w.try_find("schema.field.1.embed.note").is_none());
+    });
+    type_model(&f, cx, "ts/e5-small");
+    f.query(cx, |w| {
+        assert!(w.try_find("schema.field.1.embed.key").is_none());
+        assert!(w.try_find("schema.field.1.embed.url").is_none());
+        assert!(w.try_find("schema.field.1.embed.note").is_some());
+    });
+    // What is hidden is not sent either.
+    let config = f.json(cx, &dialog)["fields"][1]["embed"]["model_config"].clone();
+    assert_eq!(config, json!({"model_name": "ts/e5-small"}));
+}
+
+#[gpui_kit::test]
+async fn json_tab_shows_the_mask_not_the_key(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = embed_form(&f, cx);
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.1.embed.from", "title", cx);
+    });
+    type_model(&f, cx, "openai/text-embedding-3-small");
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.1.embed.key", "sk-typed", cx);
+    });
+    let shown = f.json(cx, &dialog);
+    assert!(!shown.to_string().contains("sk-typed"), "{shown}");
+    assert_eq!(
+        shown["fields"][1]["embed"]["model_config"]["api_key"],
+        "••••"
+    );
+    // An edit in the JSON tab keeps the key, and the send has the real one.
+    f.edit_json(cx, &dialog, |j| j["name"] = json!("d"));
+    // In the last row this chord adds a field, so it leaves that row first.
+    f.act(cx, |window, cx| {
+        window.click("schema.name", cx);
+        window.press(SUBMIT, cx);
+    });
+    let sent = f.creates();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["name"], "d");
+    assert_eq!(
+        sent[0]["fields"][1]["embed"]["model_config"]["api_key"],
+        "sk-typed"
+    );
+}
+
+#[gpui_kit::test]
+async fn a_mask_that_lost_its_field_stops_the_send(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = embed_form(&f, cx);
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.1.embed.from", "title", cx);
+    });
+    type_model(&f, cx, "openai/x");
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.1.embed.key", "sk-typed", cx);
+    });
+    assert!(!f.submit_disabled(cx));
+    f.edit_json(cx, &dialog, |j| j["fields"][1]["name"] = json!("renamed"));
+    assert!(f.submit_disabled(cx));
+    assert!(f.label_of(cx, "schema.issues").contains("again"));
+}
+
+#[gpui_kit::test]
+async fn remote_model_without_a_key_only_warns(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let _dialog = embed_form(&f, cx);
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.1.embed.from", "title", cx);
+    });
+    type_model(&f, cx, "openai/x");
+    assert!(f.label_of(cx, "schema.issues").contains("no API key"));
+    assert!(!f.submit_disabled(cx));
+}
+
+#[gpui_kit::test]
+async fn form_and_json_stay_in_sync_on_embed(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = embed_form(&f, cx);
+    f.edit_json(cx, &dialog, |j| {
+        j["fields"][1]["embed"] = json!({
+            "from": ["title"],
+            "other": 1,
+            "model_config": {"model_name": "openai/x", "url": "http://a"}
+        });
+    });
+    f.query(cx, |w| {
+        assert_eq!(w.find("schema.field.1.embed.url").value(), Some("http://a"));
+    });
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.1.embed.url", "http://b", cx);
+    });
+    let embed = f.json(cx, &dialog)["fields"][1]["embed"].clone();
+    assert_eq!(
+        embed,
+        json!({
+            "from": ["title"],
+            "other": 1,
+            "model_config": {"model_name": "openai/x", "url": "http://b"}
+        })
+    );
+}
+
+#[gpui_kit::test]
+async fn clone_still_blanks_the_key(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = f.clone_of(cx, books());
+    let config = f.json(cx, &dialog)["fields"][1]["embed"]["model_config"].clone();
+    assert_eq!(config["api_key"], "");
+    f.query(cx, |w| {
+        assert!(w.try_find("schema.field.1.embed.model").is_some());
+        assert!(w.try_find("schema.field.1.secret").is_some());
+    });
+    // A change elsewhere in the block leaves the blank alone.
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.1.embed.url", "http://b", cx);
+    });
+    let config = f.json(cx, &dialog)["fields"][1]["embed"]["model_config"].clone();
+    assert_eq!(config["api_key"], "");
+    assert_eq!(config["url"], "http://b");
+}
+
+#[gpui_kit::test]
+async fn stored_embedding_has_no_controls_in_edit_mode(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, false).await;
+    let dialog = f.edit_of(cx, library(), vec![library()]);
+    f.query(cx, |w| {
+        assert!(w.try_find("schema.field.3.embed").is_none());
+        assert!(w.try_find("schema.field.3.embed.model").is_none());
+    });
+    // A field being added gets the block, and the review masks its key.
+    f.edit_json(cx, &dialog, |j| {
+        j["fields"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "e2", "type": "float[]"}));
+    });
+    f.act(cx, |window, cx| window.click("schema.field.4.embed", cx));
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.4.embed.from", "title", cx);
+        fill(window, "schema.field.4.embed.model", "openai/x", cx);
+    });
+    f.act(cx, |window, cx| {
+        fill(window, "schema.field.4.embed.key", "sk-typed", cx);
+    });
+    f.act(cx, |window, cx| {
+        window.click("schema.field.0.name", cx);
+        window.press(SUBMIT, cx);
+    });
+    let body = cx.update(|cx| dialog.read(cx).review_body(cx)).unwrap();
+    assert!(body.contains("e2"), "{body}");
+    assert!(!body.contains("sk-typed"), "{body}");
+    f.apply(cx);
+    let sent = f.updates();
+    assert!(sent[0].1.to_string().contains("sk-typed"), "{:?}", sent[0]);
 }

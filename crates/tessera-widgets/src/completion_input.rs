@@ -159,6 +159,11 @@ impl CompletionInput {
         *self.candidates.borrow_mut() = candidates;
     }
 
+    /// What the menu offers.
+    pub fn candidates(&self) -> Vec<String> {
+        self.candidates.borrow().clone()
+    }
+
     /// Puts the keyboard focus in the input.
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.state.update(cx, |state, cx| state.focus(window, cx));

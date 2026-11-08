@@ -8,11 +8,12 @@
 use gpui_kit::component::input::InputState;
 use gpui_kit::{Context, Entity, Window};
 use serde_json::{Map, Value};
+use tessera_core::ai::set_embedding;
 use tessera_core::schema::{FieldDraft, FieldType, SchemaDraft};
 use tessera_core::transfer::infer::InferNote;
 
 use super::SchemaDialog;
-use super::form::FieldRow;
+use super::form::{EmbedRow, FieldRow};
 
 /// A text input of a field row; the index into [`FieldRow::inputs`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,9 +53,42 @@ pub const OPTS: [Opt; 5] = [
     Opt::Metadata,
 ];
 
-/// The JSON tab's text for `draft`.
+/// The JSON tab's text for `draft`. A credential reads as the mask: the send takes it from the
+/// draft ([`SchemaDraft::restore_secrets`]).
 pub fn pretty(draft: &SchemaDraft) -> String {
-    serde_json::to_string_pretty(&draft.to_json()).unwrap_or_default()
+    serde_json::to_string_pretty(&draft.to_masked_json()).unwrap_or_default()
+}
+
+/// The source fields, model name and endpoint of `f`'s `embed`, as the inputs show them.
+pub fn embed_parts(f: &FieldDraft) -> (String, String, String) {
+    let embed = f.embed.as_ref();
+    let from = embed.and_then(|e| e["from"].as_array());
+    let from: Vec<&str> = from
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let config = |key: &str| {
+        let value = embed.and_then(|e| e["model_config"][key].as_str());
+        value.unwrap_or_default().to_string()
+    };
+    (from.join(", "), config("model_name"), config("url"))
+}
+
+/// The names in the source fields input.
+pub fn embed_from(text: &str) -> Vec<String> {
+    let names = text.split(',').map(str::trim).filter(|s| !s.is_empty());
+    names.map(str::to_string).collect()
+}
+
+/// Whether unchecking "Auto-embed" would lose anything.
+pub fn embed_holds(f: &FieldDraft) -> bool {
+    let (from, model, url) = embed_parts(f);
+    let key = f.embed.as_ref().map(|e| &e["model_config"]["api_key"]);
+    !from.is_empty()
+        || !model.is_empty()
+        || !url.is_empty()
+        || key.and_then(Value::as_str).is_some_and(|k| !k.is_empty())
 }
 
 /// What input `which` of a row shows for `f`.
@@ -227,7 +261,8 @@ impl SchemaDialog {
             return;
         }
         match SchemaDraft::from_json(&self.json.read(cx).text(cx)) {
-            Ok(draft) => {
+            Ok(mut draft) => {
+                draft.restore_secrets(&self.draft);
                 self.draft = draft;
                 self.json_error = None;
                 self.fill_form(window, cx);
@@ -264,7 +299,91 @@ impl SchemaDialog {
                 .sorting
                 .update(cx, |s, cx| s.set_selected_value(&field, window, cx));
         }
+        self.sync_embed_rows(window, cx);
         cx.notify();
+    }
+
+    /// Whether the form may edit `f`'s embedding: a stored one is the server's to keep.
+    pub(super) fn embed_editable(&self, f: &FieldDraft) -> bool {
+        f.r#type == FieldType::FloatArray && !self.stored_field(&f.name)
+    }
+
+    /// The blocks follow the draft: those of embedded fields exist, and show what it holds.
+    /// Each input is left alone while it means the same, so typing keeps its cursor.
+    fn sync_embed_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sources: Vec<String> = self
+            .draft
+            .fields
+            .iter()
+            .filter(|f| matches!(f.r#type, FieldType::String | FieldType::StringArray))
+            .filter(|f| !f.name.is_empty())
+            .map(|f| f.name.clone())
+            .collect();
+        for i in 0..self.form.rows.len().min(self.draft.fields.len()) {
+            let f = self.draft.fields[i].clone();
+            if f.embed.is_none() || !self.embed_editable(&f) {
+                self.form.rows[i].embed = None;
+                continue;
+            }
+            if self.form.rows[i].embed.is_none() {
+                self.form.rows[i].embed = Some(EmbedRow::new(&f, window, cx));
+            }
+            let row = &self.form.rows[i];
+            show(row.input(Text::NumDim), String::new(), window, cx);
+            let Some(block) = &row.embed else {
+                continue;
+            };
+            let (from, model, url) = embed_parts(&f);
+            block
+                .from
+                .update(cx, |input, _| input.set_candidates(sources.clone()));
+            if embed_from(&block.from.read(cx).value(cx)) != embed_from(&from) {
+                block
+                    .from
+                    .update(cx, |input, cx| input.set_value(&from, window, cx));
+            }
+            if block.model.read(cx).value(cx).trim() != model {
+                block
+                    .model
+                    .update(cx, |input, cx| input.set_value(&model, window, cx));
+            }
+            if block.url.read(cx).value().trim() != url {
+                show(&block.url, url, window, cx);
+            }
+        }
+    }
+
+    /// An input of field `i`'s block changed. `key` is the key field's text, when that one did.
+    /// A built-in model takes neither key nor endpoint, so hidden inputs send nothing.
+    pub(super) fn embed_changed(
+        &mut self,
+        i: usize,
+        key: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(block) = self.form.rows.get(i).and_then(|r| r.embed.as_ref()) else {
+            return;
+        };
+        let from = embed_from(&block.from.read(cx).value(cx));
+        let model = block.model.read(cx).value(cx).trim().to_string();
+        let mut url = block.url.read(cx).value().trim().to_string();
+        let mut key = key;
+        if model.starts_with("ts/") {
+            show(&block.key, String::new(), window, cx);
+            show(&block.url, String::new(), window, cx);
+            url.clear();
+            key = Some(String::new());
+        }
+        let Some(f) = self.draft.fields.get(i) else {
+            return;
+        };
+        let mut changed = f.clone();
+        set_embedding(&mut changed, &from, &model, key.as_deref(), &url);
+        // What the JSON tab just put here must not rewrite the text being typed there.
+        if changed != *f {
+            self.edit_field(i, |f| *f = changed, window, cx);
+        }
     }
 
     /// Shows the draft in the form. Rows are rebuilt when the number of fields changed.

@@ -73,6 +73,10 @@ Every `Client` gets a `RequestHook` that runs on tokio threads after each reques
 - CPU-heavy work (large JSON, schema inference) runs on GPUI's background executor or tokio's `spawn_blocking`, never in `render`.
 - UI tests do not perform real network I/O: GPUI's test executor runs on a simulated clock. Views reach the network through the `Connector` global, and tests install a fake that answers immediately.
 
+## AI calls
+
+A model create, a model update and a search that reaches an LLM hold a request open for up to `AI_TIMEOUT` (120 s), because the server calls the provider before it answers. They run on tokio like any request, but the GPUI side is detached (`cx.spawn(...).detach()`) and not kept in the view: closing the tab cannot abort a call the server goes on with, and the answer is dropped through the `WeakEntity`. A search that reaches an LLM is pinned to the active node and never retries or fails over, not after a timeout and not after a dropped connection, since a retry would call the LLM again, pay for it and store the turn twice.
+
 ## Jobs
 
 Imports and exports run as jobs, in `tessera_app::jobs`.

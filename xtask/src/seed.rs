@@ -9,9 +9,10 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 /// Seed collections in drop order (referencing ones first).
-const COLLECTIONS: [&str; 6] = [
+const COLLECTIONS: [&str; 7] = [
     "books_ref",
     "books",
+    "books_queries",
     "authors",
     "places",
     "articles_vec",
@@ -22,6 +23,9 @@ const SYNONYMS: &str = "books_synonyms";
 const CURATION: &str = "books_curation";
 const STOPWORDS: &str = "en_common";
 const PRESET: &str = "books_fantasy";
+const SEARCH_KEY: &str = "tessera-seed-search";
+const POPULAR_RULE: &str = "books_popular";
+const DICTIONARY: &str = "seed_plurals";
 const AUTHORS: usize = 500;
 const PRODUCTS: usize = 200_000;
 
@@ -191,6 +195,10 @@ fn schemas() -> Vec<Value> {
             "curation_sets": [CURATION],
         }),
         json!({
+            "name": "books_queries",
+            "fields": [{"name": "q", "type": "string"}, {"name": "count", "type": "int32"}],
+        }),
+        json!({
             "name": "books_ref",
             "fields": [
                 {"name": "title", "type": "string"},
@@ -276,6 +284,30 @@ impl Server {
     }
 
     /// Imports in batches of 1,000 without collecting the iterator.
+    /// Deletes the rule, if any: an unknown name answers 400, not 404.
+    async fn drop_rule(&self) -> Result<()> {
+        let path = format!("/analytics/rules/{POPULAR_RULE}");
+        let (status, _) = self
+            .send(self.http.get(format!("{}{path}", self.url)))
+            .await?;
+        if status.is_success() {
+            self.drop(&path).await?;
+        }
+        Ok(())
+    }
+
+    /// Deletes every key `SEARCH_KEY` describes.
+    async fn drop_seed_keys(&self) -> Result<()> {
+        let keys = self.ok(self.http.get(format!("{}/keys", self.url))).await?;
+        let keys: Value = serde_json::from_str(&keys)?;
+        for key in keys["keys"].as_array().into_iter().flatten() {
+            if key["description"] == SEARCH_KEY {
+                self.drop(&format!("/keys/{}", key["id"])).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn import(&self, collection: &str, docs: impl Iterator<Item = Value>) -> Result<()> {
         let mut docs = docs.peekable();
         while docs.peek().is_some() {
@@ -330,6 +362,7 @@ pub async fn run(opts: &Options) -> Result<()> {
         key: opts.key.clone(),
     };
     if opts.reset {
+        s.drop_rule().await?;
         s.drop(&format!("/aliases/{ALIAS}")).await?;
         for c in COLLECTIONS {
             s.drop(&format!("/collections/{c}")).await?;
@@ -338,6 +371,9 @@ pub async fn run(opts: &Options) -> Result<()> {
         s.drop(&format!("/curation_sets/{CURATION}")).await?;
         s.drop(&format!("/stopwords/{STOPWORDS}")).await?;
         s.drop(&format!("/presets/{PRESET}")).await?;
+        s.drop(&format!("/stemming/dictionaries/{DICTIONARY}"))
+            .await?;
+        s.drop_seed_keys().await?;
     }
     for c in COLLECTIONS {
         if s.exists(c).await? {
@@ -407,9 +443,54 @@ pub async fn run(opts: &Options) -> Result<()> {
         .put(format!("{}/presets/{PRESET}", opts.url))
         .json(&preset))
         .await?;
+    let rule = json!({
+        "name": POPULAR_RULE,
+        "type": "popular_queries",
+        "collection": "books",
+        "event_type": "search",
+        "params": {"destination_collection": "books_queries", "limit": 100},
+    });
+    s.ok(s
+        .http
+        .post(format!("{}/analytics/rules", opts.url))
+        .json(&rule))
+        .await?;
+    let words = [
+        json!({"word": "books", "root": "book"}),
+        json!({"word": "stories", "root": "story"}),
+        json!({"word": "libraries", "root": "library"}),
+    ];
+    let words: Vec<String> = words.iter().map(Value::to_string).collect();
+    s.ok(s
+        .http
+        .post(format!(
+            "{}/stemming/dictionaries/import?id={DICTIONARY}",
+            opts.url
+        ))
+        .header(reqwest::header::CONTENT_TYPE, "text/plain")
+        .body(words.join("\n")))
+        .await?;
+    // The value shows only here and is a secret, so only its id and prefix leave this function.
+    let key = json!({
+        "description": SEARCH_KEY,
+        "actions": ["documents:search"],
+        "collections": ["*"],
+    });
+    let created = s
+        .ok(s.http.post(format!("{}/keys", opts.url)).json(&key))
+        .await?;
+    let created: Value = serde_json::from_str(&created)?;
+    let prefix: String = created["value"]
+        .as_str()
+        .unwrap_or_default()
+        .chars()
+        .take(4)
+        .collect();
     println!(
         "alias {ALIAS} -> books, synonym set {SYNONYMS}, curation set {CURATION}, \
-         stopwords {STOPWORDS}, preset {PRESET}"
+         stopwords {STOPWORDS}, preset {PRESET}, rule {POPULAR_RULE}, dictionary {DICTIONARY}, \
+         key {} ({prefix}…)",
+        created["id"]
     );
     Ok(())
 }

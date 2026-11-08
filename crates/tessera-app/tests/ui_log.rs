@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret as _, SecretString};
 use tessera_app::connection::{ConnectorGlobal, tokio_connector};
 use tessera_app::runtime::Tokio;
 use tessera_app::state::AppState;
@@ -562,15 +562,13 @@ async fn connection_column_only_with_two_connections(cx: &mut TestAppContext) {
     assert!(!row_label(cx, handle, 5).contains("staging-eu"));
 }
 
-/// Spec §9 "Secrets": a whole session through the real client never puts the key into the
-/// log, the clipboard or `connections.json`.
-#[gpui_kit::test]
-async fn full_secret_session_scan(cx: &mut TestAppContext) {
-    use wiremock::matchers::path;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    const KEY: &str = "sk-live-test-1234";
-    // Everything traced at any level, on this thread and on the runtime's threads.
+/// Everything traced at any level, on this thread and on the threads of the runtime it returns.
+/// The capture of this thread ends with the guard.
+fn traced_runtime() -> (
+    Capture,
+    tracing::dispatcher::DefaultGuard,
+    tokio::runtime::Runtime,
+) {
     let traced = Capture::default();
     let dispatch = tracing::Dispatch::new(
         tracing_subscriber::fmt()
@@ -582,7 +580,7 @@ async fn full_secret_session_scan(cx: &mut TestAppContext) {
             })
             .finish(),
     );
-    let _trace_guard = tracing::dispatcher::set_default(&dispatch);
+    let guard = tracing::dispatcher::set_default(&dispatch);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -592,6 +590,18 @@ async fn full_secret_session_scan(cx: &mut TestAppContext) {
         })
         .build()
         .unwrap();
+    (traced, guard, rt)
+}
+
+/// Spec §9 "Secrets": a whole session through the real client never puts the key into the
+/// log, the clipboard or `connections.json`.
+#[gpui_kit::test]
+async fn full_secret_session_scan(cx: &mut TestAppContext) {
+    use wiremock::matchers::path;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const KEY: &str = "sk-live-test-1234";
+    let (traced, _trace_guard, rt) = traced_runtime();
     cx.update(|cx| cx.set_global(Tokio(rt.handle().clone())));
     cx.executor().allow_parking();
     let server = rt.block_on(async {
@@ -723,6 +733,141 @@ async fn full_secret_session_scan(cx: &mut TestAppContext) {
     assert!(!traced.contains(KEY), "key in tracing output");
     let saved = std::fs::read_to_string(&file_path).unwrap();
     assert!(!saved.contains(KEY), "key in connections.json");
+}
+
+/// D77: a provider key typed into the AI form reaches the server and nothing else, also when the
+/// provider's error echoes it: not the log, tracing, a file, the secret store or the form.
+#[gpui_kit::test]
+async fn provider_key_session_scan(cx: &mut TestAppContext) {
+    use serde_json::json;
+    use tessera_app::admin::{AdminBackendGlobal, tokio_backend};
+    use tessera_app::state::ResourceKind;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const KEY: &str = "sk-provider-test-5678";
+    let (traced, _trace_guard, rt) = traced_runtime();
+    cx.update(|cx| cx.set_global(Tokio(rt.handle().clone())));
+    cx.executor().allow_parking();
+    let server = rt.block_on(async {
+        let server = MockServer::start().await;
+        let echo = json!({"message": format!("Incorrect API key provided: {KEY}.")});
+        Mock::given(method("POST"))
+            .and(path("/nl_search_models"))
+            .and(body_string_contains(KEY))
+            .respond_with(ResponseTemplate::new(400).set_body_json(echo))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for (route, body) in [
+            ("/health", json!({"ok": true})),
+            ("/debug", json!({"state": 1, "version": "30.2"})),
+            ("/collections", json!([])),
+            ("/keys", json!({"keys": []})),
+            (
+                "/metrics.json",
+                json!({"system_cpu_active_percentage": "1"}),
+            ),
+            ("/conversations/models", json!([])),
+            ("/nl_search_models", json!([])),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+        }
+        server
+    });
+    let addr = server.address();
+    let profile = Profile::new(
+        "session",
+        vec![Node {
+            protocol: Protocol::Http,
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            path: String::new(),
+        }],
+    );
+    let secrets = Arc::new(MemoryStore::default());
+    secrets.set(profile.id, &SecretString::from("k")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("connections.json");
+    let file = ConnectionsFile {
+        profiles: vec![profile.clone()],
+        ..Default::default()
+    };
+    let (handle, state) = open_state_at(cx, Ok(file), Some(file_path.clone()), secrets.clone());
+    let tall = gpui_kit::size(gpui_kit::px(1200.), gpui_kit::px(1800.));
+    cx.simulate_window_resize(handle.into(), tall);
+    fake_backend(cx, Some((vec![], vec![])));
+    cx.update(|cx| {
+        cx.set_global(ConnectorGlobal(tokio_connector(rt.handle().clone())));
+        cx.set_global(AdminBackendGlobal(tokio_backend(rt.handle().clone())));
+    });
+    state.update(cx, |s, cx| s.connect(profile.id, None, cx));
+    wait_for_label(cx, handle, "status.text".into(), "session").await;
+    state.update(cx, |s, cx| {
+        s.open_resource(profile.id, ResourceKind::Ai, cx);
+    });
+    wait_for_element(cx, handle, "ai.conversation.reload".into(), true).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("ai.view.nl", cx)
+    })
+    .unwrap();
+    wait_for_element(cx, handle, "ai.nl.new".into(), true).await;
+    cx.update_window(handle.into(), |_, window, cx| window.click("ai.nl.new", cx))
+        .unwrap();
+    wait_for_element(cx, handle, "ai.form.key".into(), true).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        fill(window, "ai.form.model", "openai/gpt-4.1", cx);
+        fill(window, "ai.form.max_bytes", "1000", cx);
+        fill(window, "ai.form.key", KEY, cx);
+    })
+    .unwrap();
+    wait_for_element(cx, handle, "ai.save".into(), true).await;
+    cx.update_window(handle.into(), |_, window, cx| window.click("ai.save", cx))
+        .unwrap();
+    wait_for_element(cx, handle, "ai.error".into(), true).await;
+    let shown = cx
+        .update_window(handle.into(), |_, window, _| {
+            let error = window.find("ai.error");
+            error.label().unwrap_or_default().to_string()
+        })
+        .unwrap();
+    assert!(shown.contains("Incorrect API key"), "{shown}");
+    assert!(!shown.contains(KEY), "key in the error");
+
+    cx.update(|cx| state.update(cx, |s, cx| s.save(cx).detach()));
+    cx.wait_for(handle.into(), Duration::from_millis(10_000), {
+        let file_path = file_path.clone();
+        move |_, _| file_path.exists()
+    })
+    .await;
+    cx.wait_for(handle.into(), Duration::from_millis(10_000), |_, cx| {
+        let log = state.read(cx).log();
+        let entries = log.entries(&Filter::default());
+        entries.iter().any(|e| e.event.method == Method::POST)
+    })
+    .await;
+    let (debug, kept) = state.read_with(cx, |s, _| {
+        let entries = s.log().entries(&Filter::default());
+        let post = entries.iter().find(|e| e.event.method == Method::POST);
+        let kept =
+            post.is_some_and(|e| e.event.request_body.is_some() || e.event.response_body.is_some());
+        (format!("{entries:?}"), kept)
+    });
+    assert!(!kept, "a body in the log");
+    assert!(debug.contains("nl_search_models"), "{debug}");
+    assert!(!debug.contains(KEY), "key in log entries");
+    let traced = traced.text();
+    assert!(traced.contains("nl_search_models"), "{traced}");
+    assert!(!traced.contains(KEY), "key in tracing output");
+    let saved = std::fs::read_to_string(&file_path).unwrap();
+    assert!(!saved.contains(KEY), "key in connections.json");
+    let stored = secrets.get(profile.id).unwrap();
+    assert!(stored.is_some_and(|k| k.expose_secret() == "k"));
+    rt.block_on(server.verify());
 }
 
 #[gpui_kit::test]

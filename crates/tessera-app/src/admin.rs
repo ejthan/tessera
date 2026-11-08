@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! API keys, analytics and stemming: the backend seam the admin views run through.
+//! API keys, analytics, stemming and AI models: the backend seam the admin views run through.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,7 +8,9 @@ use std::sync::Arc;
 use gpui_kit::Global;
 use secrecy::SecretString;
 use serde_json::{Map, Value};
-use tessera_client::{ApiKey, Client, CreatedKey, Error, NewKey, StemmingDictionary, StemmingWord};
+use tessera_client::{
+    ApiKey, Client, CreatedKey, Error, ModelKind, NewKey, StemmingDictionary, StemmingWord,
+};
 use tessera_core::stemming::{
     BadLine, ImportCheck, STEMMING_FILE_LIMIT, check_import, parse_dictionary, to_jsonl,
 };
@@ -104,6 +106,46 @@ pub trait AdminBackend: Send + Sync {
 
     /// Deletes dictionary `id`.
     fn delete_dictionary(&self, client: Client, id: String) -> BoxFuture<Result<(), Error>>;
+
+    /// The models of `kind`.
+    fn ai_models(
+        &self,
+        client: Client,
+        kind: ModelKind,
+    ) -> BoxFuture<Result<Vec<Map<String, Value>>, Error>>;
+
+    /// Creates a model. The server calls the provider first.
+    fn create_ai_model(
+        &self,
+        client: Client,
+        kind: ModelKind,
+        body: Value,
+    ) -> BoxFuture<Result<Map<String, Value>, Error>>;
+
+    /// Changes model `id`. `body` holds no value that was read: `PUT` stores a mask as the key.
+    fn update_ai_model(
+        &self,
+        client: Client,
+        kind: ModelKind,
+        id: String,
+        body: Value,
+    ) -> BoxFuture<Result<Map<String, Value>, Error>>;
+
+    /// Deletes model `id`.
+    fn delete_ai_model(
+        &self,
+        client: Client,
+        kind: ModelKind,
+        id: String,
+    ) -> BoxFuture<Result<(), Error>>;
+
+    /// A search that reaches an LLM, and answers the JSON text.
+    fn ai_search(
+        &self,
+        client: Client,
+        collection: String,
+        params: Vec<(String, String)>,
+    ) -> BoxFuture<Result<String, Error>>;
 }
 
 /// The backend the views use.
@@ -112,6 +154,51 @@ pub struct AdminBackendGlobal(pub Arc<dyn AdminBackend>);
 impl Global for AdminBackendGlobal {}
 
 impl AdminBackend for TokioBackend {
+    fn ai_models(
+        &self,
+        client: Client,
+        kind: ModelKind,
+    ) -> BoxFuture<Result<Vec<Map<String, Value>>, Error>> {
+        self.run(async move { client.ai_models(kind).await })
+    }
+
+    fn create_ai_model(
+        &self,
+        client: Client,
+        kind: ModelKind,
+        body: Value,
+    ) -> BoxFuture<Result<Map<String, Value>, Error>> {
+        self.run(async move { client.create_ai_model(kind, &body).await })
+    }
+
+    fn update_ai_model(
+        &self,
+        client: Client,
+        kind: ModelKind,
+        id: String,
+        body: Value,
+    ) -> BoxFuture<Result<Map<String, Value>, Error>> {
+        self.run(async move { client.update_ai_model(kind, &id, &body).await })
+    }
+
+    fn delete_ai_model(
+        &self,
+        client: Client,
+        kind: ModelKind,
+        id: String,
+    ) -> BoxFuture<Result<(), Error>> {
+        self.run(async move { client.delete_ai_model(kind, &id).await })
+    }
+
+    fn ai_search(
+        &self,
+        client: Client,
+        collection: String,
+        params: Vec<(String, String)>,
+    ) -> BoxFuture<Result<String, Error>> {
+        self.run(async move { client.ai_search(&collection, &params).await })
+    }
+
     fn keys(&self, client: Client) -> BoxFuture<Result<Vec<ApiKey>, Error>> {
         self.run(async move { client.keys().await })
     }

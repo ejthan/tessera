@@ -159,7 +159,14 @@ impl SchemaDialog {
             .collections
             .clone();
         let diff = diff_with_references(old, &self.draft, all.as_deref().unwrap_or_default());
-        let text = serde_json::to_string_pretty(&diff.patch_body()).unwrap_or_default();
+        // Shows what goes out, except a key typed for a new embedding field.
+        let mut shown = diff.patch_body();
+        for field in shown["fields"].as_array_mut().into_iter().flatten() {
+            if let Some(embed) = field.get_mut("embed") {
+                mask_value(embed);
+            }
+        }
+        let text = serde_json::to_string_pretty(&shown).unwrap_or_default();
         let body = cx.new(|cx| JsonEditor::new(&text, true, window, cx));
         self.review = Some(Review { diff, body });
         self.step = Step::Review;

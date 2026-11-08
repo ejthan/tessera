@@ -2,6 +2,9 @@
 
 //! The views of the relevance resources, one tab per connection and kind.
 
+pub mod ai;
+pub mod ai_form;
+pub mod ai_test;
 pub mod aliases;
 pub mod analytics;
 pub mod attachment;
@@ -41,6 +44,7 @@ use tessera_core::profile::Profile;
 use tessera_widgets::confirm;
 use tessera_widgets::confirm_danger::{self, DangerOptions};
 
+use self::ai::AiView;
 use self::aliases::AliasesView;
 use self::analytics::AnalyticsView;
 use self::keys::KeysView;
@@ -69,6 +73,8 @@ pub enum ResourceView {
     Analytics(Entity<AnalyticsView>),
     /// See [`StemmingView`].
     Stemming(Entity<StemmingView>),
+    /// See [`AiView`].
+    Ai(Entity<AiView>),
 }
 
 impl ResourceView {
@@ -105,6 +111,7 @@ impl ResourceView {
             ResourceKind::Stemming => {
                 Self::Stemming(cx.new(|cx| StemmingView::new(connection, window, cx)))
             }
+            ResourceKind::Ai => Self::Ai(cx.new(|cx| AiView::new(connection, window, cx))),
         }
     }
 
@@ -118,6 +125,7 @@ impl ResourceView {
             Self::Keys(view) => view.clone().into(),
             Self::Analytics(view) => view.clone().into(),
             Self::Stemming(view) => view.clone().into(),
+            Self::Ai(view) => view.clone().into(),
         }
     }
 
@@ -131,6 +139,7 @@ impl ResourceView {
             Self::Keys(view) => view.focus_handle(cx),
             Self::Analytics(view) => view.focus_handle(cx),
             Self::Stemming(view) => view.focus_handle(cx),
+            Self::Ai(view) => view.focus_handle(cx),
         }
     }
 
@@ -144,6 +153,7 @@ impl ResourceView {
             Self::Keys(view) => view.read(cx).gates(cx),
             Self::Analytics(view) => view.read(cx).gates(cx),
             Self::Stemming(view) => view.read(cx).gates(cx),
+            Self::Ai(view) => view.read(cx).gates(cx),
         }
     }
 }
