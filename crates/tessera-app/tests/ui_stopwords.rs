@@ -182,6 +182,44 @@ async fn selecting_a_set_fills_the_editor(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn words_can_be_typed(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![set("en", &["the"])]).await;
+    f.click(cx, "stopwords.row.en");
+    let panel = f
+        .handle
+        .update(cx, |root, _, cx| {
+            let view = root.view().clone().downcast::<RootView>().unwrap();
+            let area = view.read(cx).dock().read(cx);
+            area.layout(DockPlacement::Center)
+                .unwrap()
+                .panels()
+                .filter_map(|id| area.panel(id)?.view().downcast::<ResourcePanel>().ok())
+                .next()
+                .unwrap()
+        })
+        .unwrap();
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        let ResourceView::Stopwords(view) = panel.read(cx).view() else {
+            panic!("not the stopwords view");
+        };
+        let editor = view.read(cx).editor().clone();
+        cx.update_entity(&editor, |e, cx| {
+            e.set_text("", window, cx);
+            e.focus(window, cx);
+        });
+    })
+    .unwrap();
+    f.press(cx, "a");
+    assert_eq!(f.editor_text(cx), "a");
+    f.press(cx, "tab");
+    assert_eq!(f.editor_text(cx), "a", "Tab moves on");
+    let locale = cx.update_window(f.handle.into(), |_, window, _| {
+        window.find("stopwords.locale".to_string()).focused()
+    });
+    assert_eq!(locale.unwrap(), Some(true));
+}
+
+#[gpui_kit::test]
 async fn save_shows_the_stored_words(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![set("en", &["the"])]).await;
     f.click(cx, "stopwords.row.en");
@@ -296,4 +334,96 @@ async fn a_new_set_stays_in_the_editor_while_the_list_changes(cx: &mut TestAppCo
     f.fill(cx, "stopwords.filter", "e");
     f.press(cx, REFRESH);
     assert_eq!(f.label(cx, "stopwords.editing"), "fresh");
+}
+
+#[gpui_kit::test]
+async fn unsaved_text_asks_before_another_row_replaces_it(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![set("en", &["the"]), set("de", &["der"])]).await;
+    f.click(cx, "stopwords.row.en");
+    f.set_editor(cx, "the\nmine");
+    f.click(cx, "stopwords.row.de");
+    assert!(f.has(cx, "confirm.body"));
+    assert_eq!(f.editor_text(cx), "the\nmine");
+    f.click(cx, "confirm.cancel");
+    assert_eq!(f.label(cx, "stopwords.editing"), "en");
+    // The row went back with the editor, so Delete acts on what shows.
+    f.press(cx, DELETE);
+    assert!(f.label(cx, "confirm.body").contains("404"));
+    f.click(cx, "confirm.cancel");
+    f.click(cx, "stopwords.row.de");
+    f.click(cx, "confirm.ok");
+    assert_eq!(f.label(cx, "stopwords.editing"), "de");
+    assert_eq!(f.editor_text(cx), "der");
+}
+
+#[gpui_kit::test]
+async fn unsaved_text_asks_before_new_replaces_it(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![set("en", &["the"])]).await;
+    f.click(cx, "stopwords.row.en");
+    f.set_editor(cx, "mine");
+    f.press(cx, NEW_DOCUMENT);
+    f.fill(cx, "resources.name", "fresh");
+    f.click(cx, "resources.name.ok");
+    assert!(f.has(cx, "confirm.body"));
+    assert_eq!(f.label(cx, "stopwords.editing"), "en");
+    f.click(cx, "confirm.ok");
+    assert_eq!(f.label(cx, "stopwords.editing"), "fresh");
+    assert_eq!(f.editor_text(cx), "");
+}
+
+#[gpui_kit::test]
+async fn an_unchanged_editor_moves_on_without_asking(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![set("en", &["the", "A"]), set("de", &["der"])]).await;
+    f.click(cx, "stopwords.row.en");
+    f.click(cx, "stopwords.row.de");
+    assert!(!f.has(cx, "confirm.body"));
+    assert_eq!(f.label(cx, "stopwords.editing"), "de");
+}
+
+#[gpui_kit::test]
+async fn after_new_the_old_row_opens_and_delete_has_no_target(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![set("en", &["the"])]).await;
+    f.click(cx, "stopwords.row.en");
+    f.press(cx, NEW_DOCUMENT);
+    f.fill(cx, "resources.name", "fresh");
+    f.click(cx, "resources.name.ok");
+    f.press(cx, DELETE);
+    assert!(!f.has(cx, "confirm.body"));
+    f.click(cx, "stopwords.row.en");
+    assert_eq!(f.label(cx, "stopwords.editing"), "en");
+}
+
+#[gpui_kit::test]
+async fn a_saved_new_set_becomes_the_selected_row(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![set("en", &["the"])]).await;
+    f.press(cx, NEW_DOCUMENT);
+    f.fill(cx, "resources.name", "fresh");
+    f.click(cx, "resources.name.ok");
+    f.set_editor(cx, "word");
+    f.press(cx, SAVE);
+    // The focus is in the editor, whose ⌘⌫ edits the text.
+    f.click(cx, "stopwords.delete");
+    assert!(f.has(cx, "confirm.body"));
+    f.click(cx, "confirm.ok");
+    assert_eq!(
+        f.calls(),
+        ["save_stopwords fresh", "delete_stopwords fresh"]
+    );
+}
+
+#[gpui_kit::test]
+async fn a_running_save_blocks_another_and_spares_the_next_set(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![set("en", &["the"]), set("de", &["der"])]).await;
+    f.click(cx, "stopwords.row.en");
+    let (release, hold) = tokio::sync::oneshot::channel();
+    *f.relevance.hold.lock().unwrap() = Some(hold);
+    f.set_editor(cx, "mine");
+    f.press(cx, SAVE);
+    f.press(cx, SAVE);
+    assert_eq!(f.calls(), ["save_stopwords en"]);
+    f.click(cx, "stopwords.row.de");
+    f.click(cx, "confirm.ok");
+    release.send(()).unwrap();
+    assert_eq!(f.label(cx, "stopwords.editing"), "de");
+    assert_eq!(f.editor_text(cx), "der");
 }

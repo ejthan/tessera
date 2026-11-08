@@ -90,12 +90,22 @@ pub struct OpenCollections(pub Uuid);
 /// Asks the window to show the tab of one collection of a profile.
 pub struct OpenCollection(pub Uuid, pub String);
 
+/// The preset a search tab edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresetTarget {
+    /// Its name.
+    pub name: String,
+    /// Its `searches` wrapper, see `preset_wrapper`.
+    pub wrapper: Option<bool>,
+}
+
 /// Asks the window to show the search tab of a profile, with `.1` loaded into it when given:
-/// the searches and whether they run as a union. `.2` then names the preset they edit.
+/// the searches and whether they run as a union. `.2` then names the preset they edit, and a
+/// draft with no collection stays on the tab's.
 pub struct OpenSearch(
     pub Uuid,
     pub Option<(Vec<SearchDraft>, bool)>,
-    pub Option<String>,
+    pub Option<PresetTarget>,
 );
 
 /// Asks the window to show the console tab of a profile.
@@ -142,11 +152,10 @@ impl ResourceKind {
         format!("sidebar.{}", self.key())
     }
 
-    /// Whether a server of that support gets a row: a kind appears with its view (UX rule 4),
-    /// and synonym and curation sets do not exist below v30.
+    /// Whether a server of that support gets a row: synonym and curation sets do not exist
+    /// below v30.
     pub fn shown(self, supported: bool) -> bool {
-        let arrived = matches!(self, Self::Aliases | Self::Stopwords | Self::Presets);
-        arrived && (supported || !matches!(self, Self::Synonyms | Self::Curations))
+        supported || !matches!(self, Self::Synonyms | Self::Curations)
     }
 }
 
@@ -881,7 +890,7 @@ impl AppState {
         &mut self,
         id: Uuid,
         loaded: Option<(Vec<SearchDraft>, bool)>,
-        preset: Option<String>,
+        preset: Option<PresetTarget>,
         cx: &mut Context<Self>,
     ) {
         self.selected = Some(id);

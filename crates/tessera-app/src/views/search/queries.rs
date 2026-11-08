@@ -26,7 +26,7 @@ use rust_i18n::t;
 use serde_json::Value;
 use tessera_client::{MULTI_SEARCH_LIMIT, Preset};
 use tessera_core::search::HISTORY_SETTLE_MS;
-use tessera_core::search::history::{HistoryEntry, HistoryItem, search_entry, without_secrets};
+use tessera_core::search::history::{HistoryEntry, HistoryItem, search_entry};
 use tessera_core::search::params::SearchDraft;
 use tessera_core::search::presets::{PresetError, preset_drafts, preset_value};
 use tessera_core::search::saved::{SavedQuery, savable};
@@ -36,8 +36,8 @@ use uuid::Uuid;
 use super::super::env_badge;
 use super::super::resources::titled;
 use super::{SearchWorkbench, param_error_text};
-use crate::actions::{DeleteSavedQuery, QUERY_LIST, SaveQuery, WORKBENCH};
-use crate::connection::error_text;
+use crate::actions::{DeleteSavedQuery, LeavePreset, QUERY_LIST, SaveQuery, WORKBENCH};
+use crate::connection::{PresetsChanged, error_text};
 use crate::search::SearchBackendGlobal;
 
 /// Height of a row of a list.
@@ -638,7 +638,8 @@ impl SearchWorkbench {
     }
 
     fn submit_preset(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let value = match preset_value(&without_secrets(&self.drafts), self.union) {
+        let (drafts, dropped) = savable(&self.drafts);
+        let value = match preset_value(&drafts, self.union, None) {
             Ok(value) => value,
             Err(error) => {
                 self.queries.write_error = Some(param_error_text(&error).into());
@@ -647,7 +648,7 @@ impl SearchWorkbench {
         };
         let known = self.queries.presets.iter().flatten().flatten();
         if !known.into_iter().any(|p| p.name == name) {
-            return self.send_preset(name, value, cx);
+            return self.send_preset(name, value, dropped, cx);
         }
         let this = cx.entity().downgrade();
         let body = t!("search.preset.replace_body", name = name).to_string();
@@ -657,7 +658,7 @@ impl SearchWorkbench {
             t!("search.preset.replace").to_string(),
             move |_, cx| {
                 this.update(cx, |this, cx| {
-                    this.send_preset(name.clone(), value.clone(), cx);
+                    this.send_preset(name.clone(), value.clone(), dropped, cx);
                 })
                 .ok();
             },
@@ -668,10 +669,12 @@ impl SearchWorkbench {
 
     /// Saves to the preset of preset mode, keys left out, asking first on prod.
     pub(super) fn save_preset_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(name) = self.preset.clone().filter(|_| !self.save_blocked(cx)) else {
+        let Some(preset) = self.preset.clone().filter(|_| !self.save_blocked(cx)) else {
             return;
         };
-        let value = match preset_value(&without_secrets(&self.drafts), self.union) {
+        let name = preset.name;
+        let (drafts, dropped) = savable(&self.drafts);
+        let value = match preset_value(&drafts, self.union, preset.wrapper) {
             Ok(value) => value,
             Err(error) => {
                 self.queries.write_error = Some(param_error_text(&error).into());
@@ -687,7 +690,7 @@ impl SearchWorkbench {
                     let name = name.clone();
                     move |cx: &mut App| {
                         this.update(cx, |this, cx| {
-                            this.send_preset(name.clone(), value.clone(), cx);
+                            this.send_preset(name.clone(), value.clone(), dropped, cx);
                         })
                         .ok();
                     }
@@ -713,7 +716,7 @@ impl SearchWorkbench {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
-        let name = self.preset.as_ref()?;
+        let name = self.preset()?;
         let text = SharedString::from(t!("presets.mode", name = name).to_string());
         let locked = self.connection.read(cx).writes_locked();
         Some(
@@ -748,26 +751,41 @@ impl SearchWorkbench {
                     Button::new("presets.leave")
                         .small()
                         .label(t!("presets.leave").to_string())
-                        .on_click(cx.listener(|this, _, _, cx| this.set_preset(None, cx))),
+                        .children(Kbd::binding_for_action(
+                            &LeavePreset,
+                            Some(WORKBENCH),
+                            window,
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| this.leave_preset(cx))),
                 ),
         )
     }
 
-    /// Detached: closing the tab must not abort a write.
-    fn send_preset(&mut self, name: String, value: Value, cx: &mut Context<Self>) {
+    /// Detached: closing the tab must not abort a write. `dropped`: `value` lost key parameters.
+    fn send_preset(&mut self, name: String, value: Value, dropped: bool, cx: &mut Context<Self>) {
         self.queries.write_error = None;
         let Some(connected) = &self.connection.read(cx).connected else {
             self.queries.write_error = Some(t!("status.not_connected").to_string().into());
             return cx.notify();
         };
         let backend = cx.global::<SearchBackendGlobal>().0.clone();
-        let save = backend.save_preset(connected.client.clone(), name, value);
+        let save = backend.save_preset(connected.client.clone(), name.clone(), value.clone());
+        let connection = self.connection.clone();
         cx.spawn(async move |this, cx| {
             let result = save.await;
+            if result.is_ok() {
+                connection.update(cx, |_, cx| cx.emit(PresetsChanged));
+            }
             this.update(cx, |this, cx| {
                 let profile = &this.connection.read(cx).profile;
-                let error = result.err().map(|e| error_text(&e, profile).into());
-                this.queries.write_error = error;
+                this.queries.write_error = match result {
+                    Err(e) => Some(error_text(&e, profile).into()),
+                    Ok(stored) if stored != value => {
+                        Some(t!("presets.mismatch", name = name).to_string().into())
+                    }
+                    Ok(_) if dropped => Some(t!("search.save.secrets_dropped").to_string().into()),
+                    Ok(_) => None,
+                };
                 cx.notify();
             })
             .ok();

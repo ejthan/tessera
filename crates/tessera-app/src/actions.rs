@@ -132,7 +132,23 @@ gpui_kit::actions!(
         DeleteResource,
         ReloadResource,
         FocusResourceFilter,
-        SaveResource
+        SaveResource,
+        LeavePreset,
+        NewSetItem,
+        DeleteSetItem,
+        ShowItems,
+        ShowSetJson,
+        ShowAttachment,
+        ImportResource,
+        ExportResource,
+        DetachMissing,
+        CreateMissingSet,
+        ShowTest,
+        RunTest,
+        MoveRowUp,
+        MoveRowDown,
+        NextControl,
+        PreviousControl
     ]
 );
 
@@ -208,6 +224,28 @@ const RESOURCES_INPUT: &str = "Resources > Input";
 pub const ALIAS_DIALOG: &str = "AliasDialog";
 /// An input in that dialog, which has its own ⌘↩.
 const ALIAS_INPUT: &str = "AliasDialog > Input";
+/// Key context of the items of a set, where New and Delete mean an item.
+pub const SET_ITEMS: &str = "SetItems";
+/// Key context of the item dialog.
+pub const SET_ITEM_DIALOG: &str = "SetItemDialog";
+/// An input in that dialog, which has its own ⌘↩.
+const SET_ITEM_INPUT: &str = "SetItemDialog > Input";
+/// Key context of the import and export dialogs of a set.
+pub const SET_IMPORT_DIALOG: &str = "SetImportDialog";
+/// An input in that dialog, which has its own ⌘↩.
+const SET_IMPORT_INPUT: &str = "SetImportDialog > Input";
+/// Key context of a raw JSON block in a form.
+pub const RAW_BLOCK: &str = "RawBlock";
+/// The editor of that block: its Tab moves on, or a form would end there.
+const RAW_BLOCK_INPUT: &str = "RawBlock > Input";
+/// Key context of a row of pinned documents.
+pub const INCLUDE_ROW: &str = "IncludeRow";
+/// An input in that row, which has its own ⌘↩.
+const INCLUDE_ROW_INPUT: &str = "IncludeRow > Input";
+/// Key context of the test panel of a set.
+pub const TEST_PANEL: &str = "TestPanel";
+/// An input in that panel, which has its own ⌘↩.
+const TEST_PANEL_INPUT: &str = "TestPanel > Input";
 /// Key context of a list in a toolbar.
 pub const QUERY_LIST: &str = "QueryList";
 /// The filter of that list, which keeps the focus while the arrows move the selection.
@@ -464,6 +502,10 @@ const OPEN_SAVED: &str = "cmd-o";
 #[cfg(not(target_os = "macos"))]
 const OPEN_SAVED: &str = "ctrl-o";
 #[cfg(target_os = "macos")]
+const LEAVE_PRESET: &str = "cmd-shift-g";
+#[cfg(not(target_os = "macos"))]
+const LEAVE_PRESET: &str = "ctrl-shift-g";
+#[cfg(target_os = "macos")]
 const SAVE_QUERY: &str = "cmd-s";
 #[cfg(not(target_os = "macos"))]
 const SAVE_QUERY: &str = "ctrl-s";
@@ -578,6 +620,18 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     ReloadResource,
     FocusResourceFilter,
     SaveResource,
+    LeavePreset,
+    NewSetItem,
+    DeleteSetItem,
+    ShowItems,
+    ShowSetJson,
+    ShowAttachment,
+    ImportResource,
+    ExportResource,
+    DetachMissing,
+    CreateMissingSet,
+    ShowTest,
+    RunTest,
     StopWaiting,
     RemoveBodyFile,
     ShowResponseBody,
@@ -645,6 +699,10 @@ pub const PALETTE_HIDDEN: &[&str] = &[
     "tessera::PasteImport",
     "tessera::StartTransfer",
     "tessera::InferFromFile",
+    "tessera::MoveRowUp",
+    "tessera::MoveRowDown",
+    "tessera::NextControl",
+    "tessera::PreviousControl",
 ];
 
 /// The locale key of the label of action `name`, when the palette lists it.
@@ -833,6 +891,32 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SAVE, SaveResource, Some(RESOURCES_INPUT)),
         KeyBinding::new(SAVE, SaveResource, Some(ALIAS_DIALOG)),
         KeyBinding::new(SAVE, SaveResource, Some(ALIAS_INPUT)),
+        KeyBinding::new(SAVE, SaveResource, Some(SET_ITEM_DIALOG)),
+        KeyBinding::new(SAVE, SaveResource, Some(SET_ITEM_INPUT)),
+        KeyBinding::new(SAVE, SaveResource, Some(INCLUDE_ROW_INPUT)),
+        KeyBinding::new("alt-up", MoveRowUp, Some(INCLUDE_ROW)),
+        KeyBinding::new("alt-down", MoveRowDown, Some(INCLUDE_ROW)),
+        KeyBinding::new("tab", NextControl, Some(RAW_BLOCK_INPUT)),
+        KeyBinding::new("shift-tab", PreviousControl, Some(RAW_BLOCK_INPUT)),
+        KeyBinding::new(SAVE, SaveResource, Some(RAW_BLOCK_INPUT)),
+        KeyBinding::new(SHOW_FORM, ShowForm, Some(SET_ITEM_DIALOG)),
+        KeyBinding::new(SHOW_JSON, ShowJson, Some(SET_ITEM_DIALOG)),
+        KeyBinding::new(FIND, FocusQuery, Some(SET_ITEM_DIALOG)),
+        KeyBinding::new(NEW_COLLECTION, NewSetItem, Some(SET_ITEMS)),
+        KeyBinding::new(DELETE, DeleteSetItem, Some(SET_ITEMS)),
+        KeyBinding::new(SHOW_FORM, ShowItems, Some(RESOURCES)),
+        KeyBinding::new(SHOW_JSON, ShowSetJson, Some(RESOURCES)),
+        KeyBinding::new(SHOW_HITS, ShowAttachment, Some(RESOURCES)),
+        KeyBinding::new(SHOW_RAW, ShowTest, Some(RESOURCES)),
+        KeyBinding::new(SAVE, RunTest, Some(TEST_PANEL)),
+        KeyBinding::new(SAVE, RunTest, Some(TEST_PANEL_INPUT)),
+        KeyBinding::new(FIND, FocusQuery, Some(TEST_PANEL)),
+        KeyBinding::new(IMPORT_DOCUMENTS, ImportResource, Some(RESOURCES)),
+        KeyBinding::new(EXPORT_DOCUMENTS, ExportResource, Some(RESOURCES)),
+        KeyBinding::new(DELETE_QUERY, DetachMissing, Some(RESOURCES)),
+        KeyBinding::new(SAVE_MODE, CreateMissingSet, Some(RESOURCES)),
+        KeyBinding::new(SAVE, StartTransfer, Some(SET_IMPORT_DIALOG)),
+        KeyBinding::new(SAVE, StartTransfer, Some(SET_IMPORT_INPUT)),
         KeyBinding::new(SHOW_FULL_BODY, ShowFullBody, Some(REQUEST_LOG)),
         KeyBinding::new(LOCK_AGAIN, LockAgain, Some(CONSOLE)),
         KeyBinding::new(SAVE, SendRequest, Some(CONSOLE)),
@@ -872,6 +956,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_HISTORY, OpenHistory, Some(WORKBENCH)),
         KeyBinding::new(OPEN_SAVED, OpenSaved, Some(WORKBENCH)),
         KeyBinding::new(SAVE_QUERY, SaveQuery, Some(WORKBENCH)),
+        KeyBinding::new(LEAVE_PRESET, LeavePreset, Some(WORKBENCH)),
         KeyBinding::new(OPEN_PRESETS, OpenPresets, Some(WORKBENCH)),
         KeyBinding::new(OPEN_EXPORT, OpenExport, Some(WORKBENCH)),
         KeyBinding::new(COPY_DOC_CURL, CopyCurl, Some(WORKBENCH)),

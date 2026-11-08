@@ -202,19 +202,19 @@ pub struct SynonymDraft { pub id: String, pub root: String, pub synonyms: Vec<St
     pub locale: String, pub symbols_to_index: Vec<String>, pub extra: Map<String, Value> }
 impl SynonymDraft { pub fn from_value(&Value) -> Result<Self, ModelError>; pub fn to_value(&self) -> Value; }
 
-pub struct CurationDraft { pub id: String, pub rule: RuleDraft, pub includes: Vec<(String, i64)>, pub excludes: Vec<String>,
+pub struct CurationDraft { pub id: String, pub rule: RuleDraft, pub includes: Vec<Include>, pub excludes: Vec<Exclude>,
     pub filter_by: String, pub sort_by: String, pub replace_query: String, pub remove_matched_tokens: bool,
     pub filter_curated_hits: bool, pub stop_processing: bool, pub effective_from_ts: Option<i64>,
     pub effective_to_ts: Option<i64>, pub metadata: Option<Map<String, Value>>, pub extra: Map<String, Value> }
 pub struct RuleDraft { pub query: String, pub r#match: String, pub filter_by: String, pub tags: Vec<String>,
     pub synonyms: bool, pub stem: bool, pub extra: Map<String, Value> }
 
-pub enum ItemIssue { /* §5.2 table */ }
+pub enum ItemIssue { /* §5.2 table, and AtRow(usize, Box<ItemIssue>): an issue of that row of a file or paste */ }
 pub fn check_synonym(draft: &SynonymDraft) -> Vec<ItemIssue>;
 pub fn check_curation(draft: &CurationDraft) -> Vec<ItemIssue>;
 pub fn check_items(items: &[Value]) -> Vec<ItemIssue>;            // duplicates, no id
 pub struct Changes { pub added: Vec<String>, pub changed: Vec<String>, pub removed: Vec<String> }
-pub fn changes(old: &[Value], new: &[Value]) -> Changes;          // by `id`
+pub fn changes(kind: SetKind, old: &[Value], new: &[Value]) -> Changes; // by `id`, both sides through the draft
 pub fn sort_fields(sort_by: &str) -> Vec<String>;
 ```
 
@@ -230,6 +230,7 @@ Errors stop a save, because the server would store them without complaint. Warni
 | Rule with neither query plus match, non-empty tags, nor `filter_by` | error | Rule |
 | No action: all of includes, excludes, `metadata`, `filter_by`, `sort_by`, `replace_query` empty, and `remove_matched_tokens` false | error | Same list as the server's message |
 | An include without an id, or with a `position` below 1 | error | Rule |
+| Two includes on one `position` | error | Rule. The server answers 200 and curates only one of them |
 | The same document in includes and excludes | error | Rule |
 | `effective_from_ts` after `effective_to_ts` | error | Rule |
 | `sort_by` names a field missing from an attached collection | warning | `sort_fields` against the schemas of attached collections, skipping `_text_match`, `_eval(…)`, `_vector_distance`, `_seq_id`, `_group_found` and `$` joins. Such a rule fails every search it matches |
@@ -244,8 +245,8 @@ pub fn users<'a>(collections: &'a [Collection], kind: SetKind, name: &str) -> Ve
 pub struct Missing { pub set: String, pub collections: Vec<String> }
 pub fn missing(collections: &[Collection], kind: SetKind, known: &[String]) -> Vec<Missing>;
 pub struct NewList { pub list: Vec<String>, pub dropped: Vec<String> }
-pub fn with_set(current: &[String], known: &[String], name: &str) -> NewList;
-pub fn without_set(current: &[String], known: &[String], name: &str) -> NewList;
+pub fn with_set(current: &[String], known: &[String], name: &str) -> Result<NewList, NoKnownSets>;
+pub fn without_set(current: &[String], known: &[String], name: &str) -> Result<NewList, NoKnownSets>;
 pub fn attachment_patch(kind: SetKind, list: &[String]) -> Value; // {"synonym_sets":[…]}
 ```
 
@@ -257,12 +258,15 @@ pub fn attachment_patch(kind: SetKind, list: &[String]) -> Value; // {"synonym_s
 pub fn synonyms_to_json(items: &[Value]) -> String;   // {"items":[…]}, pretty
 pub fn synonyms_to_csv(items: &[SynonymDraft]) -> String;
 pub fn parse_synonyms(text: &str, format: SetFormat) -> Result<Vec<Value>, SetFileError>;
+pub fn parse_edited(kind: SetKind, text: &str, stored: &[Value]) -> Result<Vec<Value>, SetFileError>; // the JSON tab of either kind
 pub fn merged(current: &[Value], incoming: &[Value]) -> Vec<Value>; // by id, incoming wins, order kept
 ```
 
+`SetFileError` holds `Json`, `Csv`, `Items`, `TooLarge` and `Read`, a file that could not be read. `parse_synonyms` checks every row of a file. `parse_edited` checks only rows that are new or changed against the fresh set, so a stored row nobody touched does not block a save.
+
 D67. The CSV has the header `id,root,synonyms,locale,symbols_to_index`, written with the `csv` crate. List cells join with `;`, the separator business tools use after `,`. A value that holds a `;`, or a list that starts with `[`, is written as a JSON array in the cell, the way M5 treats list cells (D51), and the reader takes such a cell as JSON, so the round trip is lossless. A blank `id` becomes `row_{n}`. JSON accepts `{"items":[…]}` or a bare array. Cells stay verbatim, with the existing hint of D55. Files are limited to `CLIPBOARD_LIMIT` (16 MiB).
 
-`parse_synonyms` runs `check_items`, so a file with duplicate ids is refused with both row numbers.
+`parse_synonyms` runs `check_items`, so a file with duplicate ids is refused with both row numbers, and `check_synonym` on every row, so a cell that holds one word and a row of empty cells are reported with their row. The CSV delimiter comes from the header line: comma, tab, or `;`, and with `;` between columns a list cell splits at `,`. A UTF-8 byte order mark is skipped.
 
 ### 5.5 Test sides (`test.rs`)
 
@@ -329,7 +333,7 @@ pub trait RelevanceBackend: Send + Sync {
     fn alias(&self, client: Client, name: String) -> BoxFuture<Result<Alias, Error>>;
     fn delete_alias(&self, client: Client, name: String) -> BoxFuture<Result<(), Error>>;
     fn delete_preset(&self, client: Client, name: String) -> BoxFuture<Result<(), Error>>;
-    fn attach(&self, client: Client, kind: SetKind, collection: String, set: String, attach: bool) -> BoxFuture<Result<AttachOutcome, Error>>;
+    fn attach(&self, client: Client, kind: SetKind, collection: String, set: String, attach: bool) -> BoxFuture<Result<AttachOutcome, AttachError>>;
     fn read_set_file(&self, path: PathBuf) -> BoxFuture<Result<String, SetFileError>>;
     fn write_set_file(&self, path: PathBuf, text: String) -> BoxFuture<Result<(), String>>;
     fn copy_dir(&self) -> BoxFuture<Result<Arc<TempDir>, String>>;
@@ -424,7 +428,7 @@ The list half of each view is a `DataTable` with a `TableDelegate`, as `collecti
 └─────────────────────────────────────────┴─────────────────────────────────────────────────┘
 ```
 
-Two `HitsView` entities (`views/search/hits.rs`, which already marks curated hits), filled through `SearchBackend::search`, so both requests are in the request log 1:1. Common parameters: `q`, `query_by`, `per_page=10`, `enable_analytics=false` (D35). `query_by` starts from `query_fields(schema)`, joined by commas, in a plain input. An empty `query_by` with `q=*` is allowed. Each side has its own error, inline, so a failed side leaves the other. Both requests start together and either result shows when it arrives; a new Run drops the old tasks, and a stale result cannot arrive. Tests are reads, so they run on a locked profile.
+Two `HitsView` entities (`views/search/hits.rs`, which already marks curated hits), filled through `SearchBackend::search`, so both requests are in the request log 1:1. Common parameters: `q`, `query_by`, `per_page=10`, `enable_analytics=false` (D35). `query_by` starts from `text_query_fields(schema)`, joined by commas, in a plain input: the server refuses a text query on a vector field that does not embed. An empty `query_by` with `q=*` is allowed. Each side has its own error, inline, so a failed side leaves the other. Both requests start together and either result shows when it arrives; a new Run drops the old tasks, and a stale result cannot arrive. Tests are reads, so they run on a locked profile.
 
 | Kind | Set on the collection? | Left | Right | The panel says |
 |---|---|---|---|---|
@@ -448,7 +452,7 @@ The Collections tab lists every collection with a `Checkbox`, and a filter. The 
 
 `invalidate_collections` runs afterwards, so the collections tab's counts and open schema views follow.
 
-**Delete set** (D58, D62): reloads collections and sets, then asks. With users, the consequences say which collections lose the set and that a set cannot stay attached, because every search on a collection fails while it does (synonyms) or its later schema changes fail (curations). The action first detaches from each user with `attach(…, false)`, in order, then deletes, then reads the collection list again and checks that no collection names the set. If a detach fails, it stops: the set stays, the dialog shows the error, and the collections done are named. If deletion fails after the detaches, the dialog says the set still exists and is no longer attached, and which ones to re-attach. Running this inside `ConfirmDanger`'s task keeps the dialog busy until it ends, and "Stop waiting" leaves it running.
+**Delete set** (D58, D62): reloads collections and sets, then asks. With users, the consequences say which collections lose the set and that a set cannot stay attached, because every search on a collection fails while it does (synonyms) or its later schema changes fail (curations). The action first detaches from each user with `attach(…, false)`, in order, then deletes, then reads the collection list again and checks that no collection names the set. If a detach fails, or its answer is a list that still names the set, it stops: the set stays, the dialog shows the error, and the collections done are named. Names a detach left out show as a note. If the list after the delete cannot be read, the dialog says the set is deleted and the attachment state is not verified. If deletion fails after the detaches, the dialog says the set still exists and is no longer attached, and which ones to re-attach. Running this inside `ConfirmDanger`'s task keeps the dialog busy until it ends, and "Stop waiting" leaves it running.
 
 ### 7.8 Curation sets
 
@@ -474,7 +478,7 @@ The Collections tab lists every collection with a `Checkbox`, and a filter. The 
 
 - **Tabs** convert through the draft, as the schema dialog's form and JSON do. Invalid JSON stays in the editor, with the form unchanged and Save disabled.
 - **Includes** are `(id, position)`. Rows reorder by drag, with the `DragChip` pattern of `views/search/form.rs:600-612` (`on_drag`, `on_drop`), and by ⌥↑ ⌥↓ on the focused row, the keyboard way UX rule 5 needs. Reordering renumbers positions 1 to n. A typed position stays, and order follows it.
-- **Document picker:** `SearchBackend::search` with `q` (or `*`), `query_by` from `query_fields`, `per_page=20`, `enable_curations=false`, `enable_analytics=false`, `exclude_fields` of vector fields, so the picker shows stored documents. A row shows the id and the first string field, with `+ Pin` and `+ Hide`. The collection select lists attached collections first, and any other. A manual id input stays, because a document may be in several collections.
+- **Document picker:** `SearchBackend::search` with `q` (or `*`), `query_by` from `text_query_fields`, `per_page=20`, `enable_curations=false`, `enable_analytics=false`, `exclude_fields` of vector fields, so the picker shows stored documents. A row shows the id and the first string field, with `+ Pin` and `+ Hide`. The collection select lists attached collections first, and any other. A manual id input stays, because a document may be in several collections.
 - **Dates:** two `DatePickerState`s with minute precision and a label saying UTC: `effective_*_ts` are absolute, and showing the viewer's zone would make a rule read differently between colleagues. Conversion uses `chrono::NaiveDateTime::and_utc().timestamp()`, and `chrono = "=0.4.45"` becomes a direct dependency of `tessera-app`, the same version `Cargo.lock` has, since the kit's picker exposes that type and `gpui_kit` does not re-export it. Clearable, because both are optional.
 - **Version gate:** `rule.synonyms` and `rule.stem` show at ≥ 30.2 by a new `ServerCapabilities::rule_flags()`. On an older server, set values in `extra` would be silently dropped, so a draft that has them shows a note.
 - **Checks:** `check_curation` errors disable Save with the text inline. The `sort_by` warning reads the schemas of the set's attached collections from the collection cache.
@@ -530,8 +534,8 @@ Start: `ensure_writable`, `Confirm` on prod (D49), `CollectionsBackend::create`.
 
 `views/resources/presets.rs`. A table (name, kind, summary). `Kind` from core's `preset_kind(value)`: `Search`, `Multi(n)`, `Union(n)`, `Invalid`. Summary: `q` and `query_by`, or the collections. An `Invalid` value stays listed, with the reason and Delete; Open is disabled.
 
-- **Open ⌘E** opens the workbench in preset mode. `OpenSearch` gains a third field, the preset name: `OpenSearch(Uuid, Option<(Vec<SearchDraft>, bool)>, Option<String>)`. The root's handler calls `workbench.load(drafts, union, window, cx)` then `workbench.set_preset(name, cx)`. `preset_drafts` and `preset_value` move from `views/search/queries.rs` to `tessera_core::search::presets`, so the list and the workbench read values the same way and core tests them. `preset_drafts`' text errors become a `PresetError` enum that the app translates (rule 7).
-- **Preset mode** is one field, `SearchWorkbench::preset: Option<String>`. A band above the toolbar shows `Preset {name}`, with `Save ⌘S` and `Leave`. `SaveQuery` (⌘S) in this mode saves to that preset through `send_preset`, with `Confirm` on prod and `ensure_writable`. `load` clears the field when it comes from elsewhere. Runs behave as always, against the chosen collection; a preset keeps no collection unless it has several searches.
+- **Open ⌘E** opens the workbench in preset mode. `OpenSearch` gains a third field, the preset: `OpenSearch(Uuid, Option<(Vec<SearchDraft>, bool)>, Option<PresetTarget>)`, where `PresetTarget` holds the name and the `searches` wrapper. The root's handler calls `workbench.open_preset(drafts, union, target, window, cx)`, which loads and then sets the mode. `preset_drafts` and `preset_value` move from `views/search/queries.rs` to `tessera_core::search::presets`, so the list and the workbench read values the same way and core tests them. `preset_drafts`' text errors become a `PresetError` enum that the app translates (rule 7).
+- **Preset mode** is one field, `SearchWorkbench::preset: Option<PresetTarget>`. A band above the toolbar shows `Preset {name}`, with `Save ⌘S` and `Leave`. `SaveQuery` (⌘S) in this mode saves to that preset through `send_preset`, with `Confirm` on prod and `ensure_writable`. `load` clears the field when it comes from elsewhere. Runs behave as always, against the chosen collection; a flat preset keeps no collection. A preset opened with a `searches` wrapper keeps it on Save, with its collection and `union`, even with one search: `POST /multi_search?preset=` refuses the flat shape with 400 "Missing `searches` array" on 30.2.
 - **New ⇧⌘N** asks a name (`name_ok`, fresh check), then opens the workbench in preset mode on an empty draft of the current collection. The preset exists only after the first Save, so cancelling costs nothing.
 - **Delete:** D62, with the consequence that a search naming it keeps working but silently loses its parameters (§4.4).
 

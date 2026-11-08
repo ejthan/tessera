@@ -24,7 +24,9 @@ use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
 use tessera_app::documents::{DocumentsBackend, DocumentsBackendGlobal, PageResult};
 use tessera_app::jobs::{self, JobId, JobsGlobal};
 use tessera_app::poller::{CollectionsFetcherGlobal, NodeSample, PollFetcherGlobal, SampleFuture};
-use tessera_app::relevance::{RelevanceBackend, RelevanceBackendGlobal};
+use tessera_app::relevance::{
+    AttachError, AttachOutcome, RelevanceBackend, RelevanceBackendGlobal,
+};
 use tessera_app::runtime::Tokio;
 use tessera_app::search::{MultiAnswer, SearchAnswer, SearchBackend, SearchBackendGlobal};
 use tessera_app::state::AppState;
@@ -33,10 +35,12 @@ use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::root::RootView;
 use tessera_client::{
     Alias, Client, ClientOptions, Collection, CollectionSummary, Debug, DocumentQuery, Error,
-    Health, KeyAccess, Metrics, NodeClient, Origin, SchemaChange, Stats, StopwordSet,
+    Health, ItemSet, KeyAccess, Metrics, NodeClient, Origin, SchemaChange, SetKind, Stats,
+    StopwordSet,
 };
 use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
+use tessera_core::relevance::synonym_file::SetFileError;
 use tessera_core::search::results::{parse_multi, parse_result};
 use tessera_core::secrets::{MemoryStore, SecretStore};
 use tessera_core::store::{ConnectionsFile, StoreError};
@@ -1068,6 +1072,8 @@ pub struct FakeSearch {
     pub calls: Mutex<Vec<SearchCall>>,
     /// Answers fail with this status and Typesense message.
     pub fail: Mutex<Option<(u16, String)>>,
+    /// Searches that carry this parameter fail with this status and message.
+    pub fail_with_param: Mutex<Option<(String, (u16, String))>>,
     /// When set, the next answer waits until the sender fires or is dropped.
     pub hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// Every multi-search, in order.
@@ -1078,6 +1084,8 @@ pub struct FakeSearch {
     pub presets: Mutex<Vec<tessera_client::Preset>>,
     /// Every preset saved, in order.
     pub saved_presets: Mutex<Vec<(String, serde_json::Value)>>,
+    /// `save_preset` stores this instead of the value sent.
+    pub stored_preset: Mutex<Option<serde_json::Value>>,
     /// Every raw request, in order.
     pub raw_calls: Mutex<Vec<tessera_client::RawRequest>>,
     /// The status and body of each raw answer.
@@ -1122,12 +1130,16 @@ impl SearchBackend for FakeSearchBackend {
         tags: (String, String),
     ) -> tessera_app::collections::BoxFuture<Result<SearchAnswer, Error>> {
         let fake = &self.0;
+        let by_param = fake.fail_with_param.lock().unwrap().clone();
+        let by_param = by_param.filter(|(key, _)| params.iter().any(|(k, _)| k == key));
         fake.calls
             .lock()
             .unwrap()
             .push(SearchCall { collection, params });
         let body = fake.body.lock().unwrap().clone();
-        let fail = fake.fail.lock().unwrap().clone();
+        let fail = by_param
+            .map(|(_, e)| e)
+            .or_else(|| fake.fail.lock().unwrap().clone());
         let hold = fake.hold.lock().unwrap().take();
         Box::pin(async move {
             if let Some(hold) = hold {
@@ -1193,11 +1205,23 @@ impl SearchBackend for FakeSearchBackend {
         _: Client,
         name: String,
         value: serde_json::Value,
-    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
         let fake = &self.0;
-        fake.saved_presets.lock().unwrap().push((name, value));
+        fake.saved_presets
+            .lock()
+            .unwrap()
+            .push((name.clone(), value.clone()));
+        let stored = fake.stored_preset.lock().unwrap().clone().unwrap_or(value);
         let fail = fake.fail.lock().unwrap().clone();
-        Box::pin(async move { fail.map_or(Ok(()), |e| Err(http_error(e))) })
+        if fail.is_none() {
+            let mut presets = fake.presets.lock().unwrap();
+            presets.retain(|p| p.name != name);
+            presets.push(tessera_client::Preset {
+                name,
+                value: stored.clone(),
+            });
+        }
+        Box::pin(async move { fail.map_or(Ok(stored), |e| Err(http_error(e))) })
     }
 
     fn raw(
@@ -1235,11 +1259,13 @@ pub fn install_search_fake(cx: &mut TestAppContext) -> Arc<FakeSearch> {
         body: Mutex::new(search_body(12)),
         calls: Mutex::default(),
         fail: Mutex::default(),
+        fail_with_param: Mutex::default(),
         hold: Mutex::default(),
         multi_calls: Mutex::default(),
         multi_body: Mutex::default(),
         presets: Mutex::default(),
         saved_presets: Mutex::default(),
+        stored_preset: Mutex::default(),
         raw_calls: Mutex::default(),
         raw_answer: Mutex::new((200, "{}".to_string())),
         raw_done: Default::default(),
@@ -1248,6 +1274,9 @@ pub fn install_search_fake(cx: &mut TestAppContext) -> Arc<FakeSearch> {
     cx.update(|cx| cx.set_global(SearchBackendGlobal(Arc::new(installed))));
     fake
 }
+
+/// A change on the server behind the app's back.
+pub type ServerChange = Box<dyn FnOnce(&FakeData) + Send>;
 
 /// A relevance backend that records each call as text.
 #[derive(Default)]
@@ -1262,11 +1291,52 @@ pub struct FakeRelevance {
     pub stopwords: Mutex<Vec<StopwordSet>>,
     /// `save_stopwords` stores these words instead of the ones sent.
     pub stored_words: Mutex<Option<Vec<String>>>,
+    /// The sets on the server.
+    pub sets: Mutex<Vec<ItemSet>>,
+    /// Every item sent to `save_item`, in order.
+    pub sent_items: Mutex<Vec<serde_json::Value>>,
+    /// `save_item` reads back this instead of the item sent.
+    pub stored_item: Mutex<Option<serde_json::Value>>,
+    /// `save_set` keeps only this many items.
+    pub keep_items: Mutex<Option<usize>>,
+    /// Calls that start with this fail with this message, whatever `fail` says.
+    pub fail_call: Mutex<Option<(String, String)>>,
+    /// `sets` and `set` fail.
+    pub fail_reads: Mutex<bool>,
+    /// The collections `attach` edits and `list` reads, while `attach_ignored` is off.
+    pub data: Mutex<Option<Arc<FakeData>>>,
+    /// `attach` changes nothing on the server.
+    pub attach_ignored: Mutex<bool>,
+    /// `attach` reports these names as left out.
+    pub attach_dropped: Mutex<Vec<String>>,
+    /// `attach` reports a list unlike the one sent.
+    pub attach_mismatch: Mutex<bool>,
+    /// What `read_set_file` answers.
+    pub file_text: Mutex<Option<Result<String, SetFileError>>>,
+    /// What `write_set_file` was given.
+    pub written: Mutex<Vec<(PathBuf, String)>>,
+    /// The next `save_stopwords`, `save_set` or `delete_set` answers once this resolves.
+    pub hold: Mutex<Option<oneshot::Receiver<()>>>,
+    /// `save_set` stores no key of this name.
+    pub strip_key: Mutex<Option<String>>,
+    /// Runs when a set is deleted, for what changes behind that.
+    pub on_delete: Mutex<Option<ServerChange>>,
 }
 
 impl FakeRelevance {
     fn record(&self, call: String) {
         self.calls.lock().unwrap().push(call);
+    }
+
+    /// `outcome` for `call`, which is recorded.
+    fn write(&self, call: String) -> Result<(), Error> {
+        let refused = self.fail_call.lock().unwrap().clone();
+        let refused = refused.filter(|(start, _)| call.starts_with(start));
+        self.record(call);
+        match refused {
+            Some((_, message)) => Err(http_error((500, message))),
+            None => self.outcome(),
+        }
     }
 
     fn outcome(&self) -> Result<(), Error> {
@@ -1280,6 +1350,179 @@ impl FakeRelevance {
 pub struct FakeRelevanceBackend(pub Arc<FakeRelevance>);
 
 impl RelevanceBackend for FakeRelevanceBackend {
+    fn sets(
+        &self,
+        _: Client,
+        _: SetKind,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<ItemSet>, Error>> {
+        let sets = self.0.sets.lock().unwrap().clone();
+        let fail = *self.0.fail_reads.lock().unwrap();
+        Box::pin(async move {
+            if fail {
+                return Err(http_error((500, "no list".into())));
+            }
+            Ok(sets)
+        })
+    }
+
+    fn set(
+        &self,
+        _: Client,
+        _: SetKind,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<ItemSet, Error>> {
+        let set = self
+            .0
+            .sets
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.name == name)
+            .cloned();
+        Box::pin(async move { set.ok_or_else(|| http_error((404, "Not found.".into()))) })
+    }
+
+    fn save_set(
+        &self,
+        _: Client,
+        _: SetKind,
+        name: String,
+        mut items: Vec<serde_json::Value>,
+    ) -> tessera_app::collections::BoxFuture<Result<ItemSet, Error>> {
+        let answer = self.0.write(format!("save_set {name} {}", items.len()));
+        let answer = answer.map(|()| {
+            if let Some(keep) = *self.0.keep_items.lock().unwrap() {
+                items.truncate(keep);
+            }
+            if let Some(key) = &*self.0.strip_key.lock().unwrap() {
+                let objects = items.iter_mut().filter_map(|i| i.as_object_mut());
+                objects.for_each(|item| drop(item.remove(key)));
+            }
+            let set = ItemSet { name, items };
+            let mut sets = self.0.sets.lock().unwrap();
+            sets.retain(|s| s.name != set.name);
+            sets.push(set.clone());
+            set
+        });
+        let hold = self.0.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
+    }
+
+    fn delete_set(
+        &self,
+        _: Client,
+        _: SetKind,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        let answer = self.0.write(format!("delete_set {name}"));
+        if answer.is_ok() {
+            self.0.sets.lock().unwrap().retain(|s| s.name != name);
+            let change = self.0.on_delete.lock().unwrap().take();
+            if let (Some(change), Some(data)) = (change, &*self.0.data.lock().unwrap()) {
+                change(data);
+            }
+        }
+        let hold = self.0.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
+    }
+
+    fn attach(
+        &self,
+        _: Client,
+        _: SetKind,
+        collection: String,
+        set: String,
+        attach: bool,
+    ) -> tessera_app::collections::BoxFuture<Result<AttachOutcome, AttachError>> {
+        let answer = self.0.write(format!("attach {collection} {set} {attach}"));
+        let mut list = Vec::new();
+        if let Some(data) = &*self.0.data.lock().unwrap() {
+            let mut data = data.data.lock().unwrap();
+            let all = data.as_mut().map_or(&mut [][..], |d| &mut d.0[..]);
+            if let Some(found) = all.iter_mut().find(|c| c.name == collection) {
+                if answer.is_ok() && !*self.0.attach_ignored.lock().unwrap() {
+                    found.synonym_sets.retain(|n| *n != set);
+                    if attach {
+                        found.synonym_sets.push(set);
+                    }
+                }
+                list.clone_from(&found.synonym_sets);
+            }
+        }
+        let outcome = AttachOutcome {
+            list,
+            dropped: self.0.attach_dropped.lock().unwrap().clone(),
+            mismatch: *self.0.attach_mismatch.lock().unwrap(),
+        };
+        Box::pin(async move { answer.map(|()| outcome).map_err(Into::into) })
+    }
+
+    fn read_set_file(
+        &self,
+        _: PathBuf,
+    ) -> tessera_app::collections::BoxFuture<Result<String, SetFileError>> {
+        let text = self.0.file_text.lock().unwrap().clone();
+        Box::pin(async move { text.unwrap_or_else(|| Ok(String::new())) })
+    }
+
+    fn write_set_file(
+        &self,
+        path: PathBuf,
+        text: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), String>> {
+        self.0.written.lock().unwrap().push((path, text));
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn save_item(
+        &self,
+        _: Client,
+        _: SetKind,
+        name: String,
+        id: String,
+        item: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
+        let answer = self.0.write(format!("save_item {name} {id}"));
+        self.0.sent_items.lock().unwrap().push(item.clone());
+        let stored = self.0.stored_item.lock().unwrap().clone().unwrap_or(item);
+        let answer = answer.map(|()| {
+            let mut sets = self.0.sets.lock().unwrap();
+            if let Some(set) = sets.iter_mut().find(|s| s.name == name) {
+                set.items.retain(|i| i["id"] != id.as_str());
+                set.items.push(stored.clone());
+            }
+            stored
+        });
+        Box::pin(async move { answer })
+    }
+
+    fn delete_item(
+        &self,
+        _: Client,
+        _: SetKind,
+        name: String,
+        id: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        let answer = self.0.write(format!("delete_item {name} {id}"));
+        if answer.is_ok() {
+            let mut sets = self.0.sets.lock().unwrap();
+            if let Some(set) = sets.iter_mut().find(|s| s.name == name) {
+                set.items.retain(|i| i["id"] != id.as_str());
+            }
+        }
+        Box::pin(async move { answer })
+    }
+
     fn stopwords(
         &self,
         _: Client,
@@ -1308,7 +1551,13 @@ impl RelevanceBackend for FakeRelevanceBackend {
             sets.push(set.clone());
             set
         });
-        Box::pin(async move { answer })
+        let hold = self.0.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
     }
 
     fn delete_stopwords(
@@ -1480,6 +1729,9 @@ pub const OPEN_SEARCH: &str = key("cmd-shift-e", "ctrl-shift-e");
 pub const OPEN_HISTORY: &str = key("cmd-shift-h", "ctrl-shift-h");
 pub const OPEN_SAVED: &str = key("cmd-o", "ctrl-o");
 pub const SAVE_QUERY: &str = key("cmd-s", "ctrl-s");
+pub const LEAVE_PRESET: &str = key("cmd-shift-g", "ctrl-shift-g");
+pub const DETACH_MISSING: &str = key("cmd-shift-k", "ctrl-shift-k");
+pub const OPEN_PRESETS_TAB: &str = key("alt-cmd-5", "ctrl-alt-5");
 pub const OPEN_PRESETS: &str = key("cmd-alt-p", "ctrl-alt-p");
 pub const OPEN_EXPORT: &str = key("cmd-alt-e", "ctrl-alt-e");
 pub const SHOW_FORM: &str = key("cmd-1", "ctrl-1");

@@ -6,7 +6,7 @@ use std::cell::Cell;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::dialog::Cancel;
+use gpui_kit::component::dialog::{Cancel, Confirm};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
@@ -50,8 +50,21 @@ impl NameDialog {
         window: &mut Window,
         cx: &mut App,
     ) {
+        Self::prefilled(String::new(), title, connection, check, on_name, window, cx);
+    }
+
+    /// [`Self::open`] with `prefill` in the input.
+    pub fn prefilled(
+        prefill: String,
+        title: String,
+        connection: Entity<ConnectionState>,
+        check: impl Fn(String, &mut App) -> Task<Result<(), SharedString>> + 'static,
+        on_name: impl Fn(String, &mut Window, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let view = cx.new(|cx| {
-            let name = cx.new(|cx| InputState::new(window, cx));
+            let name = cx.new(|cx| InputState::new(window, cx).default_value(prefill));
             Self {
                 _subscription: cx.subscribe_in(
                     &name,
@@ -161,6 +174,11 @@ impl Render for NameDialog {
                         Button::new("resources.name.ok")
                             .primary()
                             .label(t!("resources.name.ok").to_string())
+                            .children(Kbd::binding_for_action(
+                                &Confirm { secondary: false },
+                                Some("Dialog"),
+                                window,
+                            ))
                             .loading(self.busy)
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),

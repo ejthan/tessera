@@ -55,13 +55,14 @@ pub trait SearchBackend: Send + Sync {
     /// The stored presets.
     fn presets(&self, client: Client) -> BoxFuture<Result<Vec<Preset>, Error>>;
 
-    /// Stores `value` as preset `name`, replacing one of that name. A write: run it detached.
+    /// Stores `value` as preset `name`, replacing one of that name, and reads back what was
+    /// stored. A write: run it detached.
     fn save_preset(
         &self,
         client: Client,
         name: String,
         value: Value,
-    ) -> BoxFuture<Result<(), Error>>;
+    ) -> BoxFuture<Result<Value, Error>>;
 
     /// Sends `request`. A write: run it detached, so closing the tab cannot abort it.
     fn raw(&self, client: Client, request: RawRequest) -> BoxFuture<Result<RawResponse, Error>>;
@@ -117,8 +118,12 @@ impl SearchBackend for TokioBackend {
         client: Client,
         name: String,
         value: Value,
-    ) -> BoxFuture<Result<(), Error>> {
-        self.run(async move { client.upsert_preset(&name, &value).await })
+    ) -> BoxFuture<Result<Value, Error>> {
+        self.run(async move {
+            client.upsert_preset(&name, &value).await?;
+            let mut stored = client.preset(&name).await?;
+            Ok(stored["value"].take())
+        })
     }
 
     fn raw(&self, client: Client, request: RawRequest) -> BoxFuture<Result<RawResponse, Error>> {

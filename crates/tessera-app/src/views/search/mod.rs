@@ -50,15 +50,15 @@ use self::queries::{PendingHistory, Queries, QueryList};
 use super::dock::view_tab;
 use super::env_badge;
 use crate::actions::{
-    AddSearch, CopyCurl, DeleteSavedQuery, FocusQuery, LoadQuery, NextResultPage, NextSearch,
-    OpenExport, OpenHistory, OpenPresets, OpenSaved, PreviousResultPage, PreviousSearch,
-    RemoveSearch, RunSearch, SaveQuery, ShowForm, ShowHits, ShowJson, ShowRawResult, ToggleInstant,
-    ToggleUnion, WORKBENCH,
+    AddSearch, CopyCurl, DeleteSavedQuery, FocusQuery, LeavePreset, LoadQuery, NextResultPage,
+    NextSearch, OpenExport, OpenHistory, OpenPresets, OpenSaved, PreviousResultPage,
+    PreviousSearch, RemoveSearch, RunSearch, SaveQuery, ShowForm, ShowHits, ShowJson,
+    ShowRawResult, ToggleInstant, ToggleUnion, WORKBENCH,
 };
 use crate::collections::BoxFuture;
 use crate::connection::{ConnectionState, error_text};
 use crate::search::SearchBackendGlobal;
-use crate::state::AppState;
+use crate::state::{AppState, PresetTarget};
 
 /// Width of the draft's side of the split.
 const DRAFT_WIDTH: f32 = 400.;
@@ -161,7 +161,7 @@ pub struct SearchWorkbench {
     /// The wait until an instant run counts as settled.
     history_task: Option<Task<()>>,
     /// The preset these drafts edit: Save goes there.
-    preset: Option<String>,
+    preset: Option<PresetTarget>,
     queries: Queries,
     export: ExportState,
     focus_handle: FocusHandle,
@@ -303,12 +303,28 @@ impl SearchWorkbench {
 
     /// The preset these drafts edit.
     pub fn preset(&self) -> Option<&str> {
-        self.preset.as_deref()
+        self.preset.as_ref().map(|p| p.name.as_str())
     }
 
-    /// Enters preset mode on `name`, or leaves it, keeping the drafts.
-    pub fn set_preset(&mut self, name: Option<String>, cx: &mut Context<Self>) {
-        self.preset = name;
+    /// Loads `drafts` in preset mode on `preset`. One with no collection stays on the current.
+    pub fn open_preset(
+        &mut self,
+        mut drafts: Vec<SearchDraft>,
+        union: bool,
+        preset: PresetTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.draft().collection.clone();
+        let empty = drafts.iter_mut().filter(|d| d.collection.is_empty());
+        empty.for_each(|d| d.collection.clone_from(&current));
+        self.load(drafts, union, window, cx);
+        self.preset = Some(preset);
+    }
+
+    /// Leaves preset mode, keeping the drafts.
+    pub fn leave_preset(&mut self, cx: &mut Context<Self>) {
+        self.preset = None;
         cx.notify();
     }
 
@@ -539,6 +555,7 @@ impl SearchWorkbench {
         vec![
             (run, &RunSearch),
             (self.save_blocked(cx), &SaveQuery),
+            (self.preset.is_none(), &LeavePreset),
             (run, &OpenExport),
             (run, &CopyCurl),
             (page <= 1 || edit, &PreviousResultPage),
@@ -708,6 +725,7 @@ impl SearchWorkbench {
     fn toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let needs_unlock = self.side_effects(cx).contains(&SideEffect::Conversation)
             && self.connection.read(cx).writes_locked();
+        let save = self.focus_handle.clone();
         h_flex()
             .flex_none()
             .flex_wrap()
@@ -754,7 +772,7 @@ impl SearchWorkbench {
                     .label(t!("search.save").to_string())
                     .children(Kbd::binding_for_action(&SaveQuery, Some(WORKBENCH), window))
                     .disabled(self.save_blocked(cx))
-                    .on_click(cx.listener(|this, _, window, cx| this.ask_save(window, cx))),
+                    .on_click(move |_, window, cx| save.dispatch_action(&SaveQuery, window, cx)),
             )
             .child(self.list_button(
                 QueryList::Presets,
@@ -1066,6 +1084,7 @@ impl Render for SearchWorkbench {
                     this.ask_save(window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &LeavePreset, _, cx| this.leave_preset(cx)))
             .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.step_list(-1, cx)))
             .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.step_list(1, cx)))
             .on_action(cx.listener(|this, _: &LoadQuery, window, cx| {

@@ -183,7 +183,11 @@ pub struct ConnectionState {
 /// The schema of the named collection changed on the server; views showing it reload.
 pub struct CollectionChanged(pub String);
 
+/// A preset was stored from a search tab; lists of presets reload.
+pub struct PresetsChanged;
+
 impl EventEmitter<CollectionChanged> for ConnectionState {}
+impl EventEmitter<PresetsChanged> for ConnectionState {}
 
 impl ConnectionState {
     /// A connection that has not been attempted yet.

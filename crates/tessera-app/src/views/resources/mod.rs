@@ -3,9 +3,17 @@
 //! The views of the relevance resources, one tab per connection and kind.
 
 pub mod aliases;
+pub mod attachment;
+pub mod curation_dialog;
+pub mod curations;
+pub(crate) mod item_save;
 pub mod name_dialog;
 pub mod presets;
+pub mod set_file;
+pub mod sets;
 pub mod stopwords;
+pub mod synonyms;
+pub mod test_panel;
 
 use std::rc::Rc;
 
@@ -18,16 +26,17 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_fl
 use gpui_kit::{
     Action, AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Hsla,
     IntoElement, ParentElement as _, Render, SharedString, Stateful, Styled as _, Subscription,
-    Task, Window, div, prelude::*, px,
+    Task, WeakEntity, Window, div, prelude::*, px,
 };
 use rust_i18n::t;
-use tessera_client::{Client, Error};
+use tessera_client::{Client, Error, SetKind};
 use tessera_core::profile::Profile;
 use tessera_widgets::confirm;
 use tessera_widgets::confirm_danger::{self, DangerOptions};
 
 use self::aliases::AliasesView;
 use self::presets::PresetsView;
+use self::sets::SetsView;
 use self::stopwords::StopwordsView;
 use super::env_badge;
 use crate::actions::{FocusResourceFilter, NewResource, RESOURCES, ReloadResource};
@@ -42,8 +51,8 @@ pub enum ResourceView {
     Stopwords(Entity<StopwordsView>),
     /// See [`PresetsView`].
     Presets(Entity<PresetsView>),
-    /// A kind whose view has not arrived: no sidebar row, shortcut or palette entry reaches it.
-    Pending(Entity<PendingView>),
+    /// See [`SetsView`].
+    Sets(Entity<SetsView>),
 }
 
 impl ResourceView {
@@ -65,11 +74,11 @@ impl ResourceView {
             ResourceKind::Presets => {
                 Self::Presets(cx.new(|cx| PresetsView::new(connection, state, window, cx)))
             }
-            ResourceKind::Synonyms | ResourceKind::Curations => {
-                Self::Pending(cx.new(|cx| PendingView {
-                    kind,
-                    focus_handle: cx.focus_handle(),
-                }))
+            ResourceKind::Synonyms => {
+                Self::Sets(cx.new(|cx| SetsView::new(SetKind::Synonym, connection, window, cx)))
+            }
+            ResourceKind::Curations => {
+                Self::Sets(cx.new(|cx| SetsView::new(SetKind::Curation, connection, window, cx)))
             }
         }
     }
@@ -80,7 +89,7 @@ impl ResourceView {
             Self::Aliases(view) => view.clone().into(),
             Self::Stopwords(view) => view.clone().into(),
             Self::Presets(view) => view.clone().into(),
-            Self::Pending(view) => view.clone().into(),
+            Self::Sets(view) => view.clone().into(),
         }
     }
 
@@ -90,7 +99,7 @@ impl ResourceView {
             Self::Aliases(view) => view.focus_handle(cx),
             Self::Stopwords(view) => view.focus_handle(cx),
             Self::Presets(view) => view.focus_handle(cx),
-            Self::Pending(view) => view.read(cx).focus_handle.clone(),
+            Self::Sets(view) => view.focus_handle(cx),
         }
     }
 
@@ -100,24 +109,8 @@ impl ResourceView {
             Self::Aliases(view) => view.read(cx).gates(cx),
             Self::Stopwords(view) => view.read(cx).gates(cx),
             Self::Presets(view) => view.read(cx).gates(cx),
-            Self::Pending(_) => Vec::new(),
+            Self::Sets(view) => view.read(cx).gates(cx),
         }
-    }
-}
-
-/// See [`ResourceView::Pending`].
-pub struct PendingView {
-    kind: ResourceKind,
-    focus_handle: FocusHandle,
-}
-
-impl Render for PendingView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .track_focus(&self.focus_handle)
-            .size_full()
-            .p_4()
-            .child(t!(self.kind.title_key()).to_string())
     }
 }
 
@@ -288,6 +281,15 @@ impl ResourceList {
             t.delegate_mut().rebuild();
             cx.notify();
         });
+        self.reselect(cx);
+    }
+
+    /// Selects the row of `name`, or none. A row not loaded yet is selected when it arrives.
+    pub(super) fn select(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.selected = name;
+        if self.selected.is_none() {
+            self.table.update(cx, |t, cx| t.clear_selection(cx));
+        }
         self.reselect(cx);
     }
 
@@ -492,6 +494,25 @@ pub(super) fn dialog_title(
         .child(title)
         .child(div().text_sm().child(profile.name.clone()))
         .child(env_badge::render(&profile.environment, cx))
+}
+
+/// A view that shows why a write failed.
+pub(super) trait ErrorSlot: 'static {
+    /// Where the text goes.
+    fn error_slot(&mut self) -> &mut Option<SharedString>;
+}
+
+/// Shows a failed write on the view that started it.
+pub(super) fn report_to<V: ErrorSlot>(
+    view: WeakEntity<V>,
+) -> impl Fn(SharedString, &mut App) + 'static {
+    move |text, cx| {
+        view.update(cx, |view, cx| {
+            *view.error_slot() = Some(text);
+            cx.notify();
+        })
+        .ok();
+    }
 }
 
 /// What a destructive write asks (D62).

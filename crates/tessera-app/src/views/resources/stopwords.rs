@@ -7,7 +7,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
+    ActiveTheme as _, Disableable as _, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
 };
 use gpui_kit::{
     Action, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
@@ -16,15 +16,17 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use tessera_client::StopwordSet;
+use tessera_widgets::confirm;
 use tessera_widgets::json_editor::JsonEditor;
 
 use super::name_dialog::NameDialog;
 use super::{
-    Danger, ListRow, ResourceColumn, ResourceList, client_of, confirm_write, empty_state,
-    list_error_text, notice, row_button, toolbar,
+    Danger, ErrorSlot, ListRow, ResourceColumn, ResourceList, client_of, confirm_write,
+    empty_state, list_error_text, notice, report_to, row_button, toolbar,
 };
 use crate::actions::{
-    DeleteResource, FocusResourceFilter, NewResource, RESOURCES, ReloadResource, SaveResource,
+    DeleteResource, FocusResourceFilter, NewResource, NextControl, PreviousControl, RAW_BLOCK,
+    RESOURCES, ReloadResource, SaveResource,
 };
 use crate::connection::{ConnectionState, error_text};
 use crate::relevance::RelevanceBackendGlobal;
@@ -41,7 +43,7 @@ const COLUMNS: &[ResourceColumn] = &[
 const LIST_WIDTH: f32 = 500.;
 
 /// The words of `text`: one per line, trimmed, empties dropped.
-fn words_of(text: &str) -> Vec<String> {
+pub(super) fn words_of(text: &str) -> Vec<String> {
     let lines = text.lines().map(str::trim).filter(|w| !w.is_empty());
     lines.map(str::to_string).collect()
 }
@@ -69,6 +71,8 @@ pub struct StopwordsView {
     followed: Option<String>,
     editor: Entity<JsonEditor>,
     locale: Entity<InputState>,
+    /// A save is running.
+    saving: bool,
     /// Why the last write failed, or what it left.
     error: Option<SharedString>,
     note: Option<SharedString>,
@@ -96,8 +100,13 @@ impl StopwordsView {
             load_task: None,
             editing: None,
             followed: None,
-            editor: cx.new(|cx| JsonEditor::plain("", window, cx)),
+            editor: cx.new(|cx| {
+                let mut editor = JsonEditor::plain("", window, cx);
+                editor.set_read_only(false, cx);
+                editor
+            }),
             locale: cx.new(|cx| InputState::new(window, cx)),
+            saving: false,
             error: None,
             note: None,
             focus_handle: cx.focus_handle(),
@@ -153,6 +162,45 @@ impl StopwordsView {
         self.list.update(cx, |l, cx| l.set_rows(rows, cx));
     }
 
+    /// Whether the editor differs from what the server holds.
+    fn dirty(&self, cx: &App) -> bool {
+        let Some(id) = &self.editing else {
+            return false;
+        };
+        let words = sorted(&words_of(&self.editor.read(cx).text(cx)));
+        let locale = self.locale.read(cx).value();
+        match self.sets.iter().find(|s| &s.id == id) {
+            Some(set) => {
+                words != sorted(&set.stopwords)
+                    || locale.trim() != set.locale.as_deref().unwrap_or_default()
+            }
+            None => !words.is_empty() || !locale.trim().is_empty(),
+        }
+    }
+
+    /// Runs `then`, after a Discard confirmation while the editor holds unsaved text.
+    fn discarding(
+        &mut self,
+        then: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.dirty(cx) {
+            return then(self, window, cx);
+        }
+        let view = cx.entity().downgrade();
+        confirm::open(
+            t!("stopwords.discard.title").to_string(),
+            t!("stopwords.discard.body").to_string(),
+            t!("stopwords.discard.confirm").to_string(),
+            move |window, cx| {
+                view.update(cx, |this, cx| then(this, window, cx)).ok();
+            },
+            window,
+            cx,
+        );
+    }
+
     /// A newly selected row replaces the editor.
     fn follow_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.list.read(cx).selected(cx);
@@ -160,11 +208,21 @@ impl StopwordsView {
         if selected.is_none() || selected == self.followed {
             return;
         }
-        self.followed.clone_from(&selected);
         let set = self.sets.iter().find(|s| Some(&s.id) == selected.as_ref());
-        if let Some(set) = set.cloned() {
-            self.show(&set, window, cx);
+        let Some(set) = set.cloned() else {
+            return;
+        };
+        if self.dirty(cx) {
+            // Until Discard, the row stays the one in the editor: Delete acts on the row.
+            let shown = self.followed.clone();
+            self.list.update(cx, |l, cx| l.select(shown, cx));
         }
+        let follow = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+            this.followed.clone_from(&selected);
+            this.list.update(cx, |l, cx| l.select(selected.clone(), cx));
+            this.show(&set, window, cx);
+        };
+        self.discarding(follow, window, cx);
     }
 
     fn show(&mut self, set: &StopwordSet, window: &mut Window, cx: &mut Context<Self>) {
@@ -194,11 +252,17 @@ impl StopwordsView {
                         stopwords: Vec::new(),
                         locale: None,
                     };
-                    this.update(cx, |this, cx| {
-                        this.show(&new, window, cx);
-                        this.editor.update(cx, |e, cx| e.focus(window, cx));
-                    })
-                    .ok();
+                    let new = new.clone();
+                    let start =
+                        move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                            // No row shows this set yet, and Delete must not act on another.
+                            this.followed = None;
+                            this.list.update(cx, |l, cx| l.select(None, cx));
+                            this.show(&new, window, cx);
+                            this.editor.update(cx, |e, cx| e.focus(window, cx));
+                        };
+                    this.update(cx, |this, cx| this.discarding(start, window, cx))
+                        .ok();
                 };
                 let title = t!("stopwords.new_title").to_string();
                 NameDialog::open(title, connection, check, on_name, window, cx);
@@ -207,7 +271,7 @@ impl StopwordsView {
     }
 
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.editing.clone() else {
+        let Some(id) = self.editing.clone().filter(|_| !self.saving) else {
             return;
         };
         let words = words_of(&self.editor.read(cx).text(cx));
@@ -307,7 +371,13 @@ impl StopwordsView {
                     .aria_label(SharedString::from(id.clone()))
                     .child(id),
             )
-            .child(div().flex_1().min_h_0().child(self.editor.clone()))
+            .child(
+                div()
+                    .key_context(RAW_BLOCK)
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.editor.clone()),
+            )
             .child(
                 h_flex()
                     .gap_2()
@@ -326,6 +396,8 @@ impl StopwordsView {
                             .primary()
                             .small()
                             .label(t!("stopwords.save").to_string())
+                            .loading(self.saving)
+                            .disabled(self.saving)
                             .when(locked, |b| {
                                 b.child(super::super::env_badge::lock("stopwords.save", false, cx))
                             })
@@ -407,6 +479,8 @@ impl Render for StopwordsView {
                 this.ask_delete(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ReloadResource, _, cx| this.reload(cx)))
+            .on_action(|_: &NextControl, window, cx| window.focus_next(cx))
+            .on_action(|_: &PreviousControl, window, cx| window.focus_prev(cx))
             .on_action(cx.listener(|this, _: &FocusResourceFilter, window, cx| {
                 ResourceList::focus_filter(&this.list, window, cx);
             }))
@@ -449,18 +523,14 @@ fn exists(
     })
 }
 
-/// Shows a failed write on the view that started it.
-fn report_to(view: WeakEntity<StopwordsView>) -> impl Fn(SharedString, &mut App) + 'static {
-    move |text, cx| {
-        view.update(cx, |view, cx| {
-            view.error = Some(text);
-            cx.notify();
-        })
-        .ok();
+impl ErrorSlot for StopwordsView {
+    fn error_slot(&mut self) -> &mut Option<SharedString> {
+        &mut self.error
     }
 }
 
-/// Saves and shows what was stored, which is not what was sent. Runs on through a closed tab.
+/// Saves and shows what was stored, which is not what was sent, unless the user moved on. Runs
+/// on through a closed tab.
 fn send_save(
     view: WeakEntity<StopwordsView>,
     id: String,
@@ -469,7 +539,10 @@ fn send_save(
     window: &mut Window,
     cx: &mut App,
 ) -> Task<Result<(), SharedString>> {
-    let Some(connection) = view.read_with(cx, |v, _| v.connection.clone()).ok() else {
+    let Some((connection, false)) = view
+        .read_with(cx, |v, _| (v.connection.clone(), v.saving))
+        .ok()
+    else {
         return Task::ready(Ok(()));
     };
     let Some(client) = client_of(&connection, cx) else {
@@ -477,28 +550,42 @@ fn send_save(
     };
     let profile = connection.read(cx).profile.clone();
     let sent = sorted(&words);
-    let save = cx
-        .global::<RelevanceBackendGlobal>()
-        .0
-        .save_stopwords(client, id, words, locale);
+    let save =
+        cx.global::<RelevanceBackendGlobal>()
+            .0
+            .save_stopwords(client, id.clone(), words, locale);
+    view.update(cx, |v, cx| {
+        v.saving = true;
+        cx.notify();
+    })
+    .ok();
     window.spawn(cx, async move |cx| {
         let stored = save
             .await
             .map_err(|e| SharedString::from(error_text(&e, &profile)));
-        view.update_in(cx, |view, window, cx| match stored {
-            Ok(set) => {
-                view.show(&set, window, cx);
-                if sorted(&set.stopwords) != sent {
-                    let n = set.stopwords.len();
-                    view.note = Some(t!("stopwords.normalised", n = n).to_string().into());
+        view.update_in(cx, |view, window, cx| {
+            view.saving = false;
+            match stored {
+                Ok(set) => {
+                    let text = words_of(&view.editor.read(cx).text(cx));
+                    let same = view.editing.as_ref() == Some(&id) && sorted(&text) == sent;
+                    view.sets.retain(|s| s.id != set.id);
+                    view.sets.push(set.clone());
+                    if same {
+                        view.followed = Some(id);
+                        view.list
+                            .update(cx, |l, cx| l.select(view.followed.clone(), cx));
+                        view.show(&set, window, cx);
+                        if sorted(&set.stopwords) != sent {
+                            let n = set.stopwords.len();
+                            view.note = Some(t!("stopwords.normalised", n = n).to_string().into());
+                        }
+                    }
+                    view.reload(cx);
                 }
-                view.reload(cx);
-                cx.notify();
+                Err(error) => view.error = Some(error),
             }
-            Err(error) => {
-                view.error = Some(error);
-                cx.notify();
-            }
+            cx.notify();
         })
         .ok();
         // Shown on the view above, which also holds the editor.
@@ -527,6 +614,7 @@ fn send_delete(
         view.update(cx, |view, cx| {
             if view.editing.as_ref() == Some(&id) {
                 view.editing = None;
+                view.followed = None;
             }
             view.reload(cx);
             cx.notify();

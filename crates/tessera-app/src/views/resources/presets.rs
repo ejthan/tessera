@@ -11,21 +11,23 @@ use gpui_kit::{
 use rust_i18n::t;
 use tessera_client::Preset;
 use tessera_core::search::params::SearchDraft;
-use tessera_core::search::presets::{PresetKind, preset_drafts, preset_kind, preset_summary};
+use tessera_core::search::presets::{
+    PresetKind, preset_drafts, preset_kind, preset_summary, preset_wrapper,
+};
 
 use super::super::search::preset_error_text;
 use super::name_dialog::NameDialog;
 use super::{
-    Danger, ListRow, ResourceColumn, ResourceList, client_of, confirm_write, empty_state,
-    list_error_text, notice, row_button, toolbar,
+    Danger, ErrorSlot, ListRow, ResourceColumn, ResourceList, client_of, confirm_write,
+    empty_state, list_error_text, notice, report_to, row_button, toolbar,
 };
 use crate::actions::{
     DeleteResource, EditResource, FocusResourceFilter, NewResource, ReloadResource,
 };
-use crate::connection::{ConnectionState, error_text};
+use crate::connection::{ConnectionState, PresetsChanged, error_text};
 use crate::relevance::RelevanceBackendGlobal;
 use crate::search::SearchBackendGlobal;
-use crate::state::AppState;
+use crate::state::{AppState, PresetTarget};
 
 /// Where the empty state points to.
 const DOCS_URL: &str = "https://typesense.org/docs/30.2/api/search.html#presets";
@@ -55,10 +57,12 @@ pub struct PresetsView {
     loaded: bool,
     list_error: Option<SharedString>,
     load_task: Option<Task<()>>,
+    /// Reads the preset Open asked for.
+    open_task: Option<Task<()>>,
     /// Why the last write failed, or what it found.
     error: Option<SharedString>,
     focus_handle: FocusHandle,
-    _subscription: Subscription,
+    _subscriptions: [Subscription; 2],
 }
 
 impl PresetsView {
@@ -71,7 +75,12 @@ impl PresetsView {
     ) -> Self {
         let list = cx.new(|cx| ResourceList::new("presets", COLUMNS, window, cx));
         let mut this = Self {
-            _subscription: cx.observe(&list, |_, _, cx| cx.notify()),
+            _subscriptions: [
+                cx.observe(&list, |_, _, cx| cx.notify()),
+                cx.subscribe(&connection, |this, _, _: &PresetsChanged, cx| {
+                    this.reload(cx)
+                }),
+            ],
             connection,
             state,
             list,
@@ -79,6 +88,7 @@ impl PresetsView {
             loaded: false,
             list_error: None,
             load_task: None,
+            open_task: None,
             error: None,
             focus_handle: cx.focus_handle(),
         };
@@ -149,32 +159,59 @@ impl PresetsView {
         matches!(kind, None | Some(PresetKind::Invalid(_)))
     }
 
-    /// The collection of a draft with none: the first one the connection has.
-    fn first_collection(&self, cx: &App) -> String {
-        let cache = &self.connection.read(cx).collection_cache;
-        let first = cache.collections.iter().flatten().next();
-        first.map(|c| c.name.clone()).unwrap_or_default()
-    }
-
-    /// Opens the workbench on the selected preset. Nothing is written.
+    /// Opens the workbench on the selected preset as the server holds it now, since a Save
+    /// from there would overwrite it. Nothing is written.
     fn open_selected(&mut self, cx: &mut Context<Self>) {
-        if self.open_blocked(cx) {
-            return;
-        }
-        let Some(preset) = self.selected(cx).cloned() else {
+        let name = self.selected(cx).map(|p| p.name.clone());
+        let (Some(name), false) = (name, self.open_blocked(cx)) else {
             return;
         };
-        let current = self.first_collection(cx);
-        if let Ok(loaded) = preset_drafts(&preset.value, &current) {
-            let id = self.connection.read(cx).profile.id;
-            self.state.update(cx, |s, cx| {
-                s.open_search(id, Some(loaded), Some(preset.name), cx);
-            });
+        let Some(client) = client_of(&self.connection, cx) else {
+            return;
+        };
+        self.error = None;
+        let fetch = cx.global::<SearchBackendGlobal>().0.presets(client);
+        self.open_task = Some(cx.spawn(async move |this, cx| {
+            let answer = fetch.await;
+            this.update(cx, |this, cx| {
+                match answer {
+                    Ok(presets) => {
+                        this.take_presets(presets, cx);
+                        this.open_preset(name, cx);
+                    }
+                    Err(e) => {
+                        let profile = &this.connection.read(cx).profile;
+                        this.error = Some(error_text(&e, profile).into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The tab's collection stands in for one the preset does not name.
+    fn open_preset(&mut self, name: String, cx: &mut Context<Self>) {
+        let preset = self.presets.iter().find(|p| p.name == name);
+        let Some(value) = preset.map(|p| p.value.clone()) else {
+            self.error = Some(t!("presets.gone", name = name).to_string().into());
+            return;
+        };
+        match preset_drafts(&value, "") {
+            Ok(loaded) => {
+                let id = self.connection.read(cx).profile.id;
+                let wrapper = preset_wrapper(&value);
+                let target = PresetTarget { name, wrapper };
+                self.state.update(cx, |s, cx| {
+                    s.open_search(id, Some(loaded), Some(target), cx);
+                });
+            }
+            Err(error) => self.error = Some(preset_error_text(&error).into()),
         }
     }
 
     fn ask_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (view, state) = (cx.entity().downgrade(), self.state.clone());
+        let state = self.state.clone();
         let connection = self.connection.clone();
         self.connection.update(cx, |c, cx| {
             c.ensure_writable(window, cx, move |window, cx| {
@@ -184,13 +221,12 @@ impl PresetsView {
                 };
                 let conn = connection.clone();
                 let on_name = move |name: String, _: &mut Window, cx: &mut App| {
-                    let current = view
-                        .read_with(cx, |view, cx| view.first_collection(cx))
-                        .unwrap_or_default();
                     let id = conn.read(cx).profile.id;
-                    let draft = SearchDraft::new(&current);
+                    let draft = SearchDraft::new("");
+                    let wrapper = None;
+                    let target = PresetTarget { name, wrapper };
                     state.update(cx, |s, cx| {
-                        s.open_search(id, Some((vec![draft], false)), Some(name), cx);
+                        s.open_search(id, Some((vec![draft], false)), Some(target), cx);
                     });
                 };
                 let title = t!("presets.new_title").to_string();
@@ -327,14 +363,9 @@ fn exists(
     })
 }
 
-/// Shows a failed write on the view that started it.
-fn report_to(view: WeakEntity<PresetsView>) -> impl Fn(SharedString, &mut App) + 'static {
-    move |text, cx| {
-        view.update(cx, |view, cx| {
-            view.error = Some(text);
-            cx.notify();
-        })
-        .ok();
+impl ErrorSlot for PresetsView {
+    fn error_slot(&mut self) -> &mut Option<SharedString> {
+        &mut self.error
     }
 }
 
