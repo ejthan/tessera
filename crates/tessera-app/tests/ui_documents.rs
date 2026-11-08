@@ -20,6 +20,7 @@ use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::documents::inspector::Inspector;
 use tessera_app::views::documents::table::DocRows;
 use tessera_client::Collection;
+use tessera_core::documents::page::wanted_pages;
 use tessera_widgets::FilterInput;
 use tessera_widgets::filter_input::FACET_DELAY;
 
@@ -524,6 +525,33 @@ async fn scrolling_loads_only_the_pages_it_needs(cx: &mut TestAppContext) {
     f.scroll_to(cx, 100_000);
     f.settle(cx);
     assert_eq!(f.docs.page_numbers(), [1, 400, 401]);
+}
+
+#[gpui_kit::test]
+async fn a_jump_at_a_low_per_page_loads_every_page_it_shows(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 100).await;
+    let id = f.profile_id(cx);
+    let mut other = plain_schema();
+    other.name = "other".into();
+    *f.backend.data.lock().unwrap() = Some((vec![plain_schema(), other], vec![]));
+    *f.docs.found.lock().unwrap() = 10_000;
+    cx.update(|cx| {
+        f.state.update(cx, |s, cx| {
+            s.settings.per_page = 10;
+            s.open_collection(id, "other".into(), cx);
+        })
+    });
+    wait_for_element(cx, f.handle, "documents.columns".into(), true).await;
+    f.settle(cx);
+    let panel = collection_panel(cx, f.handle, "other");
+    let table = cx.update(|cx| panel.read(cx).documents().read(cx).table().clone());
+    cx.update(|cx| table.update(cx, |t, cx| t.scroll_to_row(5_008, cx)));
+    f.settle(cx);
+    let rows = cx.update(|cx| table.read(cx).visible_range().rows().clone());
+    let wanted = wanted_pages(rows, 10, 10_000);
+    assert!(wanted.len() > 4, "more than `MAX_INFLIGHT`: {wanted:?}");
+    let fetched = f.docs.page_numbers();
+    assert!(wanted.iter().all(|p| fetched.contains(p)), "{fetched:?}");
 }
 
 #[gpui_kit::test]
@@ -2309,6 +2337,54 @@ async fn multi_delete_builds_one_id_filter(cx: &mut TestAppContext) {
     assert_eq!(writes[0].0, "delete_by_filter");
     assert_eq!(writes[0].1, "id:[`1`,`2`]");
     assert!(f.ticked(cx).is_empty());
+}
+
+/// Ticks `ticks` documents with `confirm_above` of 5 and presses Delete.
+async fn delete_with_confirm_above_5(cx: &mut TestAppContext, ticks: u32) -> Fixture {
+    let f = open_found(cx, plain_schema(), 10).await;
+    let settings = tessera_core::settings::Settings {
+        confirm_above: 5,
+        ..Default::default()
+    };
+    f.act(cx, |window, cx| {
+        tessera_app::settings::apply(&settings, window, cx)
+    });
+    for id in 1..=ticks {
+        f.tick(cx, &id.to_string());
+    }
+    f.press(cx, DELETE);
+    f
+}
+
+#[gpui_kit::test]
+async fn confirm_above_of_5_leaves_a_delete_of_5_plain(cx: &mut TestAppContext) {
+    let f = delete_with_confirm_above_5(cx, 5).await;
+    assert!(f.has(cx, "confirm.ok"));
+    assert!(!f.has(cx, "danger.input"));
+}
+
+#[gpui_kit::test]
+async fn confirm_above_of_5_makes_a_delete_of_6_typed(cx: &mut TestAppContext) {
+    let f = delete_with_confirm_above_5(cx, 6).await;
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+}
+
+#[gpui_kit::test]
+async fn a_new_documents_view_pages_by_the_setting(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 100).await;
+    let id = f.profile_id(cx);
+    let mut other = plain_schema();
+    other.name = "other".into();
+    *f.backend.data.lock().unwrap() = Some((vec![plain_schema(), other], vec![]));
+    cx.update(|cx| {
+        f.state.update(cx, |s, cx| {
+            s.settings.per_page = 20;
+            s.open_collection(id, "other".into(), cx);
+        })
+    });
+    wait_for_element(cx, f.handle, "documents.columns".into(), true).await;
+    f.settle(cx);
+    assert_eq!(f.docs.pages.lock().unwrap().last().unwrap().per_page, 20);
 }
 
 #[gpui_kit::test]

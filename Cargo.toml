@@ -43,10 +43,12 @@ tokio = { version = "=1.54.1", features = ["rt-multi-thread", "time", "macros", 
 tokio-util = { version = "=0.7.20", features = ["codec", "io"] }
 toml = "=1.2.0"
 tracing = "=0.1.44"
+tracing-appender = "=0.2.5"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 url = "=2.5.8"
 uuid = { version = "=1.29.0", features = ["v4", "serde"] }
 wiremock = "=0.6.5"
+zeroize = "=1.9.1"
 zstd = { version = "=0.14.3", default-features = false }
 
 [workspace.lints.rust]

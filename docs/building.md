@@ -34,6 +34,8 @@ cargo run -p tessera-app
 
 `TYPESENSE_API_KEY` prefills the key in the connect dialog. `RUST_LOG=debug` shows one log line per request (never the key).
 
+Logs go to stderr and to `tessera.log.YYYY-MM-DD` in the `logs` folder of the local data directory: `~/Library/Application Support/org.tessera.Tessera/logs` on macOS, `~/.local/share/tessera/logs` on Linux, `%LOCALAPPDATA%\tessera\Tessera\data\logs` on Windows. A new file starts each day, and the last 7 stay. Keys and tokens are masked in both, and neither holds a request body. If the folder cannot be made, the app logs to stderr alone and says so.
+
 `cargo run -p tessera-app --features frame-overlay` adds a frame-time overlay, cycled with ⌘⌥F / Ctrl+Alt+F in the documents view.
 
 ## Local Typesense
@@ -129,6 +131,15 @@ Nothing here has been done yet: the views are covered by UI tests with fakes and
 7. The same backup again into the same server: collections are blocked with the reason, sets read Same, and a changed stopword set reads Differs until Replace, which asks for the profile's name.
 8. A backup of a collection with an embedding key: the row stays blocked and names the two files to use. Follow that text by hand once: create the collection with its keys, then import the JSON Lines file.
 9. A read-only profile: a backup needs no unlock, and a restore unlocks first.
+
+10. Settings, ⌘, (Ctrl+,): Tab reaches each control at the smallest window, in light and in dark. The update check is off; with it on and a published release, a restart shows the result and, for a newer version, one toast. A firewall log shows `api.github.com` and nothing else.
+11. Open logs, ⌥⌘L (Ctrl+Alt+L), shows the log folder, and the folder is `0700` on macOS and Linux. Clear cache asks first and says how many went.
+12. Change the language with a table open: the column titles follow, and resized columns go back. Close and reopen a masked input to see it follow.
+13. Drag the sidebar and the bottom dock, open Jobs, quit and start: sizes and the tab come back, whether you quit at once or after the 500 ms save.
+14. Each empty state in light and in dark: Jobs, API stats, saved queries, the request log, and their links.
+
+15. Record the Linux release binary size from the CI job (NF5, below 41,943,040 bytes). At the close of M8 the macOS arm64 release binary is 28,868,288 bytes, stripped, built with `cargo build --release -p tessera-app`.
+16. Run every `live_*` test on 30.0 and 30.2 and the cluster test on the last commit of M8. They could not run at its close, because Docker stopped answering. The steps are under Tests, and the job `integration` in `.github/workflows/ci.yml` runs most of them.
 
 ## Manual checks of keys, analytics and AI (M7)
 

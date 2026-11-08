@@ -301,6 +301,7 @@ impl ResourceList {
             query: String::new(),
         };
         let table = cx.new(|cx| {
+            crate::settings::follow_language(cx);
             TableState::new(rows, window, cx)
                 .sortable(false)
                 .col_movable(false)
@@ -407,6 +408,7 @@ impl Render for ResourceList {
         let prefix = self.table.read(cx).delegate().prefix;
         div().size_full().child(
             DataTable::new(&self.table)
+                .with_size(crate::settings::table_size(cx))
                 .bordered(false)
                 .accessibility_label(t!(format!("sidebar.{prefix}")).to_string()),
         )

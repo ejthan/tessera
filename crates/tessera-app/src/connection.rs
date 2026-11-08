@@ -17,6 +17,7 @@ use tessera_client::{
 use tessera_core::ServerCapabilities;
 use tessera_core::metrics::MetricsHistory;
 use tessera_core::profile::{InvalidNode, Profile};
+use tessera_core::transfer::cap_error;
 use tokio::runtime::Handle;
 use url::Url;
 
@@ -412,6 +413,28 @@ fn chain(e: &(dyn std::error::Error + 'static)) -> String {
         .join(": ")
 }
 
+/// User-facing text for a failed update check, cut by [`cap_error`]: the request goes
+/// to GitHub, so the wording of a node does not fit.
+pub fn update_error_text(err: &Error) -> String {
+    let text = match err {
+        Error::Http { status, .. } => match err.typesense_message() {
+            Some(message) => t!(
+                "settings.update.http_message",
+                status = status,
+                message = message
+            ),
+            None => t!("settings.update.http", status = status),
+        },
+        Error::Timeout => t!("settings.update.timeout"),
+        Error::Decode(_) | Error::LineTooLong { .. } => t!("settings.update.decode"),
+        Error::Network(e) => t!("connect.error.network", host = "GitHub", detail = chain(e)),
+        Error::Tls(detail) => t!("connect.error.tls", host = "GitHub", detail = detail),
+        // The request builds no other error.
+        other => other.to_string().into(),
+    };
+    cap_error(&text).to_string()
+}
+
 /// User-facing text for a failed connect attempt to `profile`.
 pub fn error_text(err: &Error, profile: &Profile) -> String {
     let host = profile.nodes.first().map(|n| n.label()).unwrap_or_default();
@@ -473,6 +496,35 @@ mod tests {
     use super::*;
 
     use tessera_core::profile::{Node, Protocol};
+    use tessera_core::transfer::ERROR_BYTES;
+
+    #[test]
+    fn a_failed_update_check_is_worded_and_capped() {
+        let http = |message: &str, body: &str| Error::Http {
+            status: 403,
+            message: message.into(),
+            body: body.into(),
+        };
+        assert_eq!(
+            update_error_text(&http("<html>", "<html>")),
+            "GitHub answered 403."
+        );
+        assert_eq!(
+            update_error_text(&http("rate limit", "{}")),
+            "GitHub answered 403: rate limit"
+        );
+        assert_eq!(
+            update_error_text(&Error::Timeout),
+            "GitHub did not answer in time."
+        );
+        let decode = serde_json::from_str::<u8>("x").unwrap_err();
+        assert_eq!(
+            update_error_text(&Error::Decode(decode)),
+            "GitHub sent an answer that could not be read."
+        );
+        let huge = "x".repeat(1 << 20);
+        assert_eq!(update_error_text(&http(&huge, "{}")).len(), ERROR_BYTES);
+    }
 
     fn node(host: &str, port: u16) -> Node {
         Node {

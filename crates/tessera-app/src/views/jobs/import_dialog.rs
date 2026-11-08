@@ -34,7 +34,7 @@ use tessera_core::transfer::import::ImportJob;
 use tessera_core::transfer::infer::{InferNote, collection_name_from};
 use tessera_core::transfer::preview::{Preview, PreviewError, PreviewRow};
 use tessera_core::transfer::source::{CsvOptions, Format, ReadError, ReadOptions, Source, sniff};
-use tessera_core::transfer::{CLIPBOARD_LIMIT, DEFAULT_BATCH, MAX_BATCH, MAX_DOC_BYTES};
+use tessera_core::transfer::{CLIPBOARD_LIMIT, MAX_BATCH, MAX_DOC_BYTES};
 use tessera_widgets::confirm;
 use tessera_widgets::confirm_danger::{self, DangerOptions};
 
@@ -269,9 +269,10 @@ impl DocumentImportDialog {
         cx: &mut Context<Self>,
     ) -> Self {
         let select = cx.new(|cx| SelectState::new(Vec::new(), None, window, cx).searchable(true));
+        let batch_size = state.read(cx).settings.batch_size;
         let batch = cx.new(|cx| {
             let mut input = InputState::new(window, cx);
-            input.set_value(DEFAULT_BATCH.to_string(), window, cx);
+            input.set_value(batch_size.to_string(), window, cx);
             input
         });
         let new_name = cx.new(|cx| InputState::new(window, cx));
@@ -831,7 +832,11 @@ impl DocumentImportDialog {
         };
         let overwrites = self.new.is_none() && job.params.action != ImportAction::Create;
         let danger = if overwrites {
-            Some(danger_level(estimated, prod))
+            Some(danger_level(
+                estimated,
+                crate::settings::current(cx).confirm_above,
+                prod,
+            ))
         } else {
             prod.then_some(Danger::Medium)
         };

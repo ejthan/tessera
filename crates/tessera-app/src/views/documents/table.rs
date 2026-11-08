@@ -20,10 +20,10 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use tessera_client::{DocumentQuery, Error};
+use tessera_core::documents::PAGE_CACHE;
 use tessera_core::documents::columns::{ColumnDef, merge_keys, sort_key};
 use tessera_core::documents::page::{DocumentPage, PageCache, Row, row_position, wanted_pages};
 use tessera_core::documents::views::CollectionView;
-use tessera_core::documents::{PAGE_CACHE, PER_PAGE};
 use tessera_core::profile::Node;
 
 use super::columns::{MIN_WIDTH, visible_columns};
@@ -32,7 +32,6 @@ use super::selection::Selection;
 use crate::connection::{ConnectionState, error_text};
 use crate::documents::{DocumentsBackendGlobal, PageResult};
 
-const ROWS_PER_PAGE: usize = PER_PAGE as usize;
 /// How often a scroll may start fetches; a running timer is left alone, so continuous
 /// scrolling still fetches.
 const THROTTLE: Duration = Duration::from_millis(80);
@@ -60,6 +59,8 @@ pub struct DocRows {
     pub all_columns: Vec<ColumnDef>,
     /// Hidden, pinned and sized columns of this collection.
     pub prefs: CollectionView,
+    /// Documents per request, from the settings when the view opened.
+    pub per_page: u32,
     /// Sort key and whether it ascends.
     pub sort: Option<(String, bool)>,
     /// Documents matching the query.
@@ -104,8 +105,14 @@ pub struct DocRows {
 
 impl DocRows {
     /// An empty table over collection `name` of `connection`, laid out by `prefs`.
-    pub fn new(connection: Entity<ConnectionState>, name: String, prefs: CollectionView) -> Self {
+    pub fn new(
+        connection: Entity<ConnectionState>,
+        name: String,
+        prefs: CollectionView,
+        per_page: u32,
+    ) -> Self {
         Self {
+            per_page,
             columns: Vec::new(),
             all_columns: Vec::new(),
             prefs,
@@ -180,7 +187,7 @@ impl DocRows {
 
     /// Ticks every row of the loaded pages.
     pub fn check_loaded(&mut self) {
-        let last = (self.found as usize).div_ceil(ROWS_PER_PAGE) as u32;
+        let last = (self.found as usize).div_ceil(self.per_page as usize) as u32;
         let pages = (1..=last).filter_map(|page| self.pages.get(page));
         let ids = pages.flat_map(|page| page.rows.iter().map(|r| r.id.to_string()));
         self.selection_limit = self.selection.add_all(ids);
@@ -218,7 +225,7 @@ impl DocRows {
         if self.query_error.is_some() {
             return;
         }
-        let wanted = wanted_pages(self.visible.clone(), ROWS_PER_PAGE, self.found);
+        let wanted = wanted_pages(self.visible.clone(), self.per_page as usize, self.found);
         // Page 1 of a new query answers `replacing`, wherever the table scrolled meanwhile.
         let replacing = self.replacing;
         self.inflight
@@ -239,7 +246,7 @@ impl DocRows {
         };
         let query = DocumentQuery {
             page,
-            per_page: PER_PAGE,
+            per_page: self.per_page,
             filter_by: self.filter.clone(),
             sort_by: self.sort.as_ref().map(|(k, a)| sort_key(k, *a)),
             exclude_fields: self.exclude.clone(),
@@ -299,10 +306,9 @@ impl DocRows {
                 self.search_time_ms = answer.search_time_ms;
                 self.error = None;
                 self.query_error = None;
-                if replaced {
-                    // The scroll position stays, and it may be far from page 1.
-                    self.fetch_wanted(cx);
-                }
+                // The scroll position may be far from page 1 after a replace, and a jump can want
+                // more pages than `MAX_INFLIGHT`, so each answer starts what is still missing.
+                self.fetch_wanted(cx);
                 new_column
             }
             Err(e) => {
@@ -320,7 +326,7 @@ impl DocRows {
 
     /// Row `row_ix`, if its page is loaded.
     pub fn row(&self, row_ix: usize) -> Option<&Row> {
-        let (page, offset) = row_position(row_ix, ROWS_PER_PAGE);
+        let (page, offset) = row_position(row_ix, self.per_page as usize);
         self.pages.get(page)?.rows.get(offset)
     }
 
@@ -573,8 +579,8 @@ impl TableDelegate for DocRows {
         cx: &mut Context<TableState<Self>>,
     ) {
         if !visible_range.is_empty() {
-            let (first, _) = row_position(visible_range.start, ROWS_PER_PAGE);
-            let (last, _) = row_position(visible_range.end - 1, ROWS_PER_PAGE);
+            let (first, _) = row_position(visible_range.start, self.per_page as usize);
+            let (last, _) = row_position(visible_range.end - 1, self.per_page as usize);
             for page in first..=last {
                 self.pages.touch(page);
             }

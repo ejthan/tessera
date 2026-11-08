@@ -8,28 +8,63 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use rust_i18n::t;
 use secrecy::{ExposeSecret as _, SecretString};
-use tessera_client::{RequestEvent, RequestHook};
+use tessera_client::{Error, RequestEvent, RequestHook};
 use tessera_core::cli::Launch;
 use tessera_core::documents::views::{self, CollectionView, ViewsFile};
 use tessera_core::import;
+use tessera_core::layout::{self, Layout};
 use tessera_core::log::{LogEntry, RequestLog};
 use tessera_core::profile::Profile;
 use tessera_core::search::history::{self, History, HistoryItem};
 use tessera_core::search::params::SearchDraft;
 use tessera_core::search::saved::{self, SavedFile, SavedQuery};
 use tessera_core::secrets::{SecretError, SecretStore};
+use tessera_core::settings::{self, Settings, is_newer};
 use tessera_core::store::{self, ConnectionsFile, SCHEMA_VERSION, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::connection::{Connected, ConnectionState, ConnectorGlobal, client_options, error_text};
+use crate::admin::AdminBackendGlobal;
+use crate::connection::{
+    Connected, ConnectionState, ConnectorGlobal, client_options, error_text, update_error_text,
+};
 use crate::runtime::Tokio;
 use crate::views::status_bar;
+
+/// Where the update check stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateCheck {
+    /// Asking.
+    Running,
+    /// This is the latest version.
+    Current,
+    /// This tag is newer.
+    Newer(String),
+    /// The project has no release yet.
+    NoRelease,
+    /// The tag is no version.
+    UnknownTag(String),
+    /// It failed, in full.
+    Failed(String),
+}
+
+/// A newer version exists, under this tag.
+pub struct UpdateFound(pub String);
+
+/// Why settings are not saved, in full.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsProblem {
+    /// `settings.toml` could not be read, so it must not be written over.
+    Read(String),
+    /// A write failed, so later changes last until the app quits.
+    Write(String),
+}
 
 /// One file's writes: each waits for the one before, on the background executor, and quitting
 /// waits for the last.
@@ -245,6 +280,20 @@ pub struct AppState {
     /// Why the saved file did not load; while set, it is not written.
     pub saved_error: Option<String>,
     saved_chain: WriteChain,
+    /// The preferences; the defaults until [`Self::load_settings`].
+    pub settings: Settings,
+    /// Where `settings.toml` lives; `None` means settings are not persisted.
+    pub settings_path: Option<PathBuf>,
+    /// Why `settings.toml` is not being written, in full. The dialog shows it.
+    pub settings_error: Option<SettingsProblem>,
+    /// The dock sizes, as last saved.
+    pub layout: Layout,
+    /// Where `layout` is saved; `None` keeps it for the session.
+    pub layout_path: Option<PathBuf>,
+    layout_chain: WriteChain,
+    /// The newest update check of this session.
+    pub update_check: Option<UpdateCheck>,
+    settings_chain: WriteChain,
     log: RequestLog,
     log_tx: UnboundedSender<LogEntry>,
     /// Taken by [`AppState::spawn_log_drain`].
@@ -296,6 +345,14 @@ impl AppState {
             saved_path: None,
             saved_error: None,
             saved_chain: WriteChain::default(),
+            settings: Settings::default(),
+            settings_path: None,
+            settings_error: None,
+            layout: Layout::default(),
+            layout_path: None,
+            layout_chain: WriteChain::default(),
+            update_check: None,
+            settings_chain: WriteChain::default(),
         }
     }
 
@@ -367,6 +424,107 @@ impl AppState {
         }
         self.history_path = history_path;
         self.saved_path = saved_path;
+    }
+
+    /// Reads `settings.toml`, once, before the window. A bad file leaves the defaults and is
+    /// not written over.
+    pub fn load_settings(&mut self, path: Option<PathBuf>) {
+        if let Some(path) = &path {
+            match settings::load(path) {
+                Ok(settings) => self.settings = settings,
+                Err(e) => {
+                    tracing::warn!("settings not loaded, they will not be written: {e}");
+                    self.settings_error = Some(SettingsProblem::Read(e.to_string()));
+                }
+            }
+        }
+        self.settings_path = path;
+    }
+
+    /// Reads the layout, once, before the window. A bad file leaves the defaults.
+    pub fn load_layout(&mut self, path: Option<PathBuf>) {
+        if let Some(path) = &path {
+            self.layout = layout::load(path);
+        }
+        self.layout_path = path;
+    }
+
+    /// Remembers `new` and writes it. The answer ends when it is on disk.
+    pub fn save_layout(&mut self, new: Layout, cx: &mut Context<Self>) -> Task<()> {
+        self.layout = new.clone();
+        let Some(path) = self.layout_path.clone() else {
+            return Task::ready(());
+        };
+        let write = move || {
+            if let Err(e) = layout::save(&path, &new) {
+                tracing::warn!("the layout was not saved: {e}");
+            }
+        };
+        let done = self.layout_chain.push(write, |s| &mut s.layout_chain, cx);
+        cx.background_spawn(async move {
+            done.await;
+        })
+    }
+
+    /// Applies `change` and writes the file, unless a load or an earlier write failed.
+    pub fn change_settings(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+        change(&mut self.settings);
+        cx.notify();
+        let Some(path) = self.settings_path.clone() else {
+            return;
+        };
+        if self.settings_error.is_some() {
+            return;
+        }
+        let file = self.settings.clone();
+        let write = move || settings::save(&path, &file).map_err(|e| e.to_string());
+        let done = self
+            .settings_chain
+            .push(write, |s| &mut s.settings_chain, cx);
+        cx.spawn(async move |this, cx| {
+            if let Some(Err(e)) = done.await {
+                this.update(cx, |s, cx| {
+                    s.settings_error = Some(SettingsProblem::Write(e));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Asks GitHub for the latest release. One request at a time.
+    pub fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        if self.update_check == Some(UpdateCheck::Running) {
+            return;
+        }
+        self.update_check = Some(UpdateCheck::Running);
+        cx.notify();
+        let answer = cx.global::<AdminBackendGlobal>().0.latest_release();
+        cx.spawn(async move |this, cx| {
+            let check = match answer.await {
+                Err(Error::Http { status: 404, .. }) => UpdateCheck::NoRelease,
+                Err(e) => UpdateCheck::Failed(update_error_text(&e)),
+                Ok(tag) => match is_newer(&tag, env!("CARGO_PKG_VERSION")) {
+                    Some(true) => UpdateCheck::Newer(tag),
+                    Some(false) => UpdateCheck::Current,
+                    None => UpdateCheck::UnknownTag(tag),
+                },
+            };
+            this.update(cx, |s, cx| {
+                if let UpdateCheck::Newer(tag) = &check {
+                    cx.emit(UpdateFound(tag.clone()));
+                }
+                s.update_check = Some(check);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn poll_interval(&self) -> Duration {
+        Duration::from_secs(u64::from(self.settings.poll_seconds))
     }
 
     fn is_temporary(&self, profile: Uuid) -> bool {
@@ -797,7 +955,12 @@ impl AppState {
                 conn
             }
             None => {
-                let conn = cx.new(|_| ConnectionState::new(profile.clone()));
+                let interval = self.poll_interval();
+                let conn = cx.new(|_| {
+                    let mut conn = ConnectionState::new(profile.clone());
+                    conn.interval = interval;
+                    conn
+                });
                 observe_connection(&conn, cx);
                 self.connections.push(conn.clone());
                 conn
@@ -892,6 +1055,7 @@ impl AppState {
         let id = profile.id;
         self.disconnect(id, cx);
         let mut state = ConnectionState::new(profile);
+        state.interval = self.poll_interval();
         state.writes_unlocked = false;
         state.connected = Some(connected);
         let conn = cx.new(|_| state);
@@ -992,6 +1156,7 @@ fn observe_connection(conn: &Entity<ConnectionState>, cx: &mut Context<AppState>
     .detach();
 }
 
+impl EventEmitter<UpdateFound> for AppState {}
 impl EventEmitter<OpenOverview> for AppState {}
 impl EventEmitter<OpenCollections> for AppState {}
 impl EventEmitter<OpenCollection> for AppState {}

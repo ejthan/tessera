@@ -94,6 +94,80 @@ pub fn text_query_params(text: &str) -> String {
     out
 }
 
+/// One log line with secrets masked: URL query parameters, `"api_key":"…"`-style pairs, and
+/// `x-typesense-api-key` headers in any case. Everything else, newlines too, stays.
+pub fn line(text: &str) -> String {
+    mask_pairs(&mask_text(&text_query_params(text)))
+}
+
+/// Skips whitespace and ANSI colours, which the stderr layer puts between a field and its value.
+fn skip_gap(b: &[u8], mut i: usize) -> usize {
+    loop {
+        i = skip_ws(b, i);
+        if b.get(i) != Some(&0x1b) {
+            return i;
+        }
+        i = b[i..]
+            .iter()
+            .position(|&c| c == b'm')
+            .map_or(b.len(), |n| i + n + 1);
+    }
+}
+
+/// Start and end of the value at `i`, inside its quotes: a `\"` from a `{:?}` of JSON, a `"`, a
+/// `'`, or none, which ends where a field or a parameter would.
+fn value_span(text: &str, i: usize) -> (usize, usize) {
+    let b = text.as_bytes();
+    let tail = &text[i..];
+    if let Some(rest) = tail.strip_prefix("\\\"") {
+        (i + 2, rest.find("\\\"").map_or(b.len(), |n| i + 2 + n))
+    } else if b.get(i) == Some(&b'"') {
+        (i + 1, closing_quote(b, i).unwrap_or(b.len()))
+    } else if b.get(i) == Some(&b'\'') {
+        (i + 1, tail[1..].find('\'').map_or(b.len(), |n| i + 1 + n))
+    } else {
+        let end = |c: char| c.is_whitespace() || ",;&)]}\x1b".contains(c);
+        (i, tail.find(end).map_or(b.len(), |n| i + n))
+    }
+}
+
+/// Scanner for `name: value` and `name=value` with a secret name, the quotes optional and
+/// possibly escaped: a header line, a log field, or JSON inside a `{:?}`.
+fn mask_pairs(text: &str) -> String {
+    let b = text.as_bytes();
+    let is_name = |c: u8| c.is_ascii_alphanumeric() || c == b'-' || c == b'_';
+    let mut out = String::with_capacity(text.len());
+    let (mut i, mut copied) = (0, 0);
+    while i < b.len() {
+        if !is_name(b[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && is_name(b[i]) {
+            i += 1;
+        }
+        if !is_secret_param(&text[start..i]) {
+            continue;
+        }
+        let mut sep = i;
+        while matches!(b.get(sep), Some(b'\\' | b'"' | b'\'')) {
+            sep += 1;
+        }
+        sep = skip_gap(b, sep);
+        if !matches!(b.get(sep), Some(b':' | b'=')) {
+            continue;
+        }
+        let (from, to) = value_span(text, skip_gap(b, sep + 1));
+        out.push_str(&text[copied..from]);
+        out.push_str(MASK);
+        copied = to;
+        i = to.max(i);
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
 /// Masks the secret string values in `v` in place, at any depth (for display of a parsed body).
 pub fn mask_value(v: &mut Value) {
     match v {
@@ -122,18 +196,23 @@ pub fn contains_mask(v: &Value) -> bool {
     }
 }
 
-/// Byte index just past the string literal that starts at `start` (a `"`), or the end of
-/// the text if it is unterminated.
-fn string_end(b: &[u8], start: usize) -> usize {
+/// Byte index of the `"` that closes the string literal starting at `start`, if one does.
+fn closing_quote(b: &[u8], start: usize) -> Option<usize> {
     let mut i = start + 1;
     while i < b.len() {
         match b[i] {
             b'\\' => i += 2,
-            b'"' => return i + 1,
+            b'"' => return Some(i),
             _ => i += 1,
         }
     }
-    b.len()
+    None
+}
+
+/// Byte index just past the string literal that starts at `start` (a `"`), or the end of
+/// the text if it is unterminated.
+fn string_end(b: &[u8], start: usize) -> usize {
+    closing_quote(b, start).map_or(b.len(), |i| i + 1)
 }
 
 fn skip_ws(b: &[u8], mut i: usize) -> usize {
@@ -180,6 +259,57 @@ fn mask_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_masks_urls_pairs_and_headers() {
+        for text in [
+            "GET http://h/x?x-typesense-api-key=abc&a=1 failed",
+            r#"body {"api_key":"abc","n":1}"#,
+            r#"body {"api_key" : "abc"#,
+            "X-TYPESENSE-API-KEY: abc",
+            "x-typesense-api-key:abc\n",
+            r#"headers: {"x-typesense-api-key": "abc"}"#,
+            r#"x-typesense-api-key: "abc""#,
+            "api_key=abc",
+            "api_key='abc' next",
+            "a=1&scoped_key=abc&b=2",
+            // `{:?}` of a JSON text.
+            r#"body="{\"api_key\":\"abc\",\"n\":1}""#,
+            // An ANSI field of the stderr layer.
+            "\x1b[3mapi_key\x1b[0m\x1b[2m=\x1b[0mabc \x1b[3mn\x1b[0m",
+        ] {
+            let out = line(text);
+            assert!(!out.contains("abc"), "{text} became {out}");
+            assert!(out.contains(MASK), "{text} became {out}");
+        }
+    }
+
+    #[test]
+    fn line_keeps_everything_else() {
+        for text in [
+            "plain text, no key\n",
+            "ready in 412 ms\n\n  second line\n",
+            "a=1&b=2 http://h/x?q=dune",
+            "api_key",
+            "ümläut api_key at the end ü",
+        ] {
+            assert_eq!(line(text), text);
+        }
+        assert_eq!(
+            line("key: abc\napi_key: abc\nend\n"),
+            "key: abc\napi_key: ••••\nend\n"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_quote_masks_to_the_end() {
+        assert_eq!(line(r#"api_key="secret"#), format!(r#"api_key="{MASK}"#));
+    }
+
+    #[test]
+    fn an_unterminated_quote_after_a_multibyte_character_does_not_panic() {
+        assert_eq!(line(r#"api_key: "geheimé"#), format!(r#"api_key: "{MASK}"#));
+    }
 
     #[test]
     fn redact_masks_nested_api_key_and_value() {

@@ -12,6 +12,7 @@ use tessera_client::{
     ApiKey, Client, CreatedKey, Error, ModelKind, NewKey, SchemaChange, StemmingDictionary,
     StemmingWord,
 };
+use tessera_core::settings::RELEASES_API;
 use tessera_core::stemming::{
     BadLine, ImportCheck, STEMMING_FILE_LIMIT, check_import, parse_dictionary, to_jsonl,
 };
@@ -96,12 +97,15 @@ pub trait AdminBackend: Send + Sync {
         node: usize,
     ) -> BoxFuture<Result<Vec<SchemaChange>, Error>>;
 
-    /// Sends an analytics event.
     /// The role each node of `client` reports now, indexed like `Client::nodes`. `None` for a
     /// node that does not answer.
     fn roles(&self, client: Client) -> BoxFuture<Vec<Option<tessera_client::RaftState>>>;
 
+    /// Sends an analytics event.
     fn send_event(&self, client: Client, event: Value) -> BoxFuture<Result<(), Error>>;
+
+    /// The tag of the latest release of Tessera. Goes to GitHub, not to a node.
+    fn latest_release(&self) -> BoxFuture<Result<String, Error>>;
 
     /// Writes what the server holds in memory to the destinations.
     fn flush(&self, client: Client) -> BoxFuture<Result<(), Error>>;
@@ -342,6 +346,10 @@ impl AdminBackend for TokioBackend {
 
     fn send_event(&self, client: Client, event: Value) -> BoxFuture<Result<(), Error>> {
         self.run(async move { client.analytics_event(&event).await })
+    }
+
+    fn latest_release(&self) -> BoxFuture<Result<String, Error>> {
+        self.run(async move { tessera_client::latest_release(RELEASES_API).await })
     }
 
     fn flush(&self, client: Client) -> BoxFuture<Result<(), Error>> {

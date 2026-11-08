@@ -515,6 +515,7 @@ async fn stats_empty_explains(cx: &mut TestAppContext) {
     rust_i18n::set_locale("en");
     let (handle, _conn, _rt) = cluster(cx).await;
     let empty = text(cx, handle, "stats.empty");
+    wait_for_element(cx, handle, "stats.docs".into(), true).await;
     assert!(empty.contains("receives requests"), "{empty}");
 }
 

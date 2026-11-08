@@ -29,6 +29,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use tessera_client::{CreatedKey, NewKey};
 use tessera_core::keys::{ACTION_GROUPS, KeyProblem, Template, check_new_key, collections_of};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use super::keys::KeysView;
 use super::{client_of, dialog_title, notice};
@@ -456,12 +457,12 @@ impl RevealDialog {
         let title_connection = connection.clone();
         let owner = keys.clone();
         let view = cx.new(|cx| {
-            let shown = created.value.expose_secret().to_string();
+            let shown = Zeroizing::new(created.value.expose_secret().to_string());
             Self {
                 input: cx.new(|cx| {
                     InputState::new(window, cx)
                         .masked(true)
-                        .default_value(shown)
+                        .default_value(shown.as_str())
                 }),
                 value: created.value,
                 id: created.key.id,
@@ -499,8 +500,8 @@ impl RevealDialog {
     }
 
     fn copy(&mut self, cx: &mut Context<Self>) {
-        let value = self.value.expose_secret().to_string();
-        cx.write_to_clipboard(ClipboardItem::new_string(value));
+        let item = ClipboardItem::new_string(self.value.expose_secret().to_string());
+        cx.write_to_clipboard(item);
         self.copied = true;
         cx.notify();
         self.copy_reset = Some(cx.spawn(async move |this, cx| {

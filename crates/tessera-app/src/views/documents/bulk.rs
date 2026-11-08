@@ -392,7 +392,7 @@ impl Bulk {
         let this = cx.entity().downgrade();
         let run = move |window: &mut Window, cx: &mut App| run(this.clone(), &job, window, cx);
         let prod = self.connection.read(cx).profile.environment.is_prod();
-        match danger_level(count, prod) {
+        match danger_level(count, crate::settings::current(cx).confirm_above, prod) {
             // The dialog is gone by then, so a failure shows here.
             Danger::Medium => confirm::open(
                 title,

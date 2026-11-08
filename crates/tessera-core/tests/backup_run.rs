@@ -17,16 +17,16 @@ use tessera_client::{Alias, Client, ClientOptions, Collection, ItemSet, SetKind,
 use tessera_core::backup::archive::{read_manifest, unpack, verify};
 use tessera_core::backup::format::{FORMAT, Manifest, ManifestCollection};
 use tessera_core::backup::restore::{
-    Loaded, RestoreBlock, RestoreError, RestoreJob, RestoreOutcome, RestorePlan, RestoreProgress,
-    RestoreRow, RestoreView, RestoreWarning, RowFailure, RowKind, RowResult, RowState, load, plan,
-    run_restore,
+    Loaded, Need, RestoreBlock, RestoreError, RestoreJob, RestoreOutcome, RestorePlan,
+    RestoreProgress, RestoreRow, RestoreView, RestoreWarning, RowFailure, RowKind, RowResult,
+    RowState, load, plan, run_restore,
 };
 use tessera_core::backup::run::{
     BackupError, BackupOutcome, BackupPlan, BackupStep, BackupTarget, BackupWarning,
     backup_warnings, run_backup,
 };
 use tessera_core::schema::SchemaDraft;
-use tessera_core::transfer::{JobControl, JobEnd};
+use tessera_core::transfer::{JobControl, JobEnd, TransferError};
 use tokio::sync::watch;
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -520,6 +520,22 @@ fn collection(value: Value) -> Collection {
 }
 
 #[test]
+fn a_blank_in_metadata_has_its_own_warning() {
+    let plain = collection(json!({
+        "name": "plain",
+        "metadata": {"api_key": "x"},
+        "fields": [field("title")],
+    }));
+    assert_eq!(
+        backup_warnings(&[plain], &["plain".to_string()], &[]),
+        [BackupWarning::BlankedMetadata {
+            collection: "plain".into(),
+            count: 1,
+        }]
+    );
+}
+
+#[test]
 fn warnings_come_from_the_lists() {
     let books = collection(json!({
         "name": "books",
@@ -675,7 +691,11 @@ async fn a_backup_holds_no_provider_key() {
         );
         assert!(outcome.warnings.contains(&BackupWarning::BlankedSecrets {
             collection: "embedded".into(),
-            count: 4,
+            count: 3,
+        }));
+        assert!(outcome.warnings.contains(&BackupWarning::BlankedMetadata {
+            collection: "embedded".into(),
+            count: 1,
         }));
     }
 }
@@ -764,15 +784,20 @@ impl Backup {
         let rows = self.plan(&RestoreView::default()).rows;
         let aliases = self.loaded.aliases.iter();
         let aliases = aliases.map(|a| (RowKind::Alias, a.name.clone()));
+        let ticked: HashSet<_> = rows
+            .into_iter()
+            .map(|r| (r.kind, r.name))
+            .chain(aliases)
+            .collect();
         RestoreJob {
             backup: verify(&self.folder, &self.manifest, &JobControl::default()).unwrap(),
             loaded: self.loaded.clone(),
-            ticked: rows
-                .into_iter()
-                .map(|r| (r.kind, r.name))
-                .chain(aliases)
-                .collect(),
-            replace,
+            replace: if replace {
+                ticked.clone()
+            } else {
+                HashSet::new()
+            },
+            ticked,
             batch_size: 100,
         }
     }
@@ -1041,7 +1066,7 @@ async fn a_conflict_on_create_imports_nothing() {
     assert_eq!(outcome.to_delete, Vec::<String>::new());
     assert!(matches!(
         result(&outcome.rows, RowKind::Collection, "books"),
-        RowResult::Failed(RowFailure::Text(_))
+        RowResult::Failed(RowFailure::Error(_))
     ));
 }
 
@@ -1116,6 +1141,198 @@ async fn replace_leaves_a_row_that_is_not_ticked() {
         result(&outcome.rows, RowKind::SynonymSet, "syn"),
         RowResult::Kept
     );
+}
+
+#[tokio::test]
+async fn a_row_that_became_different_after_the_confirmation_stays() {
+    let backup = backup_of(Vec::new(), resources());
+    let mut job = backup.job(true);
+    job.replace.remove(&(RowKind::Stopwords, "s".to_string()));
+    let (server, client) = serve(differing()).await;
+
+    let outcome = restore(client, job).await;
+
+    assert!(
+        !writes(&server)
+            .await
+            .contains(&"PUT /stopwords/s".to_string())
+    );
+    assert_eq!(
+        result(&outcome.rows, RowKind::Stopwords, "s"),
+        RowResult::Kept
+    );
+    assert_eq!(
+        result(&outcome.rows, RowKind::SynonymSet, "syn"),
+        RowResult::Done
+    );
+}
+
+#[tokio::test]
+async fn a_refused_write_keeps_its_type() {
+    let backup = backup_of(vec![schema("books")], Loaded::default());
+    let (_server, client) = serve(Fake::default()).await;
+    client.set_read_only(true);
+
+    let outcome = restore(client, backup.job(false)).await;
+
+    let RowResult::Failed(RowFailure::Error(e)) =
+        result(&outcome.rows, RowKind::Collection, "books")
+    else {
+        panic!("{:?}", outcome.rows);
+    };
+    assert!(matches!(
+        e.0.as_ref(),
+        TransferError::Client(tessera_client::Error::ReadOnly { .. })
+    ));
+}
+
+/// `child` references `parent`, whose keys are blanked, so it cannot be restored.
+fn child_of_a_blocked_parent() -> Backup {
+    let mut backup = backup_of(
+        vec![referencing("child", "parent"), schema("parent")],
+        Loaded::default(),
+    );
+    backup.manifest.collections[1].blanked_secrets = 1;
+    backup
+}
+
+#[test]
+fn a_blocked_parent_warns_at_the_plan() {
+    let got = child_of_a_blocked_parent().plan(&RestoreView::default());
+    assert_eq!(
+        got.warnings,
+        [RestoreWarning::MissingReference {
+            collection: "child".into(),
+            target: "parent".into(),
+        }]
+    );
+}
+
+#[test]
+fn unmet_follows_the_ticks() {
+    let backup = backup_of(
+        vec![referencing("child", "parent"), schema("parent")],
+        Loaded::default(),
+    );
+    let got = backup.plan(&RestoreView::default());
+    assert_eq!(got.warnings, []);
+    let key = |name: &str| (RowKind::Collection, name.to_string());
+    let both = HashSet::from([key("child"), key("parent")]);
+    assert_eq!(got.unmet(&both), Vec::new());
+    assert_eq!(got.unmet(&HashSet::from([key("parent")])), Vec::new());
+    assert_eq!(
+        got.unmet(&HashSet::from([key("child")])),
+        [("child".to_string(), "parent".to_string())]
+    );
+}
+
+#[test]
+fn an_async_reference_needs_nothing() {
+    let child = json!({"name": "child", "fields": [
+        field("title"),
+        {"name": "other", "type": "string", "reference": "gone.id", "async_reference": true},
+    ]});
+    let got = backup_of(vec![child], Loaded::default()).plan(&RestoreView::default());
+    assert_eq!(got.needs, []);
+    assert_eq!(got.warnings, []);
+    let child = HashSet::from([(RowKind::Collection, "child".to_string())]);
+    assert_eq!(got.unmet(&child), Vec::new());
+}
+
+#[test]
+fn a_plain_reference_beside_an_async_one_still_needs_its_target() {
+    let child = json!({"name": "child", "fields": [
+        {"name": "late", "type": "string", "reference": "gone.id", "async_reference": true},
+        {"name": "now", "type": "string", "reference": "gone.id"},
+    ]});
+    let got = backup_of(vec![child], Loaded::default()).plan(&RestoreView::default());
+    assert_eq!(
+        got.warnings,
+        [RestoreWarning::MissingReference {
+            collection: "child".into(),
+            target: "gone".into(),
+        }]
+    );
+}
+
+#[test]
+fn a_child_without_documents_needs_nothing() {
+    let mut backup = backup_of(vec![referencing("child", "gone")], Loaded::default());
+    backup.manifest.collections[0].documents = 0;
+    let got = backup.plan(&RestoreView::default());
+    assert_eq!(got.needs, []);
+    assert_eq!(got.warnings, []);
+}
+
+#[test]
+fn a_reference_through_an_alias_needs_the_alias_and_its_target() {
+    let aliases = Loaded {
+        aliases: vec![alias("people", "parent")],
+        ..Loaded::default()
+    };
+    let backup = backup_of(
+        vec![referencing("child", "people"), schema("parent")],
+        aliases,
+    );
+    let got = backup.plan(&RestoreView::default());
+    let key = |kind, name: &str| (kind, name.to_string());
+    let (child, parent) = (
+        key(RowKind::Collection, "child"),
+        key(RowKind::Collection, "parent"),
+    );
+    let link = key(RowKind::Alias, "people");
+    let all = HashSet::from([child.clone(), parent.clone(), link.clone()]);
+    assert_eq!(got.unmet(&all), Vec::new());
+    assert_eq!(got.unmet(&HashSet::from([child.clone(), link])).len(), 1);
+    assert_eq!(got.unmet(&HashSet::from([child, parent])).len(), 1);
+}
+
+#[test]
+fn a_reference_the_server_holds_needs_nothing() {
+    let backup = backup_of(vec![referencing("child", "parent")], Loaded::default());
+    let got = backup.plan(&RestoreView {
+        collections: vec!["parent".into()],
+        ..RestoreView::default()
+    });
+    assert_eq!(got.needs, Vec::<Need>::new());
+}
+
+#[tokio::test]
+async fn a_child_without_its_parent_writes_nothing() {
+    let backup = child_of_a_blocked_parent();
+    let (server, client) = serve(Fake::default()).await;
+
+    let outcome = restore(client, backup.job(false)).await;
+
+    assert!(
+        matches!(&outcome.end, JobEnd::Failed(RestoreError::Unmet(unmet))
+            if unmet == &[("child".to_string(), "parent".to_string())]),
+        "{:?}",
+        outcome.end
+    );
+    assert_eq!(writes(&server).await, Vec::<String>::new());
+}
+
+#[test]
+fn a_set_with_a_blank_warns_only_when_replace_could_write_it() {
+    let blanked = Loaded {
+        synonym_sets: vec![item_set(
+            "syn",
+            vec![json!({"id": "1", "synonyms": ["a"], "api_key": ""})],
+        )],
+        ..Loaded::default()
+    };
+    let backup = backup_of(Vec::new(), blanked);
+    assert_eq!(backup.plan(&RestoreView::default()).warnings, []);
+    let got = backup.plan(&RestoreView {
+        synonym_sets: vec![item_set(
+            "syn",
+            vec![json!({"id": "1", "synonyms": ["a"], "api_key": "x"})],
+        )],
+        ..RestoreView::default()
+    });
+    assert_eq!(state(&got, RowKind::SynonymSet, "syn"), RowState::Differs);
+    assert_eq!(got.warnings, [RestoreWarning::BlankedSet("syn".into())]);
 }
 
 #[tokio::test]
@@ -1683,7 +1900,7 @@ async fn a_backup_restores_into_an_empty_server() {
         backup,
         loaded,
         ticked: rows.into_iter().map(|r| (r.kind, r.name)).collect(),
-        replace: false,
+        replace: Default::default(),
         batch_size: 100,
     };
     let (server, client) = serve(Fake::default()).await;

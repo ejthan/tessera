@@ -7,11 +7,11 @@ use gpui_kit::{ClipboardItem, Context, Window};
 use rust_i18n::t;
 use serde_json::{Map, Value};
 use tessera_client::{Client, Error, Method, SearchRoute, document_path, search_route};
+use tessera_core::documents::ID_FILTER_BYTES;
 use tessera_core::documents::columns::sort_key;
 use tessera_core::documents::export::{to_csv, to_jsonl};
 use tessera_core::documents::ids::id_batches;
 use tessera_core::documents::page::cell_full;
-use tessera_core::documents::{ID_FILTER_BYTES, PER_PAGE};
 
 use super::DocumentsView;
 use crate::actions::{CopyCell, CopyCsv, CopyCurl, CopyJsonl, CopyRowJson};
@@ -180,7 +180,7 @@ pub fn copy_curl(view: &mut DocumentsView, cx: &mut Context<DocumentsView>) {
         Some(id) => document_path(&view.name, &id).map(|p| (Method::GET, p, None, None)),
         None => {
             let rows = view.table.read(cx).delegate();
-            let per_page = PER_PAGE.to_string();
+            let per_page = rows.per_page.to_string();
             let sort = rows.sort.as_ref().map(|(k, asc)| sort_key(k, *asc));
             let mut pairs = vec![
                 ("q", "*"),

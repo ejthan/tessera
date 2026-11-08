@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use std::rc::Rc;
 
 use gpui_kit::base::TestSupportExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
@@ -15,6 +16,8 @@ use gpui_kit::{
 };
 use rust_i18n::t;
 use tessera_client::Stats;
+
+const DOCS_URL: &str = "https://typesense.org/docs/30.2/api/cluster-operations.html";
 
 /// A sortable column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,13 +148,25 @@ pub fn render(
                 ),
             };
             let text = SharedString::from(text);
-            return div()
+            let line = div()
                 .id(id)
                 .test_support()
                 .aria_label(text.clone())
                 .text_sm()
                 .text_color(color)
-                .child(text)
+                .child(text);
+            return v_flex()
+                .gap_1()
+                .items_start()
+                .child(line)
+                .when(id == "stats.empty", |el| {
+                    el.child(
+                        Button::new("stats.docs")
+                            .link()
+                            .label(t!("resources.docs").to_string())
+                            .on_click(|_, _, cx| cx.open_url(DOCS_URL)),
+                    )
+                })
                 .into_any_element();
         }
     };

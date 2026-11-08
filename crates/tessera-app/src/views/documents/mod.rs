@@ -159,8 +159,10 @@ impl DocumentsView {
     ) -> Self {
         let profile = connection.read(cx).profile.id;
         let prefs = state.read(cx).document_view(profile, &name);
-        let rows = DocRows::new(connection.clone(), name.clone(), prefs);
+        let per_page = state.read(cx).settings.per_page;
+        let rows = DocRows::new(connection.clone(), name.clone(), prefs, per_page);
         let table = cx.new(|cx| {
+            crate::settings::follow_language(cx);
             TableState::new(rows, window, cx)
                 .cell_selectable(true)
                 .row_header(false)
@@ -1403,7 +1405,11 @@ impl Render for DocumentsView {
                                     .test_support()
                                     .size_full()
                                     .when(dimmed, |table| table.opacity(0.5))
-                                    .child(DataTable::new(&self.table).bordered(true)),
+                                    .child(
+                                        DataTable::new(&self.table)
+                                            .with_size(crate::settings::table_size(cx))
+                                            .bordered(true),
+                                    ),
                             ),
                         )
                         .child(

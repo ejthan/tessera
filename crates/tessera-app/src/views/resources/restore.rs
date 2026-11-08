@@ -20,14 +20,17 @@ use tempfile::TempDir;
 use tessera_core::backup::archive::Verified;
 use tessera_core::backup::restore::{
     Loaded, PlanRow, RestoreBlock, RestoreJob, RestoreOutcome, RestorePlan, RestoreWarning,
-    RowKind, RowResult, RowState,
+    RowKind, RowState,
 };
-use tessera_core::transfer::{DEFAULT_BATCH, JobControl};
+use tessera_core::profile::Profile;
+use tessera_core::transfer::{JobControl, JobEnd};
 
 use super::{Danger, client_of, confirm_write, notice, row_button};
 use crate::actions::{PickImportFile, SaveResource, StopWaiting};
 use crate::connection::{ConnectionState, error_text};
-use crate::jobs::{JobId, JobOutcome, JobsGlobal, row_failure_text, row_kind_key};
+use crate::jobs::{
+    JobFinished, JobId, JobOutcome, JobsGlobal, row_kind_key, row_result_text, unmet_text,
+};
 use crate::transfer::{TransferBackend, TransferBackendGlobal, archive_error_text};
 use crate::views::overview::grouped;
 
@@ -35,7 +38,7 @@ use crate::views::overview::grouped;
 ///
 /// shortcut: flex rows, which a real backup never fills; a hostile manifest of 100,000 names
 /// would freeze a frame. Move to a virtual list if backups of thousands of collections appear.
-const ROW_LIMIT: usize = 1000;
+pub(crate) const ROW_LIMIT: usize = 1000;
 
 /// How far opening a backup is.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,7 +56,7 @@ struct Opened {
     plan: RestorePlan,
 }
 
-fn warning_text(warning: &RestoreWarning) -> String {
+pub(crate) fn restore_warning_text(warning: &RestoreWarning) -> String {
     match warning {
         RestoreWarning::Unstored { collection, fields } => t!(
             "backup.warn.unstored",
@@ -80,6 +83,7 @@ fn warning_text(warning: &RestoreWarning) -> String {
             t!("restore.warn.alias_target", alias = alias, target = target)
         }
         RestoreWarning::AliasShadowed(alias) => t!("restore.warn.alias_shadowed", alias = alias),
+        RestoreWarning::BlankedSet(name) => t!("restore.warn.blanked_set", name = name),
     }
     .to_string()
 }
@@ -104,7 +108,7 @@ pub struct RestoreForm {
     /// The job this view started last.
     job: Option<JobId>,
     focus_handle: FocusHandle,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 impl Drop for RestoreForm {
@@ -124,6 +128,11 @@ impl RestoreForm {
             _subscriptions: [
                 cx.observe(&connection, |_, _, cx| cx.notify()),
                 cx.observe(&jobs, |_, _, cx| cx.notify()),
+                cx.subscribe(&jobs, |this, _, event: &JobFinished, cx| {
+                    if this.job == Some(event.0) {
+                        this.replan(cx);
+                    }
+                }),
             ],
             connection,
             backend: cx.global::<TransferBackendGlobal>().0.clone(),
@@ -203,8 +212,21 @@ impl RestoreForm {
         let backend = self.backend.clone();
         let profile = self.connection.read(cx).profile.clone();
         self.open_task = Some(cx.spawn(async move |this, cx| {
-            let opened = backend.open_backup(path, control.clone()).await;
-            let (folder, manifest, temp) = match opened {
+            let opened = async {
+                let temp = backend.backup_temp(path.clone()).await?;
+                // Held before the first byte lands in it, so Clear cache leaves it alone.
+                this.update(cx, |this, cx| {
+                    if let Some(temp) = &temp {
+                        let jobs = cx.global::<JobsGlobal>().0.clone();
+                        jobs.update(cx, |jobs, _| jobs.hold_temp(temp));
+                    }
+                    this.temp = temp.clone();
+                })
+                .ok();
+                backend.open_backup(path, temp, control.clone()).await
+            }
+            .await;
+            let (folder, manifest) = match opened {
                 Ok(opened) => opened,
                 Err(e) => {
                     let text = archive_error_text(&e).into();
@@ -218,10 +240,7 @@ impl RestoreForm {
                     cx.notify();
                 }
             };
-            let alive = this.update(cx, |this, cx| {
-                this.temp = temp;
-                stage(Stage::Verifying)(this, cx);
-            });
+            let alive = this.update(cx, stage(Stage::Verifying));
             if alive.is_err() {
                 return;
             }
@@ -263,10 +282,41 @@ impl RestoreForm {
         }));
     }
 
+    /// Compares with the server again: what a run wrote is no longer new.
+    fn replan(&mut self, cx: &mut Context<Self>) {
+        let (Some(opened), Some(client)) = (&self.opened, client_of(&self.connection, cx)) else {
+            return;
+        };
+        let (backup, loaded) = (opened.backup.clone(), opened.loaded.clone());
+        let backend = self.backend.clone();
+        let profile = self.connection.read(cx).profile.clone();
+        self.open_task = Some(cx.spawn(async move |this, cx| {
+            let answer = backend
+                .plan_backup(client, backup.clone(), loaded.clone())
+                .await;
+            this.update(cx, |this, cx| match answer {
+                Ok(plan) => this.show(
+                    Opened {
+                        backup,
+                        loaded,
+                        plan,
+                    },
+                    cx,
+                ),
+                Err(e) => {
+                    this.error = Some(error_text(&e, &profile).into());
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
     fn show(&mut self, opened: Opened, cx: &mut Context<Self>) {
         let new = opened.plan.rows.iter().filter(|r| r.state == RowState::New);
         self.ticked = new.map(|r| (r.kind, r.name.clone())).collect();
         self.opened = Some(opened);
+        self.replace = false;
         self.stage = None;
         cx.notify();
     }
@@ -321,8 +371,14 @@ impl RestoreForm {
         .collect()
     }
 
+    /// The ticked collections that reference what this restore leaves out.
+    fn unmet(&self) -> Vec<(String, String)> {
+        let plan = self.opened.as_ref().map(|o| &o.plan);
+        plan.map(|p| p.unmet(&self.ticked)).unwrap_or_default()
+    }
+
     fn can_start(&self, cx: &App) -> bool {
-        !self.writes().is_empty() && !self.running(cx)
+        !self.writes().is_empty() && !self.running(cx) && self.unmet().is_empty()
     }
 
     /// Actions with no target now, for [`gated`](crate::actions::gated).
@@ -422,12 +478,16 @@ impl RestoreForm {
         let Some(opened) = &self.opened else {
             return;
         };
+        let replace = self
+            .writes()
+            .into_iter()
+            .filter(|r| r.state == RowState::Differs);
         let job = RestoreJob {
             backup: opened.backup.clone(),
             loaded: opened.loaded.clone(),
             ticked: self.ticked.clone(),
-            replace: self.replace,
-            batch_size: DEFAULT_BATCH,
+            replace: replace.map(|r| (r.kind, r.name.clone())).collect(),
+            batch_size: crate::settings::current(cx).batch_size,
         };
         let label = self.chosen.clone();
         let (connection, temp) = (self.connection.clone(), self.temp.clone());
@@ -525,31 +585,28 @@ impl RestoreForm {
 
     fn outcome_section(
         outcome: &RestoreOutcome,
+        profile: &Profile,
         danger: Hsla,
         muted: Hsla,
     ) -> impl IntoElement + use<> {
         let rows = outcome.rows.iter().take(ROW_LIMIT).map(|row| {
-            let (text, color) = match &row.result {
-                RowResult::Done => (t!("restore.result.done").to_string(), muted),
-                RowResult::Kept => (t!("restore.result.kept").to_string(), muted),
-                RowResult::Skipped => (t!("restore.result.skipped").to_string(), muted),
-                RowResult::Failed(failure) => (row_failure_text(failure), danger),
-            };
-            let what = t!(row_kind_key(row.kind));
+            let (text, failed) = row_result_text(row, profile);
             notice(
                 format!("restore.result.{:?}.{}", row.kind, row.name),
-                format!("{what} {}: {text}", row.name).into(),
-                color,
+                text.into(),
+                if failed { danger } else { muted },
             )
         });
         let warnings = outcome.warnings.iter().enumerate().map(|(i, warning)| {
             notice(
                 format!("restore.result_warning.{i}"),
-                warning_text(warning).into(),
+                restore_warning_text(warning).into(),
                 muted,
             )
         });
-        let to_delete = (!outcome.to_delete.is_empty()).then(|| {
+        // After a finished run these are good data, not what stands in the way of a retry.
+        let retry = !matches!(outcome.end, JobEnd::Finished);
+        let to_delete = (retry && !outcome.to_delete.is_empty()).then(|| {
             let names = outcome.to_delete.join(", ");
             notice(
                 "restore.to_delete",
@@ -598,7 +655,7 @@ impl Render for RestoreForm {
         let warnings: Vec<String> = self
             .opened
             .iter()
-            .flat_map(|o| o.plan.warnings.iter().map(warning_text))
+            .flat_map(|o| o.plan.warnings.iter().map(restore_warning_text))
             .collect();
         let shown: Vec<PlanRow> = self
             .opened
@@ -606,6 +663,12 @@ impl Render for RestoreForm {
             .flat_map(|o| o.plan.rows.iter().take(ROW_LIMIT).cloned())
             .collect();
         let total = self.opened.as_ref().map_or(0, |o| o.plan.rows.len());
+        let unseen = self
+            .opened
+            .iter()
+            .flat_map(|o| o.plan.rows.iter().skip(ROW_LIMIT))
+            .filter(|r| self.ticked.contains(&(r.kind, r.name.clone())))
+            .count();
         let rows: Vec<_> = shown.iter().map(|row| self.plan_row(row, cx)).collect();
         let jobs = cx.global::<JobsGlobal>().0.read(cx);
         let job = self
@@ -617,11 +680,14 @@ impl Render for RestoreForm {
         });
         let outcome = job.and_then(|job| match &job.outcome {
             Some(JobOutcome::Restore(outcome)) => {
-                Some(Self::outcome_section(outcome, danger, muted))
+                Some(Self::outcome_section(outcome, job.profile(), danger, muted))
             }
             _ => None,
         });
-        let has_differs = shown.iter().any(|r| r.state == RowState::Differs);
+        let has_differs = (self.opened.iter())
+            .flat_map(|o| &o.plan.rows)
+            .any(|r| r.state == RowState::Differs);
+        let unmet = self.unmet();
         let opened = self.opened.is_some();
         div()
             .id("restore.view")
@@ -689,6 +755,14 @@ impl Render for RestoreForm {
                     muted,
                 ))
             })
+            .when(unseen > 0, |el| {
+                let text = t!("restore.rows_unseen", count = grouped(unseen as u64));
+                el.child(notice(
+                    "restore.rows_unseen",
+                    text.to_string().into(),
+                    warning,
+                ))
+            })
             .when(has_differs, |el| {
                 el.child(
                     h_flex().p_2().child(
@@ -700,6 +774,10 @@ impl Render for RestoreForm {
                             })),
                     ),
                 )
+            })
+            .when(!unmet.is_empty(), |el| {
+                let text = t!("restore.unmet", names = unmet_text(&unmet));
+                el.child(notice("restore.unmet", text.to_string().into(), danger))
             })
             .when(opened, |el| {
                 el.child(h_flex().p_2().child(row_button(

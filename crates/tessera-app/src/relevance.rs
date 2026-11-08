@@ -115,6 +115,10 @@ pub trait RelevanceBackend: Send + Sync {
     /// Writes a set file, whole or not at all.
     fn write_set_file(&self, path: PathBuf, text: String) -> BoxFuture<Result<(), String>>;
 
+    /// Removes the temp directories of backups and reindex copies but `held`, and says how many
+    /// went.
+    fn clear_copies(&self, held: Vec<PathBuf>) -> BoxFuture<usize>;
+
     /// The stopword sets.
     fn stopwords(&self, client: Client) -> BoxFuture<Result<Vec<StopwordSet>, Error>>;
 
@@ -219,6 +223,14 @@ impl RelevanceBackend for TokioBackend {
                 list,
                 dropped: new.dropped,
             })
+        })
+    }
+
+    fn clear_copies(&self, held: Vec<PathBuf>) -> BoxFuture<usize> {
+        self.run(async move {
+            tokio::task::spawn_blocking(move || clear_copies(&held))
+                .await
+                .unwrap_or(0)
         })
     }
 
@@ -368,11 +380,43 @@ fn mine(_: &Path) -> std::io::Result<impl Fn(&Metadata) -> bool + use<>> {
     Ok(|_: &Metadata| true)
 }
 
+/// Removes what Clear cache may: every copy of this user but `held`, however young, and says how
+/// many went. Blocks, so it does not run on the GPUI thread.
+pub fn clear_copies(held: &[PathBuf]) -> usize {
+    let root = std::env::temp_dir();
+    let cleared = mine(&root).and_then(|mine| remove_held_back(&root, held, mine));
+    cleared.unwrap_or_else(|e| {
+        tracing::warn!("clearing temp copies failed: {e}");
+        0
+    })
+}
+
+fn remove_held_back(
+    root: &Path,
+    held: &[PathBuf],
+    mine: impl Fn(&Metadata) -> bool,
+) -> std::io::Result<usize> {
+    remove_copies(root, |path, found| {
+        mine(found) && !held.iter().any(|h| h == path)
+    })
+}
+
 fn remove_stale_copies(
     root: &Path,
     now: SystemTime,
     mine: impl Fn(&Metadata) -> bool,
 ) -> std::io::Result<()> {
+    remove_copies(root, |_, found| {
+        let age = found.modified().ok();
+        let age = age.and_then(|at| now.duration_since(at).ok());
+        mine(found) && age.is_some_and(|age| age > STALE_COPY)
+    })
+    .map(drop)
+}
+
+/// Removes the directories named like a copy that `wanted` picks, and says how many went.
+fn remove_copies(root: &Path, wanted: impl Fn(&Path, &Metadata) -> bool) -> std::io::Result<usize> {
+    let mut removed = 0;
     for entry in std::fs::read_dir(root)?.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -386,16 +430,15 @@ fn remove_stale_copies(
         let Ok(found) = entry.metadata() else {
             continue;
         };
-        let age = found.modified().ok();
-        let age = age.and_then(|at| now.duration_since(at).ok());
-        if found.is_dir() && mine(&found) && age.is_some_and(|age| age > STALE_COPY) {
-            let path = entry.path();
-            if let Err(e) = std::fs::remove_dir_all(&path) {
-                tracing::warn!("{} could not be removed: {e}", path.display());
+        let path = entry.path();
+        if found.is_dir() && wanted(&path, &found) {
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => removed += 1,
+                Err(e) => tracing::warn!("{} could not be removed: {e}", path.display()),
             }
         }
     }
-    Ok(())
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -543,6 +586,19 @@ mod tests {
             std::os::unix::fs::symlink(&other, &link).unwrap();
             link
         };
+
+        let held = make("tessera-backup-held");
+        let fresh = make("tessera-reindex-fresh");
+        let keep = [held.clone()];
+        let mine_now = mine(root.path()).unwrap();
+        assert_eq!(remove_held_back(root.path(), &keep, mine_now).unwrap(), 3);
+        assert!(held.exists(), "a running job holds it");
+        assert!(!fresh.exists() && !copy.exists(), "young ones go too");
+        assert!(!backup.exists());
+        assert!(file.exists(), "not a directory");
+        assert!(other.exists(), "not named like a copy");
+        std::fs::remove_dir_all(&held).unwrap();
+        let (copy, backup) = (make("tessera-reindex-old"), make("tessera-backup-old"));
 
         let later = SystemTime::now() + 2 * STALE_COPY;
         let mine = || mine(root.path()).unwrap();

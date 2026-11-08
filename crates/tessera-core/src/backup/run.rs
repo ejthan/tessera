@@ -86,6 +86,8 @@ pub struct BackupProgress {
     pub export: ExportProgress,
     /// The collection being exported.
     pub collection: String,
+    /// The temp directory of an archive being written.
+    pub temp: Option<PathBuf>,
 }
 
 /// One collection that was written.
@@ -109,6 +111,14 @@ pub enum BackupWarning {
     },
     /// Provider credentials that the backup does not hold.
     BlankedSecrets {
+        /// The collection.
+        collection: String,
+        /// How many.
+        count: usize,
+    },
+    /// Values under secret-named keys of a schema's `metadata`, which nothing on the server
+    /// reads, so a restore goes ahead without them.
+    BlankedMetadata {
         /// The collection.
         collection: String,
         /// How many.
@@ -250,6 +260,17 @@ fn is_secret_key(key: &str) -> bool {
     key != "value" && redact::is_secret_param(key)
 }
 
+/// Whether `value` holds what [`scrub`] blanked.
+pub(super) fn has_blank(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, child)| {
+            (is_secret_key(key) && child.as_str() == Some("")) || has_blank(child)
+        }),
+        Value::Array(items) => items.iter().any(has_blank),
+        _ => false,
+    }
+}
+
 /// Whether a provider URL holds nothing that authenticates.
 fn plain_url(text: &str) -> bool {
     Url::parse(text).is_ok_and(|url| {
@@ -363,11 +384,16 @@ pub fn backup_warnings(
             });
         }
         let schema = backup_schema(collection);
-        let count = schema.credentials + schema.metadata;
-        if count > 0 {
+        if schema.credentials > 0 {
             warnings.push(BackupWarning::BlankedSecrets {
                 collection: name(),
-                count,
+                count: schema.credentials,
+            });
+        }
+        if schema.metadata > 0 {
+            warnings.push(BackupWarning::BlankedMetadata {
+                collection: name(),
+                count: schema.metadata,
             });
         }
         let names = dictionaries_used(collection);
@@ -714,6 +740,8 @@ impl Run<'_> {
 
         let target = plan.target.clone();
         let mut workspace = blocking(move || prepare(&target)).await??;
+        let temp = workspace.temp.as_ref().map(|t| t.path().to_path_buf());
+        self.progress.send_modify(|p| p.temp = temp);
         let dir = workspace.dir.clone();
         let mut done = self.fill(&lists, &selected, &dir).await;
         if done.is_ok() {

@@ -151,7 +151,7 @@ fn confirm_delete(
     let action = t!("documents.delete.action").to_string();
     let run =
         move |window: &mut Window, cx: &mut App| run(view.clone(), ids.clone(), draft, window, cx);
-    match danger_level(count, prod) {
+    match danger_level(count, crate::settings::current(cx).confirm_above, prod) {
         // The dialog is gone by then, so a failure shows in the view.
         Danger::Medium => confirm::open(
             title,

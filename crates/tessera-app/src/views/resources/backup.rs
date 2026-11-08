@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::radio::{Radio, RadioGroup};
@@ -132,6 +133,11 @@ pub(crate) fn warning_text(warning: &BackupWarning) -> String {
             collection = collection,
             count = count
         ),
+        BackupWarning::BlankedMetadata { collection, count } => t!(
+            "backup.warn.blanked_metadata",
+            collection = collection,
+            count = count
+        ),
         BackupWarning::BlankedSetSecrets { name, count, .. } => {
             t!("backup.warn.blanked_set", name = name, count = count)
         }
@@ -175,6 +181,10 @@ pub struct BackupForm {
     /// The last target refused, or what the picker said.
     error: Option<SharedString>,
     path_task: Option<Task<()>>,
+    /// Computed when the selection or the list changes, since every schema is walked.
+    warnings: Vec<BackupWarning>,
+    /// The load of the list `warnings` come from.
+    warned_at: Option<Instant>,
     focus_handle: FocusHandle,
     _subscription: Subscription,
 }
@@ -184,12 +194,19 @@ impl BackupForm {
     pub fn new(connection: Entity<ConnectionState>, cx: &mut Context<Self>) -> Self {
         connection.update(cx, |c, cx| c.load_collection_list(cx));
         Self {
-            _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
+            _subscription: cx.observe(&connection, |this, connection, cx| {
+                if connection.read(cx).collection_cache.loaded_at != this.warned_at {
+                    this.find_warnings(cx);
+                }
+                cx.notify();
+            }),
             connection,
             selected: HashSet::new(),
             archive: false,
             error: None,
             path_task: None,
+            warnings: Vec::new(),
+            warned_at: None,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -200,6 +217,7 @@ impl BackupForm {
         if on {
             self.selected.extend(self.names(cx));
         }
+        self.find_warnings(cx);
         cx.notify();
     }
 
@@ -210,6 +228,7 @@ impl BackupForm {
         } else {
             self.selected.remove(&name);
         }
+        self.find_warnings(cx);
         cx.notify();
     }
 
@@ -316,13 +335,13 @@ impl BackupForm {
         vec![(self.picked(cx).is_empty(), &SaveResource)]
     }
 
-    fn warnings(&self, cx: &App) -> Vec<String> {
+    fn find_warnings(&mut self, cx: &App) {
         let cache = &self.connection.read(cx).collection_cache;
-        let (Some(collections), aliases) = (&cache.collections, &cache.aliases) else {
-            return Vec::new();
+        self.warned_at = cache.loaded_at;
+        self.warnings = match &cache.collections {
+            Some(collections) => backup_warnings(collections, &self.picked(cx), &cache.aliases),
+            None => Vec::new(),
         };
-        let found = backup_warnings(collections, &self.picked(cx), aliases);
-        found.iter().map(warning_text).collect()
     }
 
     fn rows(&self, cx: &mut Context<Self>) -> Vec<impl IntoElement + use<>> {
@@ -361,7 +380,7 @@ impl Render for BackupForm {
         let picked = self.picked(cx);
         let total = self.names(cx).len();
         let all = total > 0 && picked.len() == total;
-        let warnings = self.warnings(cx);
+        let warnings: Vec<String> = self.warnings.iter().map(warning_text).collect();
         let rows = self.rows(cx);
         let (danger, muted, warning) = {
             let theme = cx.theme();

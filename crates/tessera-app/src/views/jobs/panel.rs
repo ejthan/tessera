@@ -25,6 +25,7 @@ use gpui_kit::{
 use rust_i18n::t;
 use tessera_core::backup::restore::{RestoreStep, RowResult};
 use tessera_core::backup::run::BackupStep;
+use tessera_core::transfer::JobEnd;
 use tessera_core::transfer::report::Report;
 use tessera_core::transfer::source::Source;
 use tessera_widgets::confirm;
@@ -33,14 +34,19 @@ use super::super::env_badge;
 use super::super::overview::grouped;
 use super::super::request_detail::size;
 use super::super::resources::backup::warning_text;
+use super::super::resources::restore::{ROW_LIMIT, restore_warning_text};
 use super::import_dialog::DocumentImportDialog;
 use crate::actions::{
     CancelJob, DismissJob, ImportDocuments, ImportSavedLines, JOBS, SaveFailedLines, SaveReport,
     StopWaiting, gated,
 };
-use crate::jobs::{Job, JobId, JobKind, JobOutcome, JobStatus, Jobs, JobsGlobal, Live};
+use crate::jobs::{
+    Job, JobId, JobKind, JobOutcome, JobStatus, Jobs, JobsGlobal, Live, row_result_text,
+};
 use crate::state::AppState;
 use crate::transfer::TransferBackendGlobal;
+
+const DOCS_URL: &str = "https://typesense.org/docs/30.2/api/documents.html#index-documents";
 
 /// Initial height of the detail under the job table.
 const DETAIL_HEIGHT: f32 = 130.;
@@ -506,12 +512,14 @@ impl JobsPanel {
         let jobs = cx.global::<JobsGlobal>().0.clone();
         let rows = JobRows { jobs: jobs.clone() };
         let table = cx.new(|cx| {
+            crate::settings::follow_language(cx);
             TableState::new(rows, window, cx)
                 .sortable(false)
                 .col_movable(false)
                 .col_selectable(false)
         });
         let report = cx.new(|cx| {
+            crate::settings::follow_language(cx);
             TableState::new(ReportRows::default(), window, cx)
                 .sortable(false)
                 .col_movable(false)
@@ -897,12 +905,29 @@ impl JobsPanel {
                 notes.push(note("jobs.export_mismatch".into(), text.to_string(), false));
             }
         }
-        if let Some(JobOutcome::Restore(outcome)) = &job.outcome
-            && !outcome.to_delete.is_empty()
-        {
-            let names = outcome.to_delete.join(", ");
-            let text = t!("restore.to_delete", names = names).to_string();
-            notes.push(note("restore.job_to_delete".into(), text, false));
+        if let Some(JobOutcome::Restore(outcome)) = &job.outcome {
+            for (i, row) in outcome.rows.iter().take(ROW_LIMIT).enumerate() {
+                let (text, failed) = row_result_text(row, job.profile());
+                notes.push(note(format!("jobs.restore_row.{i}").into(), text, failed));
+            }
+            if outcome.rows.len() > ROW_LIMIT {
+                let text = t!(
+                    "restore.rows_limited",
+                    shown = grouped(ROW_LIMIT as u64),
+                    total = grouped(outcome.rows.len() as u64)
+                )
+                .to_string();
+                notes.push(note("jobs.restore_rows_limited".into(), text, false));
+            }
+            for (i, warning) in outcome.warnings.iter().enumerate() {
+                let id = format!("jobs.restore_warning.{i}").into();
+                notes.push(note(id, restore_warning_text(warning), false));
+            }
+            if !matches!(outcome.end, JobEnd::Finished) && !outcome.to_delete.is_empty() {
+                let names = outcome.to_delete.join(", ");
+                let text = t!("restore.to_delete", names = names).to_string();
+                notes.push(note("restore.job_to_delete".into(), text, false));
+            }
         }
         if matches!(job.kind, JobKind::Import | JobKind::Restore) {
             let text = t!("jobs.stay_note").to_string();
@@ -1035,6 +1060,12 @@ impl Render for JobsPanel {
                                     .text_sm()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(text),
+                            )
+                            .child(
+                                Button::new("jobs.docs")
+                                    .link()
+                                    .label(t!("resources.docs").to_string())
+                                    .on_click(|_, _, cx| cx.open_url(DOCS_URL)),
                             )
                             .when(connected.is_some(), |el| {
                                 el.child(

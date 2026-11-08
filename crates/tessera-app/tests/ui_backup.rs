@@ -14,14 +14,15 @@ use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, WindowHandle, base::Root};
 use serde_json::json;
 use std::sync::Arc;
-use tessera_app::actions::ToggleJobs;
+use tessera_app::actions::{OpenSettings, ToggleJobs};
 use tessera_app::jobs::{JobKind, JobStatus, Jobs, JobsGlobal};
 use tessera_app::state::{AppState, ResourceKind};
 use tessera_client::{Collection, SetKind, StopwordSet};
 use tessera_core::backup::archive::ArchiveError;
 use tessera_core::backup::format::{FORMAT, Manifest, ManifestCollection, ManifestProblem};
 use tessera_core::backup::restore::{
-    Loaded, RestoreError, RestoreOutcome, RestoreRow, RestoreView, RowFailure, RowKind, RowResult,
+    Loaded, RestoreError, RestoreOutcome, RestoreRow, RestoreView, RestoreWarning, RowFailure,
+    RowKind, RowResult,
 };
 use tessera_core::backup::run::{
     BackupOutcome, BackupProgress, BackupStep, BackupTarget, BackupWarning,
@@ -352,8 +353,7 @@ impl Fixture {
             collections: entries,
             files: Vec::new(),
         };
-        *self.fake.open_answer.lock().unwrap() =
-            Some(Ok((dir.path().to_path_buf(), manifest, None)));
+        *self.fake.open_answer.lock().unwrap() = Some(Ok((dir.path().to_path_buf(), manifest)));
         *self.fake.load_answer.lock().unwrap() = Some(Ok(Loaded {
             schemas: schemas.collect(),
             stopwords: vec![StopwordSet {
@@ -459,7 +459,7 @@ async fn replace_off_keeps_a_differing_row(cx: &mut TestAppContext) {
     f.click(cx, "restore.start");
     f.click(cx, "confirm.ok");
     let jobs = f.fake.restores.lock().unwrap();
-    assert!(!jobs[0].replace);
+    assert!(jobs[0].replace.is_empty());
     assert!(
         !jobs[0]
             .ticked
@@ -484,7 +484,8 @@ async fn replace_ticks_what_differs_and_needs_the_name(cx: &mut TestAppContext) 
     f.fill(cx, "danger.input", &name);
     f.click(cx, "danger.ok");
     let jobs = f.fake.restores.lock().unwrap();
-    assert!(jobs[0].replace);
+    let approved = (RowKind::Stopwords, "s".to_string());
+    assert!(jobs[0].replace.contains(&approved));
     assert!(
         jobs[0]
             .ticked
@@ -590,15 +591,226 @@ async fn the_job_survives_the_tab_and_the_tab_shows_what_it_did(cx: &mut TestApp
     });
 }
 
+/// What a finished run reports.
+fn finished_run() -> RestoreOutcome {
+    RestoreOutcome {
+        end: JobEnd::Finished,
+        rows: vec![RestoreRow {
+            kind: RowKind::Collection,
+            name: "fresh".into(),
+            result: RowResult::Done,
+        }],
+        to_delete: vec!["fresh".into()],
+        warnings: vec![RestoreWarning::AliasShadowed("shop".into())],
+    }
+}
+
+impl Fixture {
+    /// Starts a restore of `fresh`, and returns its job.
+    fn start_restore(&self, cx: &mut TestAppContext) -> tessera_app::jobs::JobId {
+        self.choose(cx);
+        self.click(cx, "restore.start");
+        self.click(cx, "confirm.ok");
+        cx.read(|cx| self.jobs.read(cx).jobs().last().unwrap().id)
+    }
+
+    fn open_jobs(&self, cx: &mut TestAppContext) {
+        cx.update_window(self.handle.into(), |_, window, cx| {
+            window.dispatch_action(Box::new(ToggleJobs), cx);
+        })
+        .unwrap();
+        self.settle(cx);
+        self.click(cx, "jobs.row.0");
+    }
+}
+
+#[gpui_kit::test]
+async fn a_finished_run_does_not_ask_to_delete_what_it_made(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    let job = f.start_restore(cx);
+    f.fake.finish_restore(job, finished_run());
+    f.settle(cx);
+    assert!(f.has(cx, "restore.result.Collection.fresh"));
+    assert!(!f.has(cx, "restore.to_delete"));
+    f.open_jobs(cx);
+    assert!(f.has(cx, "jobs.restore_row.0"));
+    assert!(!f.has(cx, "restore.job_to_delete"));
+}
+
+#[gpui_kit::test]
+async fn jobs_show_rows_and_warnings_with_the_tab_closed(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    let job = f.start_restore(cx);
+    f.close_tab(cx);
+    let mut outcome = finished_run();
+    outcome.end = JobEnd::Stopped;
+    outcome.rows[0].result = RowResult::Failed(RowFailure::Stopped);
+    f.fake.finish_restore(job, outcome);
+    f.settle(cx);
+    f.open_jobs(cx);
+    let row = f.label(cx, "jobs.restore_row.0");
+    assert!(
+        row.contains("fresh") && row.contains("Stopped partway"),
+        "{row}"
+    );
+    assert!(f.label(cx, "jobs.restore_warning.0").contains("shop"));
+    assert!(f.label(cx, "restore.job_to_delete").contains("fresh"));
+}
+
+#[gpui_kit::test]
+async fn a_disconnect_during_a_restore_is_named(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, true).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    let connection = cx.read(|cx| f.state.read(cx).connection(f.id, cx).unwrap());
+    cx.update(|cx| connection.update(cx, |c, cx| c.unlock(cx)));
+    f.choose(cx);
+    f.click(cx, "restore.start");
+    f.fill(cx, "danger.input", "prod-ch");
+    f.click(cx, "danger.ok");
+    let job = cx.read(|cx| f.jobs.read(cx).jobs()[0].id);
+    cx.update(|cx| f.state.update(cx, |s, cx| s.disconnect(f.id, cx)));
+    let failure: RowFailure = tessera_client::Error::ReadOnly {
+        method: tessera_client::Method::POST,
+    }
+    .into();
+    let outcome = RestoreOutcome {
+        end: JobEnd::Failed(RestoreError::Row {
+            kind: RowKind::Collection,
+            name: "fresh".into(),
+        }),
+        rows: vec![RestoreRow {
+            kind: RowKind::Collection,
+            name: "fresh".into(),
+            result: RowResult::Failed(failure),
+        }],
+        to_delete: Vec::new(),
+        warnings: Vec::new(),
+    };
+    f.fake.finish_restore(job, outcome);
+    f.settle(cx);
+    cx.read(|cx| {
+        let status = &f.jobs.read(cx).jobs()[0].status;
+        assert!(
+            matches!(status, JobStatus::Failed(t) if t.contains("Locked by disconnect")),
+            "{status:?}"
+        );
+    });
+}
+
+#[gpui_kit::test]
+async fn a_child_cannot_start_without_its_parent(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["child", "parent"], &[], RestoreView::default());
+    let reference = SchemaDraft::from_value(&json!({"name": "child", "fields": [
+        {"name": "p", "type": "string", "reference": "parent.id"},
+    ]}));
+    if let Some(Ok(loaded)) = f.fake.load_answer.lock().unwrap().as_mut() {
+        loaded.schemas[0] = reference.unwrap();
+    }
+    f.choose(cx);
+    assert!(!f.has(cx, "restore.unmet"));
+    f.click(cx, "restore.row.Collection.parent.tick");
+    assert!(f.label(cx, "restore.unmet").contains("child → parent"));
+    f.click(cx, "restore.start");
+    assert!(!f.has(cx, "confirm.ok"), "Start is off");
+    f.click(cx, "restore.row.Collection.child.tick");
+    assert!(!f.has(cx, "restore.unmet"));
+}
+
+#[gpui_kit::test]
+async fn the_plan_is_read_again_when_the_job_ends(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    let job = f.start_restore(cx);
+    let tick = "restore.row.Collection.fresh.tick";
+    assert!(f.has(cx, tick));
+    f.fake.server.lock().unwrap().collections = vec!["fresh".into()];
+    f.fake.finish_restore(job, finished_run());
+    f.settle(cx);
+    assert!(!f.has(cx, tick), "the row is blocked now");
+    assert!(
+        f.has(cx, "restore.result.Collection.fresh"),
+        "the result stays"
+    );
+}
+
+#[gpui_kit::test]
+async fn rows_past_the_limit_are_counted_when_they_are_restored(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let names: Vec<String> = (0..1005).map(|i| format!("c{i}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    // The stopwords row comes first, so 1,000 of its 1,006 rows are drawn. A blocked row stays out.
+    let _files = f.offer(&names, &["c1004"], RestoreView::default());
+    f.choose(cx);
+    assert!(f.label(cx, "restore.rows_unseen").ends_with(": 5"));
+}
+
+#[gpui_kit::test]
+async fn an_archive_is_held_while_it_unpacks(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let temp = Arc::new(tempfile::tempdir().unwrap());
+    let path = temp.path().to_path_buf();
+    *f.fake.temp_answer.lock().unwrap() = Some(temp);
+    // No answer holds the unpack open.
+    f.choose(cx);
+    cx.read(|cx| assert_eq!(f.jobs.read(cx).held_temps(), [path]));
+}
+
+#[gpui_kit::test]
+async fn clear_cache_keeps_a_held_directory_and_reloads_the_lists(cx: &mut TestAppContext) {
+    let relevance = fake_relevance(cx);
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    let temp = Arc::new(tempfile::tempdir().unwrap());
+    let path = temp.path().to_path_buf();
+    *f.fake.temp_answer.lock().unwrap() = Some(temp);
+    f.choose(cx);
+    let lists = *f.data.lists.lock().unwrap();
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        window.dispatch_action(Box::new(OpenSettings), cx);
+    })
+    .unwrap();
+    f.settle(cx);
+    for _ in 0..14 {
+        cx.update_window(f.handle.into(), |_, window, cx| window.press("tab", cx))
+            .unwrap();
+        f.settle(cx);
+    }
+    f.click(cx, "settings.clear_cache.button");
+    assert!(relevance.held.lock().unwrap().is_empty(), "it asks first");
+    f.click(cx, "confirm.ok");
+    assert_eq!(relevance.held.lock().unwrap().as_slice(), [vec![path]]);
+    assert!(f.label(cx, "settings.clear_cache.note").contains('2'));
+    assert!(*f.data.lists.lock().unwrap() > lists);
+}
+
+#[gpui_kit::test]
+async fn a_restore_takes_the_batch_size_of_the_settings(cx: &mut TestAppContext) {
+    let f = Fixture::with(cx, false).await;
+    let _files = f.offer(&["fresh"], &[], RestoreView::default());
+    cx.update(|cx| {
+        let settings = cx.update_entity(&f.state, |s, _| {
+            s.settings.batch_size = 77;
+            s.settings.clone()
+        });
+        cx.update_window(f.handle.into(), |_, window, cx| {
+            tessera_app::settings::apply(&settings, window, cx);
+        })
+        .unwrap();
+    });
+    f.start_restore(cx);
+    assert_eq!(f.fake.restores.lock().unwrap()[0].batch_size, 77);
+}
+
 #[gpui_kit::test]
 async fn a_new_choice_lets_go_of_the_old_temp_directory(cx: &mut TestAppContext) {
     let f = Fixture::with(cx, false).await;
     let _files = f.offer(&["fresh"], &[], RestoreView::default());
     let temp = Arc::new(tempfile::tempdir().unwrap());
     let path = temp.path().to_path_buf();
-    if let Some(Ok(answer)) = f.fake.open_answer.lock().unwrap().as_mut() {
-        answer.2 = Some(temp);
-    }
+    *f.fake.temp_answer.lock().unwrap() = Some(temp);
     f.choose(cx);
     assert!(f.has(cx, "restore.start"));
     f.click(cx, "restore.choose");
@@ -613,9 +825,7 @@ async fn closing_the_tab_lets_go_of_the_temp_directory(cx: &mut TestAppContext) 
     let _files = f.offer(&["fresh"], &[], RestoreView::default());
     let temp = Arc::new(tempfile::tempdir().unwrap());
     let path = temp.path().to_path_buf();
-    if let Some(Ok(answer)) = f.fake.open_answer.lock().unwrap().as_mut() {
-        answer.2 = Some(temp);
-    }
+    *f.fake.temp_answer.lock().unwrap() = Some(temp);
     f.choose(cx);
     assert!(f.has(cx, "restore.start"));
     f.close_tab(cx);

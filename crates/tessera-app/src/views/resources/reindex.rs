@@ -28,7 +28,6 @@ use tessera_core::relevance::reindex::{
     Compared, Preflight, preflight, reindex_name, without_missing,
 };
 use tessera_core::schema::SchemaDraft;
-use tessera_core::transfer::DEFAULT_BATCH;
 use tessera_core::transfer::export::{ExportFormat, ExportJob, ExportScope, FieldPick};
 use tessera_core::transfer::import::ImportJob;
 use tessera_core::transfer::source::{Format, ReadError, ReadOptions, Source, sniff};
@@ -636,6 +635,8 @@ impl ReindexState {
                 return self.fail(text.to_string(), cx);
             }
         };
+        let jobs = cx.global::<JobsGlobal>().0.clone();
+        jobs.update(cx, |jobs, _| jobs.hold_temp(&dir));
         let job = ExportJob {
             collection: plan.source.name.clone(),
             scope: ExportScope::All,
@@ -666,7 +667,7 @@ impl ReindexState {
             collection: self.target.clone(),
             params: ImportParams {
                 action: ImportAction::Create,
-                batch_size: DEFAULT_BATCH,
+                batch_size: crate::settings::current(cx).batch_size,
                 dirty_values: DirtyValues::CoerceOrReject,
             },
         };

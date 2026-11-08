@@ -111,6 +111,8 @@ gpui_kit::actions!(
         DeleteSavedQuery,
         OpenExport,
         OpenPalette,
+        OpenSettings,
+        OpenLogs,
         QuickSwitch,
         ToggleJobs,
         CancelJob,
@@ -288,7 +290,13 @@ const QUERY_LIST_INPUT: &str = "QueryList > Input";
 pub const SEARCH_HITS: &str = "SearchHits";
 /// Key context of a focused `query_by` chip.
 pub const CHIP: &str = "SearchChip";
+/// Key context of the settings dialog.
+pub const SETTINGS: &str = "Settings";
 
+#[cfg(target_os = "macos")]
+const OPEN_LOGS: &str = "cmd-alt-l";
+#[cfg(not(target_os = "macos"))]
+const OPEN_LOGS: &str = "ctrl-alt-l";
 #[cfg(target_os = "macos")]
 const NEW_CONNECTION: &str = "cmd-n";
 #[cfg(not(target_os = "macos"))]
@@ -574,6 +582,10 @@ const OPEN_PALETTE: &str = "cmd-k";
 #[cfg(not(target_os = "macos"))]
 const OPEN_PALETTE: &str = "ctrl-k";
 #[cfg(target_os = "macos")]
+const OPEN_SETTINGS: &str = "cmd-,";
+#[cfg(not(target_os = "macos"))]
+const OPEN_SETTINGS: &str = "ctrl-,";
+#[cfg(target_os = "macos")]
 const QUICK_SWITCH: &str = "cmd-p";
 #[cfg(not(target_os = "macos"))]
 const QUICK_SWITCH: &str = "ctrl-p";
@@ -627,6 +639,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     ImportProfiles,
     ExportProfiles,
     ToggleReopenLast,
+    OpenSettings,
     ToggleRequestLog,
     CopyAsCurl,
     CopyKey,
@@ -746,6 +759,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
 /// Actions the palette never lists: steps that mean nothing outside their control, and
 /// actions of dialogs, over which the palette does not open.
 pub const PALETTE_HIDDEN: &[&str] = &[
+    "tessera::OpenLogs",
     "tessera::OpenPalette",
     "tessera::ConnectSelected",
     "tessera::TestConnection",
@@ -864,6 +878,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(NEW_CONNECTION, NewConnection, None),
         KeyBinding::new(QUIT, Quit, None),
         KeyBinding::new(OPEN_PALETTE, OpenPalette, None),
+        KeyBinding::new(OPEN_SETTINGS, OpenSettings, None),
+        KeyBinding::new(OPEN_LOGS, OpenLogs, Some(SETTINGS)),
         KeyBinding::new(QUICK_SWITCH, QuickSwitch, None),
         KeyBinding::new(TOGGLE_LOG, ToggleRequestLog, None),
         KeyBinding::new(TOGGLE_JOBS, ToggleJobs, None),

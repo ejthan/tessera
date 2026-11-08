@@ -18,6 +18,7 @@ mod send;
 mod sets;
 mod stemming;
 mod stopwords;
+mod update;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -47,6 +48,7 @@ use serde_json::{Value, json};
 pub use sets::{ItemSet, SetKind};
 pub use stemming::{StemmingDictionary, StemmingWord};
 pub use stopwords::StopwordSet;
+pub use update::latest_release;
 use url::Url;
 
 /// The only methods a read-only client sends. Every other one, including PUT (an upsert in

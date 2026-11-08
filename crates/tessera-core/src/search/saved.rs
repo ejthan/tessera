@@ -76,7 +76,8 @@ pub fn saved_path() -> Option<PathBuf> {
 
 /// Loads the file at `path`. A missing file yields an empty default.
 pub fn load(path: &Path) -> Result<SavedFile, StoreError> {
-    store::load_versioned(path, SCHEMA_VERSION)
+    // No migrations yet: `saved_queries.json` has only ever had version 1.
+    store::load_migrated(path, SCHEMA_VERSION, &[])
 }
 
 /// Writes `file` atomically.
@@ -132,8 +133,10 @@ mod tests {
     fn newer_saved_file_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("saved_queries.json");
-        std::fs::write(&path, r#"{"schema_version": 2, "future": true}"#).unwrap();
+        let text = r#"{"schema_version": 2, "future": true}"#;
+        std::fs::write(&path, text).unwrap();
         assert!(matches!(load(&path), Err(StoreError::NewerSchema(2))));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     }
 
     #[test]

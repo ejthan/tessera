@@ -140,7 +140,7 @@ async fn round_trip(from: &Client, to: &Client, backup: BackupTarget, folder: &P
         backup: verified,
         loaded,
         ticked: shown.rows.into_iter().map(|r| (r.kind, r.name)).collect(),
-        replace: false,
+        replace: Default::default(),
         batch_size: 1000,
     };
     let (tx, _rx) = watch::channel(Default::default());
@@ -283,7 +283,7 @@ async fn a_reference_through_an_alias_is_restored() {
         backup,
         loaded,
         ticked: rows.into_iter().map(|r| (r.kind, r.name)).collect(),
-        replace: false,
+        replace: Default::default(),
         batch_size: 1000,
     };
     let (tx, _rx) = watch::channel(Default::default());
