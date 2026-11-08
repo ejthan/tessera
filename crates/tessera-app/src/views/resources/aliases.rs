@@ -28,12 +28,13 @@ use super::{
     dialog_title, empty_state, notice, report_to, row_button, toolbar,
 };
 use crate::actions::{
-    ALIAS_DIALOG, DeleteResource, EditResource, FocusResourceFilter, NewResource, ReloadResource,
-    SaveResource,
+    ALIAS_DIALOG, DeleteResource, EditResource, FocusResourceFilter, NewResource, ReindexAlias,
+    ReloadResource, SaveResource,
 };
 use crate::collections::CollectionsBackendGlobal;
 use crate::connection::{ConnectionState, error_text};
 use crate::relevance::RelevanceBackendGlobal;
+use crate::state::AppState;
 
 /// Where the empty state points to.
 const DOCS_URL: &str = "https://typesense.org/docs/30.2/api/collection-alias.html";
@@ -72,6 +73,7 @@ fn count_text(collections: &[Collection], name: &str) -> String {
 /// The content of an aliases tab.
 pub struct AliasesView {
     connection: Entity<ConnectionState>,
+    state: Entity<AppState>,
     list: Entity<ResourceList>,
     /// Why the last write failed, in full.
     error: Option<SharedString>,
@@ -86,6 +88,7 @@ impl AliasesView {
     /// The aliases of `connection`; loads them.
     pub fn new(
         connection: Entity<ConnectionState>,
+        state: Entity<AppState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -96,6 +99,7 @@ impl AliasesView {
         ];
         let mut this = Self {
             connection,
+            state,
             list,
             error: None,
             dialog: None,
@@ -149,7 +153,35 @@ impl AliasesView {
     /// Actions with no target now, for [`gated`](crate::actions::gated).
     pub fn gates(&self, cx: &App) -> Vec<(bool, &'static dyn Action)> {
         let none = self.visible_selected(cx).is_none();
-        vec![(none, &EditResource), (none, &DeleteResource)]
+        vec![
+            (none, &EditResource),
+            (none, &DeleteResource),
+            (self.reindex_block(cx).is_some(), &ReindexAlias),
+        ]
+    }
+
+    /// Why the selected alias cannot be reindexed: none selected gives an empty text.
+    fn reindex_block(&self, cx: &App) -> Option<String> {
+        let Some((name, _)) = self.visible_selected(cx) else {
+            return Some(String::new());
+        };
+        let cache = &self.connection.read(cx).collection_cache;
+        let collections = cache.collections.as_deref().unwrap_or_default();
+        let alias = cache.aliases.iter().find(|a| a.name == name)?;
+        let state = alias_state(alias, collections, &cache.aliases);
+        (state != AliasState::Ok)
+            .then(|| t!("aliases.reindex_blocked", reason = state_text(state)).to_string())
+    }
+
+    fn reindex_selected(&mut self, cx: &mut Context<Self>) {
+        if self.reindex_block(cx).is_some() {
+            return;
+        }
+        let Some((name, _)) = self.visible_selected(cx) else {
+            return;
+        };
+        let id = self.connection.read(cx).profile.id;
+        self.state.update(cx, |s, cx| s.open_reindex(id, name, cx));
     }
 
     /// The open dialog.
@@ -230,6 +262,7 @@ impl Render for AliasesView {
         let list_error = cache.error.clone().or(cache.aliases_error.clone());
         let empty = cache.collections.is_some() && cache.aliases.is_empty() && list_error.is_none();
         let none = self.visible_selected(cx).is_none();
+        let reindex_block = self.reindex_block(cx);
         let top = toolbar(
             "aliases",
             &self.list,
@@ -250,6 +283,7 @@ impl Render for AliasesView {
             .on_action(cx.listener(|this, _: &DeleteResource, window, cx| {
                 this.delete_selected(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ReindexAlias, _, cx| this.reindex_selected(cx)))
             .on_action(cx.listener(|this, _: &ReloadResource, _, cx| this.reload(cx)))
             .on_action(cx.listener(|this, _: &FocusResourceFilter, window, cx| {
                 ResourceList::focus_filter(&this.list, window, cx);
@@ -292,7 +326,21 @@ impl Render for AliasesView {
                         &self.focus_handle,
                         window,
                         cx,
-                    )),
+                    ))
+                    .child(row_button(
+                        "aliases.reindex".into(),
+                        t!("aliases.reindex").to_string(),
+                        &ReindexAlias,
+                        (reindex_block.is_some(), false),
+                        &self.focus_handle,
+                        window,
+                        cx,
+                    ))
+                    .children(
+                        reindex_block
+                            .filter(|reason| !reason.is_empty())
+                            .map(|reason| notice("aliases.reindex_blocked", reason.into(), danger)),
+                    ),
             )
     }
 }

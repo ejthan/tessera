@@ -1287,6 +1287,12 @@ pub struct FakeRelevance {
     pub fail: Mutex<Option<(u16, String)>>,
     /// `save_alias` answers with this target instead of the one sent.
     pub stored_target: Mutex<Option<String>>,
+    /// Where `alias` says an alias points; `save_alias` moves it.
+    pub alias_target: Mutex<Option<String>>,
+    /// `alias` answers 404.
+    pub alias_deleted: Mutex<bool>,
+    /// Temp directories `copy_dir` made.
+    pub copy_dirs: Mutex<Vec<PathBuf>>,
     /// The stopword sets on the server.
     pub stopwords: Mutex<Vec<StopwordSet>>,
     /// `save_stopwords` stores these words instead of the ones sent.
@@ -1585,6 +1591,9 @@ impl RelevanceBackend for FakeRelevanceBackend {
             name,
             collection_name: stored.unwrap_or(collection),
         });
+        if let Ok(alias) = &answer {
+            *self.0.alias_target.lock().unwrap() = Some(alias.collection_name.clone());
+        }
         Box::pin(async move { answer })
     }
 
@@ -1594,9 +1603,16 @@ impl RelevanceBackend for FakeRelevanceBackend {
         name: String,
     ) -> tessera_app::collections::BoxFuture<Result<Alias, Error>> {
         self.0.record(format!("alias {name}"));
-        let answer = self.0.outcome().map(|()| Alias {
-            name,
-            collection_name: String::new(),
+        let target = self.0.alias_target.lock().unwrap().clone();
+        let deleted = *self.0.alias_deleted.lock().unwrap();
+        let answer = self.0.outcome().and_then(|()| {
+            if deleted {
+                return Err(http_error((404, "Not Found".into())));
+            }
+            Ok(Alias {
+                name,
+                collection_name: target.unwrap_or_default(),
+            })
         });
         Box::pin(async move { answer })
     }
@@ -1609,6 +1625,22 @@ impl RelevanceBackend for FakeRelevanceBackend {
         self.0.record(format!("delete_alias {name}"));
         let answer = self.0.outcome();
         Box::pin(async move { answer })
+    }
+
+    fn copy_dir(
+        &self,
+    ) -> tessera_app::collections::BoxFuture<Result<Arc<tempfile::TempDir>, String>> {
+        self.0.record("copy_dir".to_string());
+        let dir = tempfile::Builder::new()
+            .prefix("tessera-reindex-")
+            .tempdir()
+            .unwrap();
+        self.0
+            .copy_dirs
+            .lock()
+            .unwrap()
+            .push(dir.path().to_path_buf());
+        Box::pin(async move { Ok(Arc::new(dir)) })
     }
 
     fn delete_preset(

@@ -524,6 +524,18 @@ impl SchemaDraft {
         }
         n
     }
+
+    /// How many credentials under `embed.model_config` are empty.
+    pub fn empty_secrets(&self) -> usize {
+        let configs = self.fields.iter().filter_map(|f| {
+            let config = f.embed.as_ref()?.get("model_config")?;
+            config.as_object()
+        });
+        configs
+            .flat_map(|cfg| SECRET_KEYS.iter().filter_map(|k| cfg.get(*k)))
+            .filter(|v| v.as_str().is_some_and(str::is_empty))
+            .count()
+    }
 }
 
 #[cfg(test)]

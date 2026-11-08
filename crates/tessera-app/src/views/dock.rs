@@ -24,6 +24,7 @@ use super::documents::DocumentsView;
 use super::import_dialog::ImportDialog;
 use super::overview::Overview;
 use super::resources::ResourceView;
+use super::resources::reindex::{ReindexState, ReindexView};
 use super::schema_view::{SchemaFailed, SchemaLoaded, SchemaView};
 use super::search::SearchWorkbench;
 use super::sidebar::Sidebar;
@@ -31,7 +32,7 @@ use super::{env_badge, unlock, welcome};
 use crate::actions::{
     COLLECTION, COLLECTIONS, CONSOLE, CloneCollection, DeleteCollection, EditSchema,
     ExportDocuments, FocusSearch, ImportDocuments, LockAgain, NewCollection, OVERVIEW,
-    OpenCollectionRow, RESOURCES, Refresh, ShowDocuments, ShowSchema, ToggleFavorite,
+    OpenCollectionRow, REINDEX, RESOURCES, Refresh, ShowDocuments, ShowSchema, ToggleFavorite,
     TogglePolling, TruncateCollection, WORKBENCH, gated,
 };
 use crate::connection::ConnectionState;
@@ -838,6 +839,116 @@ impl Render for ResourcePanel {
             .border_color(edge)
             .children(unlock::banner(&self.connection, RESOURCES, window, cx))
             .child(div().flex_1().min_h_0().child(self.view.view()))
+    }
+}
+
+/// The tab of one alias's reindex. The state lives in the connection, so closing this loses
+/// nothing and opening it again continues.
+pub struct ReindexPanel {
+    connection: Entity<ConnectionState>,
+    alias: String,
+    view: Entity<ReindexView>,
+    focus_handle: FocusHandle,
+    _subscription: Subscription,
+}
+
+impl ReindexPanel {
+    /// The tab of `alias`; takes up its reindex, or begins one.
+    pub fn new(
+        connection: Entity<ConnectionState>,
+        state: Entity<AppState>,
+        alias: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let known = connection.read(cx).reindex.get(&alias).cloned();
+        let reindex = known.unwrap_or_else(|| {
+            let reindex = cx.new(|cx| ReindexState::new(&connection, alias.clone(), cx));
+            connection.update(cx, |c, _| {
+                c.reindex.insert(alias.clone(), reindex.clone());
+            });
+            reindex
+        });
+        let conn = connection.clone();
+        let view = cx.new(|cx| ReindexView::new(state, conn, reindex, window, cx));
+        Self {
+            _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
+            connection,
+            alias,
+            view,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    /// The connection this tab talks to.
+    pub fn connection(&self) -> &Entity<ConnectionState> {
+        &self.connection
+    }
+
+    /// The alias.
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    /// The view inside.
+    pub fn view(&self) -> &Entity<ReindexView> {
+        &self.view
+    }
+}
+
+impl EventEmitter<PanelEvent> for ReindexPanel {}
+
+impl Focusable for ReindexPanel {
+    /// The view: its shortcuts work from the moment the tab shows.
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.view.focus_handle(cx)
+    }
+}
+
+impl BasePanel for ReindexPanel {
+    fn panel_name(&self) -> &'static str {
+        "Reindex"
+    }
+}
+
+impl Panel for ReindexPanel {
+    /// Color dot, the alias and environment badge (UX rule 1).
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let conn = self.connection.read(cx);
+        let (profile, unlocked) = (&conn.profile, conn.writes_unlocked);
+        let tab_id = format!("tab.{}.reindex.{}", profile.id, self.alias);
+        let name = SharedString::from(t!("reindex.title", alias = self.alias).to_string());
+        h_flex()
+            .id(SharedString::from(tab_id.clone()))
+            .test_support()
+            .aria_label(name.clone())
+            .gap_2()
+            .items_center()
+            .child(env_badge::dot(profile.color, cx))
+            .child(name)
+            .child(env_badge::render(&profile.environment, cx))
+            .when(profile.read_only, |el| {
+                el.child(env_badge::lock(&tab_id, unlocked, cx))
+            })
+    }
+}
+
+impl Render for ReindexPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let edge = env_badge::color(self.connection.read(cx).profile.color, cx.theme());
+        v_flex()
+            .track_focus(&self.focus_handle)
+            .key_context(gated(REINDEX, &self.view.read(cx).gates(cx)))
+            .when(self.connection.read(cx).writes_unlocked, |el| {
+                el.on_action(cx.listener(|this, _: &LockAgain, _, cx| {
+                    this.connection.update(cx, |c, cx| c.lock(cx));
+                }))
+            })
+            .size_full()
+            .border_t_2()
+            .border_color(edge)
+            .children(unlock::banner(&self.connection, REINDEX, window, cx))
+            .child(div().flex_1().min_h_0().child(self.view.clone()))
     }
 }
 

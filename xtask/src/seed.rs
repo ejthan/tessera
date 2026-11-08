@@ -19,6 +19,9 @@ const COLLECTIONS: [&str; 6] = [
 ];
 const ALIAS: &str = "books_current";
 const SYNONYMS: &str = "books_synonyms";
+const CURATION: &str = "books_curation";
+const STOPWORDS: &str = "en_common";
+const PRESET: &str = "books_fantasy";
 const AUTHORS: usize = 500;
 const PRODUCTS: usize = 200_000;
 
@@ -185,6 +188,7 @@ fn schemas() -> Vec<Value> {
             ],
             "default_sorting_field": "pages",
             "synonym_sets": [SYNONYMS],
+            "curation_sets": [CURATION],
         }),
         json!({
             "name": "books_ref",
@@ -331,13 +335,16 @@ pub async fn run(opts: &Options) -> Result<()> {
             s.drop(&format!("/collections/{c}")).await?;
         }
         s.drop(&format!("/synonym_sets/{SYNONYMS}")).await?;
+        s.drop(&format!("/curation_sets/{CURATION}")).await?;
+        s.drop(&format!("/stopwords/{STOPWORDS}")).await?;
+        s.drop(&format!("/presets/{PRESET}")).await?;
     }
     for c in COLLECTIONS {
         if s.exists(c).await? {
             bail!("collection {c} already exists; use --reset to drop the seed collections");
         }
     }
-    // The books schema names the set, so the set comes first.
+    // The books schema names the sets, so the sets come first.
     let synonyms = json!({"items": [
         {"id": "novel", "synonyms": ["novel", "book", "story"]},
         {"id": "sci", "synonyms": ["science", "sci"]},
@@ -346,6 +353,23 @@ pub async fn run(opts: &Options) -> Result<()> {
         .http
         .put(format!("{}/synonym_sets/{SYNONYMS}", opts.url))
         .json(&synonyms))
+        .await?;
+    let curation = json!({"items": [
+        {
+            "id": "pin_novel",
+            "rule": {"query": "novel", "match": "exact"},
+            "includes": [{"id": "0", "position": 1}],
+        },
+        {
+            "id": "sale",
+            "rule": {"tags": ["sale"]},
+            "includes": [{"id": "1", "position": 1}],
+        },
+    ]});
+    s.ok(s
+        .http
+        .put(format!("{}/curation_sets/{CURATION}", opts.url))
+        .json(&curation))
         .await?;
 
     for schema in schemas() {
@@ -367,7 +391,26 @@ pub async fn run(opts: &Options) -> Result<()> {
         .put(format!("{}/aliases/{ALIAS}", opts.url))
         .json(&json!({"collection_name": "books"})))
         .await?;
-    println!("alias {ALIAS} -> books, synonym set {SYNONYMS}");
+    s.ok(s
+        .http
+        .put(format!("{}/stopwords/{STOPWORDS}", opts.url))
+        .json(&json!({"stopwords": ["the", "a", "an"], "locale": "en"})))
+        .await?;
+    let preset = json!({"value": {
+        "collection": "books",
+        "q": "*",
+        "query_by": "title",
+        "filter_by": "genre:=fantasy",
+    }});
+    s.ok(s
+        .http
+        .put(format!("{}/presets/{PRESET}", opts.url))
+        .json(&preset))
+        .await?;
+    println!(
+        "alias {ALIAS} -> books, synonym set {SYNONYMS}, curation set {CURATION}, \
+         stopwords {STOPWORDS}, preset {PRESET}"
+    );
     Ok(())
 }
 

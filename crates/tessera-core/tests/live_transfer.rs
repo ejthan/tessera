@@ -15,6 +15,7 @@ use std::path::Path;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use tessera_client::{Client, ClientOptions, DirtyValues, ImportAction, ImportParams};
+use tessera_core::schema::SchemaDraft;
 use tessera_core::transfer::export::{
     ExportFormat, ExportJob, ExportProgress, ExportScope, FieldPick, run_export,
 };
@@ -289,6 +290,144 @@ async fn live_inferred_schema_is_accepted() {
         let outcome = import(&client, &names[0], source, options).await;
         assert_eq!(outcome.progress.imported, 50, "{:?}", outcome.report.rows());
         assert!(outcome.count.unwrap().ok);
+    })
+    .await;
+}
+
+fn copy_schema(name: &str) -> Value {
+    json!({
+        "name": name,
+        "enable_nested_fields": true,
+        "fields": [
+            {"name": "title", "type": "string"},
+            {"name": "loc", "type": "geopoint"},
+            {"name": "o", "type": "object"},
+            {"name": "o.city", "type": "string", "facet": true},
+            {"name": "v", "type": "float[]", "num_dim": 3},
+        ],
+    })
+}
+
+fn copy_lines(count: usize) -> String {
+    (0..count)
+        .map(|i| {
+            json!({
+                "id": i.to_string(),
+                "title": format!("doc {i}"),
+                "loc": [(i % 90) as f64 / 2.0, 11.5],
+                "o": {"city": format!("c{}", i % 10), "zip": i % 100},
+                "v": [0.25, 0.5, (i % 4) as f64 / 4.0],
+                "outside": {"note": format!("n{i}")},
+            })
+            .to_string()
+                + "\n"
+        })
+        .collect()
+}
+
+/// The copy the reindex assistant runs: export to a file, a new collection from the schema, an
+/// import of that file.
+async fn copy_through_a_file(client: &Client, source: &str, target: &str) -> ImportOutcome {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("documents.jsonl");
+    export(client, source, ExportFormat::Jsonl, &path).await;
+    let collection = client.collection(source).await.unwrap();
+    let mut draft = SchemaDraft::from_collection(&collection);
+    draft.name = target.to_string();
+    client.create_collection(&draft.to_json()).await.unwrap();
+    import(
+        client,
+        target,
+        Source::File(path),
+        ReadOptions::new(Format::Jsonl),
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_copy_through_a_file() {
+    with_names(2, |client, names| async move {
+        let (source, target) = (&names[0], &names[1]);
+        client
+            .create_collection(&copy_schema(source))
+            .await
+            .unwrap();
+        let outcome = import(
+            &client,
+            source,
+            Source::Bytes(copy_lines(2_000).into_bytes().into()),
+            ReadOptions::new(Format::Jsonl),
+        )
+        .await;
+        assert_eq!(outcome.progress.imported, 2_000, "{:?}", outcome.end);
+
+        let outcome = copy_through_a_file(&client, source, target).await;
+        assert!(matches!(outcome.end, JobEnd::Finished), "{:?}", outcome.end);
+        assert_eq!(outcome.progress.imported, 2_000);
+        assert_eq!(
+            client.collection(target).await.unwrap().num_documents,
+            2_000
+        );
+
+        let sorted = |text: String| {
+            let mut lines: Vec<(String, String)> = text
+                .lines()
+                .map(|line| {
+                    let doc: Value = serde_json::from_str(line).unwrap();
+                    (doc["id"].as_str().unwrap().to_string(), line.to_string())
+                })
+                .collect();
+            lines.sort();
+            lines
+        };
+        assert_eq!(
+            sorted(full_text(&client, source).await),
+            sorted(full_text(&client, target).await)
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_a_copy_loses_unstored_fields() {
+    with_names(4, |client, names| async move {
+        for (source, target, optional) in
+            [(&names[0], &names[1], true), (&names[2], &names[3], false)]
+        {
+            let schema = json!({
+                "name": source,
+                "fields": [
+                    {"name": "title", "type": "string"},
+                    {"name": "secret", "type": "string", "store": false, "optional": optional},
+                ],
+            });
+            client.create_collection(&schema).await.unwrap();
+            let lines: String = (0..20)
+                .map(|i| {
+                    json!({"id": i.to_string(), "title": "t", "secret": "s"}).to_string() + "\n"
+                })
+                .collect();
+            let outcome = import(
+                &client,
+                source,
+                Source::Bytes(lines.into_bytes().into()),
+                ReadOptions::new(Format::Jsonl),
+            )
+            .await;
+            assert_eq!(outcome.progress.imported, 20, "{:?}", outcome.end);
+
+            let outcome = copy_through_a_file(&client, source, target).await;
+            if optional {
+                assert_eq!(outcome.progress.imported, 20, "{:?}", outcome.end);
+                assert!(!full_text(&client, target).await.contains("secret"));
+            } else {
+                assert_eq!(outcome.progress.imported, 0);
+                assert_eq!(outcome.progress.failed, 20, "{:?}", outcome.end);
+                assert_eq!(outcome.report.total(), 20);
+            }
+        }
     })
     .await;
 }

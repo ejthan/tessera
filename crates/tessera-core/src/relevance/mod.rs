@@ -5,6 +5,7 @@
 pub mod attachment;
 pub mod changes;
 pub mod curations;
+pub mod reindex;
 pub mod synonym_file;
 pub mod synonyms;
 pub mod test;

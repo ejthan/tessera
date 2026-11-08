@@ -128,6 +128,7 @@ pub fn run(launch: Launch) -> Result<(), String> {
         cx.set_global(relevance::RelevanceBackendGlobal(relevance::tokio_backend(
             handle.clone(),
         )));
+        handle.spawn_blocking(relevance::sweep_copies);
         cx.set_global(runtime::Tokio(handle));
         gpui_kit::init(cx);
         jobs::init(cx);

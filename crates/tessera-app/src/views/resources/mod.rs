@@ -9,6 +9,7 @@ pub mod curations;
 pub(crate) mod item_save;
 pub mod name_dialog;
 pub mod presets;
+pub mod reindex;
 pub mod set_file;
 pub mod sets;
 pub mod stopwords;
@@ -66,7 +67,7 @@ impl ResourceView {
     ) -> Self {
         match kind {
             ResourceKind::Aliases => {
-                Self::Aliases(cx.new(|cx| AliasesView::new(connection, window, cx)))
+                Self::Aliases(cx.new(|cx| AliasesView::new(connection, state, window, cx)))
             }
             ResourceKind::Stopwords => {
                 Self::Stopwords(cx.new(|cx| StopwordsView::new(connection, window, cx)))
