@@ -116,8 +116,12 @@ gpui_kit::actions!(
         SaveFailedLines,
         ImportDocuments,
         PickImportFile,
+        ImportSavedLines,
+        EditImportSchema,
         PasteImport,
-        StartTransfer
+        StartTransfer,
+        ExportDocuments,
+        InferFromFile
     ]
 );
 
@@ -177,6 +181,10 @@ pub const JOBS: &str = "Jobs";
 pub const IMPORT_DIALOG: &str = "DocumentImport";
 /// An input in that dialog, which has its own ⌘↩.
 const IMPORT_INPUT: &str = "DocumentImport > Input";
+/// Key context of the export dialog.
+pub const EXPORT_DIALOG: &str = "DocumentExport";
+/// An input in that dialog, which has its own ⌘↩.
+const EXPORT_INPUT: &str = "DocumentExport > Input";
 /// Key context of the raw console.
 pub const CONSOLE: &str = "Console";
 /// Key context of an input in the console, where ⌘↩ / Ctrl+↩ still sends.
@@ -445,6 +453,10 @@ const IMPORT_DOCUMENTS: &str = "cmd-shift-i";
 #[cfg(not(target_os = "macos"))]
 const IMPORT_DOCUMENTS: &str = "ctrl-shift-i";
 #[cfg(target_os = "macos")]
+const EXPORT_DOCUMENTS: &str = "cmd-shift-x";
+#[cfg(not(target_os = "macos"))]
+const EXPORT_DOCUMENTS: &str = "ctrl-shift-x";
+#[cfg(target_os = "macos")]
 const PASTE_IMPORT: &str = "cmd-shift-v";
 #[cfg(not(target_os = "macos"))]
 const PASTE_IMPORT: &str = "ctrl-shift-v";
@@ -554,6 +566,7 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     SaveReport,
     SaveFailedLines,
     ImportDocuments,
+    ExportDocuments,
 ];
 
 /// Actions the palette never lists: steps that mean nothing outside their control, and
@@ -581,8 +594,11 @@ pub const PALETTE_HIDDEN: &[&str] = &[
     "tessera::DeleteSavedQuery",
     "tessera::ToggleFrameOverlay",
     "tessera::PickImportFile",
+    "tessera::ImportSavedLines",
+    "tessera::EditImportSchema",
     "tessera::PasteImport",
     "tessera::StartTransfer",
+    "tessera::InferFromFile",
 ];
 
 /// The locale key of the label of action `name`, when the palette lists it.
@@ -817,13 +833,20 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(IMPORT_DOCUMENTS, ImportDocuments, Some(COLLECTIONS)),
         KeyBinding::new(OPEN_SAVED, PickImportFile, Some(IMPORT_DIALOG)),
         KeyBinding::new(PASTE_IMPORT, PasteImport, Some(IMPORT_DIALOG)),
+        KeyBinding::new(EDIT, EditImportSchema, Some(IMPORT_DIALOG)),
         KeyBinding::new(SAVE, StartTransfer, Some(IMPORT_DIALOG)),
         KeyBinding::new(SAVE, StartTransfer, Some(IMPORT_INPUT)),
+        KeyBinding::new(EXPORT_DOCUMENTS, ExportDocuments, Some(COLLECTION)),
+        KeyBinding::new(OPEN_SAVED, InferFromFile, Some(SCHEMA_DIALOG)),
+        KeyBinding::new(SAVE, StartTransfer, Some(EXPORT_DIALOG)),
+        KeyBinding::new(SAVE, StartTransfer, Some(EXPORT_INPUT)),
         KeyBinding::new(CANCEL_JOB, CancelJob, Some(JOBS)),
         KeyBinding::new(STOP_WAITING, StopWaiting, Some(JOBS)),
         KeyBinding::new(DELETE, DismissJob, Some(JOBS)),
         KeyBinding::new(SAVE_QUERY, SaveReport, Some(JOBS)),
         KeyBinding::new(SORT, SaveFailedLines, Some(JOBS)),
+        KeyBinding::new(OPEN_SAVED, ImportSavedLines, Some(JOBS)),
+        KeyBinding::new(IMPORT_DOCUMENTS, ImportDocuments, Some(JOBS)),
     ]);
     #[cfg(feature = "frame-overlay")]
     cx.bind_keys([KeyBinding::new(

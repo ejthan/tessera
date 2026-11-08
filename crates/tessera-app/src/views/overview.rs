@@ -152,7 +152,7 @@ impl Overview {
 }
 
 /// `n` with the locale's digit grouping: "1,234,567" in English, "1.234.567" in German.
-pub(super) fn grouped(n: u64) -> String {
+pub(crate) fn grouped(n: u64) -> String {
     group_digits(n, &t!("number.group_separator"))
 }
 

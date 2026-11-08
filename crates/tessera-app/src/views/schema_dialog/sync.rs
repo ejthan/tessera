@@ -9,6 +9,7 @@ use gpui_kit::component::input::InputState;
 use gpui_kit::{Context, Entity, Window};
 use serde_json::{Map, Value};
 use tessera_core::schema::{FieldDraft, FieldType, SchemaDraft};
+use tessera_core::transfer::infer::InferNote;
 
 use super::SchemaDialog;
 use super::form::FieldRow;
@@ -199,6 +200,26 @@ impl SchemaDialog {
         self.refresh(window, cx);
     }
 
+    /// Replaces the draft as a whole: the JSON follows and the form is refilled. Refused
+    /// while the JSON does not parse, like any form edit.
+    pub(super) fn replace_draft(
+        &mut self,
+        draft: SchemaDraft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.locked() {
+            return;
+        }
+        self.draft = draft;
+        // `set_text` always emits `Changed`, which `json_changed` skips.
+        self.syncing += 1;
+        let text = pretty(&self.draft);
+        self.json.update(cx, |e, cx| e.set_text(&text, window, cx));
+        self.fill_form(window, cx);
+        self.refresh(window, cx);
+    }
+
     /// The JSON text changed: refills the form, unless the change is the form's own rewrite.
     pub(super) fn json_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.syncing > 0 {
@@ -220,6 +241,15 @@ impl SchemaDialog {
     /// current draft.
     pub(super) fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.check_draft();
+        // Use geopoint means nothing once the field is gone or already one.
+        let draft = &self.draft;
+        self.infer_notes.retain(|note| match note {
+            InferNote::MaybeGeopoint(field) => draft
+                .fields
+                .iter()
+                .any(|f| f.name == *field && f.r#type != FieldType::Geopoint),
+            _ => true,
+        });
         let sortable = sortable(&self.draft);
         if sortable != self.form.sortable {
             self.form.sortable = sortable.clone();

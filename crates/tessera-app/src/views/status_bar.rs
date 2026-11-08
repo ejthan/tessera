@@ -139,10 +139,10 @@ pub fn render(
                 .items_center()
                 .children(prod_read_only)
                 .children(jobs.map(|jobs| {
-                    let text = if jobs.running > 0 {
-                        t!("status.jobs", count = jobs.running).to_string()
-                    } else {
-                        t!("status.jobs_idle").to_string()
+                    let text = match jobs.running {
+                        0 => t!("status.jobs_idle").to_string(),
+                        1 => t!("status.jobs_one").to_string(),
+                        count => t!("status.jobs", count = count).to_string(),
                     };
                     Button::new("status.jobs")
                         .ghost()

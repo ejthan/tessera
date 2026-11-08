@@ -23,8 +23,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
-    prelude::*, px,
+    ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 use rust_i18n::t;
 use serde_json::Value;
@@ -32,15 +32,21 @@ use tessera_client::{Collection, SchemaChange};
 use tessera_core::schema::{
     DraftError, FieldDraft, FieldType, Issue, IssuePath, SchemaDraft, Severity, has_errors,
 };
-use tessera_widgets::{JsonEditor, JsonEditorEvent};
+use tessera_core::transfer::infer::{InferNote, InferredSchema};
+use tessera_core::transfer::source::{ReadError, ReadOptions, Source, sniff};
+use tessera_widgets::{JsonEditor, JsonEditorEvent, confirm};
 
 use self::form::{Form, line};
 use self::sync::{Opt, Text, pretty};
 use super::env_badge;
-use crate::actions::{AddField, SCHEMA_DIALOG, ShowForm, ShowJson, SubmitSchema};
+use super::jobs::import_dialog::{Inspect, inspect};
+use super::jobs::{infer_notes, note};
+use crate::actions::{AddField, InferFromFile, SCHEMA_DIALOG, ShowForm, ShowJson, SubmitSchema};
 use crate::collections::CollectionsBackendGlobal;
 use crate::connection::{ConnectionState, error_text};
+use crate::runtime::Tokio;
 use crate::state::AppState;
+use crate::transfer::{TransferBackend, TransferBackendGlobal, read_error_text};
 
 const WIDTH: f32 = 900.;
 const JSON_HEIGHT: f32 = 440.;
@@ -105,6 +111,12 @@ pub struct SchemaDialog {
     safe_focus: FocusHandle,
     apply_focus: FocusHandle,
     server_error: Option<SharedString>,
+    /// Notes of the last inference from a file, above the tabs.
+    infer_notes: Vec<InferNote>,
+    /// Why the last inference failed.
+    infer_error: Option<SharedString>,
+    /// The file picker or the inference; dropped with the dialog.
+    infer_task: Option<Task<()>>,
     busy: bool,
     task: Option<Task<()>>,
     /// Polls `schema_changes` while a PATCH runs; dropped with the dialog.
@@ -310,6 +322,9 @@ impl SchemaDialog {
             safe_focus: cx.focus_handle(),
             apply_focus: cx.focus_handle(),
             server_error: None,
+            infer_notes: Vec::new(),
+            infer_error: None,
+            infer_task: None,
             busy: false,
             task: None,
             poll: None,
@@ -354,6 +369,99 @@ impl SchemaDialog {
             Some(input) => input.update(cx, |i, cx| i.focus(window, cx)),
             None => self.focus_handle.focus(window, cx),
         }
+    }
+
+    /// Whether the draft names any field, which an inference would replace.
+    fn has_named_field(&self) -> bool {
+        self.draft.fields.iter().any(|f| !f.name.is_empty())
+    }
+
+    /// Picks a file and proposes the fields of its first rows. Nothing but the draft changes.
+    fn infer_from_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing() || self.infer_task.is_some() {
+            return;
+        }
+        if self.locked() {
+            self.infer_error = Some(t!("schema.infer_locked").to_string().into());
+            cx.notify();
+            return;
+        }
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(t!("schema.infer").to_string().into()),
+        });
+        let tokio = cx.global::<Tokio>().0.clone();
+        let backend = cx.global::<TransferBackendGlobal>().0.clone();
+        self.infer_error = None;
+        self.infer_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let answer = match picked.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(path) => infer_file(tokio, backend, path).await,
+                    None => Err(String::new()),
+                },
+                Ok(Err(e)) => Err(t!("connect.error.picker", detail = e.to_string()).to_string()),
+                // Cancelled.
+                Ok(Ok(None)) | Err(_) => Err(String::new()),
+            };
+            this.update_in(cx, |this, window, cx| {
+                this.infer_task = None;
+                match answer {
+                    Ok(inferred) => this.inferred(inferred, window, cx),
+                    Err(text) if text.is_empty() => {}
+                    Err(text) => this.infer_error = Some(text.into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// A draft with fields asks first; focus starts on Cancel.
+    fn inferred(&mut self, inferred: InferredSchema, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.has_named_field() {
+            return self.apply_inferred(&inferred, window, cx);
+        }
+        let this = cx.entity().downgrade();
+        confirm::open(
+            t!("schema.infer_replace_title").to_string(),
+            t!("schema.infer_replace_body").to_string(),
+            t!("schema.infer_replace_action").to_string(),
+            move |window, cx| {
+                this.update(cx, |d, cx| d.apply_inferred(&inferred, window, cx))
+                    .ok();
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Fills the form and the JSON tab. The fields come from the file; everything else of the
+    /// draft stays, and so does the sorting field while it can still sort.
+    fn apply_inferred(
+        &mut self,
+        inferred: &InferredSchema,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.infer_notes = inferred.notes.clone();
+        let proposed = inferred.to_draft(&self.draft.name);
+        let mut draft = self.draft.clone();
+        draft.fields = proposed.fields;
+        draft.enable_nested_fields = proposed.enable_nested_fields;
+        if !sync::sortable(&draft).contains(&draft.default_sorting_field) {
+            draft.default_sorting_field.clear();
+        }
+        self.replace_draft(draft, window, cx);
+    }
+
+    fn use_geopoint(&mut self, field: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let mut draft = self.draft.clone();
+        for f in draft.fields.iter_mut().filter(|f| f.name == field) {
+            sync::retarget(f, |f| f.r#type = FieldType::Geopoint);
+        }
+        self.replace_draft(draft, window, cx);
     }
 
     /// Esc, the close button or the backdrop: in the review they go back to the draft; a
@@ -602,6 +710,9 @@ impl Render for SchemaDialog {
             )
             .on_action(cx.listener(|this, _: &AddField, window, cx| this.add_field(window, cx)))
             .on_action(cx.listener(|this, _: &SubmitSchema, window, cx| this.submit(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &InferFromFile, window, cx| this.infer_from_file(window, cx)),
+            )
             .child(content)
     }
 }
@@ -642,9 +753,25 @@ impl SchemaDialog {
             Mode::Pick(_) => t!("schema.use"),
             Mode::Create => t!("schema.create"),
         };
+        let infer = (!self.editing()).then(|| {
+            Button::new("schema.infer")
+                .outline()
+                .small()
+                .label(t!("schema.infer").to_string())
+                .children(kbd(&InferFromFile))
+                .loading(self.infer_task.is_some())
+                .on_click(cx.listener(|this, _, window, cx| this.infer_from_file(window, cx)))
+        });
+        let notes = infer_notes(&self.infer_notes, cx, Self::use_geopoint);
         v_flex()
             .gap_3()
-            .child(tabs)
+            .child(h_flex().justify_between().child(tabs).children(infer))
+            .children(
+                self.infer_error
+                    .clone()
+                    .map(|e| note("schema.infer_error", e.to_string(), danger)),
+            )
+            .children(notes)
             .child(body)
             .children(self.render_summary(cx))
             .children(
@@ -674,4 +801,27 @@ impl SchemaDialog {
                     ),
             )
     }
+}
+
+/// Reads the head of `path` for its format, then proposes a schema from its first rows.
+async fn infer_file(
+    tokio: tokio::runtime::Handle,
+    backend: std::sync::Arc<dyn TransferBackend>,
+    path: std::path::PathBuf,
+) -> Result<InferredSchema, String> {
+    let shown = path.clone();
+    let head = match tokio.spawn_blocking(move || inspect(&shown)).await {
+        Ok(Ok((_, head))) => head,
+        Ok(Err(Inspect::NotAFile)) => return Err(t!("transfer.import.not_a_file").to_string()),
+        Ok(Err(Inspect::Io(detail))) => return Err(read_error_text(&ReadError::Io(detail))),
+        Err(e) => return Err(read_error_text(&ReadError::Io(e.to_string()))),
+    };
+    let (format, csv) = sniff(Some(&path), &head);
+    let options = ReadOptions {
+        format,
+        csv,
+        fields: Vec::new(),
+    };
+    let answer = backend.infer(Source::File(path), options).await;
+    answer.map_err(|e| read_error_text(&e))
 }

@@ -3,6 +3,7 @@
 //! The jobs tab of the bottom dock: every import and export of the session, the selected
 //! job's numbers and what it could not store.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +32,8 @@ use super::super::overview::grouped;
 use super::super::request_detail::size;
 use super::import_dialog::DocumentImportDialog;
 use crate::actions::{
-    CancelJob, DismissJob, JOBS, SaveFailedLines, SaveReport, StopWaiting, gated,
+    CancelJob, DismissJob, ImportDocuments, ImportSavedLines, JOBS, SaveFailedLines, SaveReport,
+    StopWaiting, gated,
 };
 use crate::jobs::{Job, JobId, JobKind, JobOutcome, JobStatus, Jobs, JobsGlobal, Live};
 use crate::state::AppState;
@@ -382,11 +384,13 @@ pub struct JobsPanel {
     jobs: Entity<Jobs>,
     table: Entity<TableState<JobRows>>,
     report: Entity<TableState<ReportRows>>,
+    /// This is the displayed tab of its group.
+    displayed: bool,
     /// The job the user picked; without one the newest shows.
     picked: Option<JobId>,
     saved: Option<Saved>,
-    /// The last saved failed lines: the job and the file.
-    failed_file: Option<(JobId, PathBuf)>,
+    /// The saved failed lines of each job.
+    failed_files: HashMap<JobId, PathBuf>,
     save_task: Option<Task<()>>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -410,7 +414,12 @@ impl JobsPanel {
                 .col_selectable(false)
         });
         let subscriptions = vec![
-            cx.observe(&jobs, |this, _, cx| this.refresh(cx)),
+            // The tab bar reads this panel for its title, so notifying it redraws the window.
+            cx.observe(&jobs, |this, _, cx| {
+                if this.displayed {
+                    this.refresh(cx);
+                }
+            }),
             cx.subscribe(&table, |this, _, event: &TableEvent, cx| {
                 if let TableEvent::SelectRow(ix) = event {
                     this.pick(*ix, cx);
@@ -422,9 +431,10 @@ impl JobsPanel {
             jobs,
             table,
             report,
+            displayed: false,
             picked: None,
             saved: None,
-            failed_file: None,
+            failed_files: HashMap::new(),
             save_task: None,
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -558,10 +568,12 @@ impl JobsPanel {
             let result = save.await;
             this.update(cx, |this, cx| {
                 if result.is_ok() {
-                    this.jobs
-                        .update(cx, |jobs, cx| jobs.set_report_saved(id, cx));
                     if failed_only {
-                        this.failed_file = Some((id, path.clone()));
+                        // Only the report holds the reasons, so this loses them still.
+                        this.failed_files.insert(id, path.clone());
+                    } else {
+                        this.jobs
+                            .update(cx, |jobs, cx| jobs.set_report_saved(id, cx));
                     }
                 }
                 let text = match result {
@@ -588,7 +600,7 @@ impl JobsPanel {
         let Some(job) = self.current(cx) else {
             return;
         };
-        let (profile, collection) = (job.connection, job.collection.clone());
+        let (id, profile, collection) = (job.id, job.connection, job.collection.clone());
         let Some(path) = self.saved_file(job) else {
             return;
         };
@@ -596,13 +608,25 @@ impl JobsPanel {
             let source = Some(Source::File(path));
             let state = self.state.clone();
             DocumentImportDialog::open(state, connection, Some(collection), source, window, cx);
+        } else {
+            let text = Err(t!("jobs.import_saved_gone").to_string().into());
+            self.saved = Some(Saved { job: id, text });
+            cx.notify();
         }
+    }
+
+    /// Opens the import dialog on the selected connection, for any collection.
+    fn import_documents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let Some(connection) = state.selected.and_then(|id| state.connection(id, cx)) else {
+            return;
+        };
+        DocumentImportDialog::open(self.state.clone(), connection, None, None, window, cx);
     }
 
     /// The failed lines saved from `job`.
     fn saved_file(&self, job: &Job) -> Option<PathBuf> {
-        let (id, path) = self.failed_file.as_ref()?;
-        (*id == job.id).then(|| path.clone())
+        self.failed_files.get(&job.id).cloned()
     }
 
     /// The buttons of the shown job.
@@ -663,6 +687,11 @@ impl JobsPanel {
                         .ghost()
                         .xsmall()
                         .label(t!("jobs.import_saved").to_string())
+                        .children(Kbd::binding_for_action(
+                            &ImportSavedLines,
+                            Some(JOBS),
+                            window,
+                        ))
                         .on_click(cx.listener(|this, _, window, cx| this.import_saved(window, cx))),
                 )
             })
@@ -731,6 +760,26 @@ impl JobsPanel {
                 _ => {}
             }
         }
+        if let Some(JobOutcome::Export(outcome)) = &job.outcome {
+            if outcome.unlisted_values > 0 {
+                let count = grouped(outcome.unlisted_values);
+                let text = t!("jobs.export_unlisted", count = count).to_string();
+                notes.push(note("jobs.export_unlisted".into(), text, false));
+            }
+            if outcome.kept_existing {
+                let text = t!("jobs.export_kept").to_string();
+                notes.push(note("jobs.export_kept".into(), text, false));
+            }
+            let progress = &outcome.progress;
+            // A stopped or failed export is short on purpose.
+            if let Some(expected) = progress.expected.filter(|e| *e != progress.docs)
+                && job.status == JobStatus::Finished
+            {
+                let (docs, expected) = (grouped(progress.docs), grouped(expected));
+                let text = t!("jobs.export_mismatch", docs = docs, expected = expected);
+                notes.push(note("jobs.export_mismatch".into(), text.to_string(), false));
+            }
+        }
         if job.kind == JobKind::Import {
             let text = t!("jobs.stay_note").to_string();
             notes.push(note("jobs.stay_note".into(), text, false));
@@ -774,6 +823,13 @@ impl BasePanel for JobsPanel {
     // ⇧⌘J hides it; closing would leave nothing to toggle.
     fn closable(&self, _: &App) -> bool {
         false
+    }
+
+    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        self.displayed = active;
+        if active {
+            self.refresh(cx);
+        }
     }
 }
 
@@ -838,15 +894,40 @@ impl Render for JobsPanel {
             .map(|el| match body {
                 None => {
                     let text = t!("jobs.empty").to_string();
+                    let connected = {
+                        let state = self.state.read(cx);
+                        state.selected.and_then(|id| state.connection(id, cx))
+                    };
                     el.child(
-                        div()
-                            .id("jobs.empty")
-                            .test_support()
-                            .aria_label(SharedString::from(text.clone()))
+                        v_flex()
                             .p_3()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(text),
+                            .gap_2()
+                            .items_start()
+                            .child(
+                                div()
+                                    .id("jobs.empty")
+                                    .test_support()
+                                    .aria_label(SharedString::from(text.clone()))
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(text),
+                            )
+                            .when(connected.is_some(), |el| {
+                                el.child(
+                                    Button::new("jobs.import")
+                                        .outline()
+                                        .small()
+                                        .label(t!("jobs.import").to_string())
+                                        .children(Kbd::binding_for_action(
+                                            &ImportDocuments,
+                                            Some(JOBS),
+                                            window,
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.import_documents(window, cx);
+                                        })),
+                                )
+                            }),
                     )
                 }
                 Some(body) => el.child(
@@ -871,6 +952,12 @@ impl Render for JobsPanel {
             .on_action(cx.listener(|this, _: &CancelJob, _, cx| this.cancel(cx)))
             .on_action(cx.listener(|this, _: &StopWaiting, _, cx| this.stop_waiting(cx)))
             .on_action(cx.listener(|this, _: &DismissJob, window, cx| this.dismiss(window, cx)))
+            .on_action(cx.listener(|this, _: &ImportSavedLines, window, cx| {
+                this.import_saved(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ImportDocuments, window, cx| {
+                this.import_documents(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &SaveReport, window, cx| this.save(false, window, cx)))
             .on_action(
                 cx.listener(|this, _: &SaveFailedLines, window, cx| this.save(true, window, cx)),

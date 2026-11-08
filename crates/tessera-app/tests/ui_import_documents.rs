@@ -16,7 +16,7 @@ use gpui_kit::{AppContext as _, ClipboardItem, Entity, TestAppContext, WindowHan
 use tessera_app::connection::ConnectionState;
 use tessera_app::jobs::{Jobs, JobsGlobal};
 use tessera_app::state::AppState;
-use tessera_app::views::jobs::import_dialog::DocumentImportDialog;
+use tessera_app::views::jobs::import_dialog::{DocumentImportDialog, Target};
 use tessera_client::{Collection, DirtyValues, ImportAction};
 use tessera_core::documents::validate::{DocIssue, IssueSeverity};
 use tessera_core::profile::Profile;
@@ -31,6 +31,7 @@ use common::*;
 const CHOOSE: &str = key("cmd-o", "ctrl-o");
 const PASTE: &str = key("cmd-shift-v", "ctrl-shift-v");
 const IMPORT: &str = key("cmd-shift-i", "ctrl-shift-i");
+const START: &str = key("cmd-enter", "ctrl-enter");
 
 struct Fixture {
     handle: WindowHandle<Root>,
@@ -543,6 +544,22 @@ async fn every_control_shows_its_shortcut(cx: &mut TestAppContext) {
     }
 }
 
+#[gpui_kit::test]
+async fn edit_schema_shows_its_shortcut_and_works(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    let button = f.act(cx, |window, _| {
+        window.find("transfer.import.edit_schema").bounds()
+    });
+    let kbd = gpui_kit::VisualTestContext::from_window(f.handle.into(), cx)
+        .debug_bounds(key("kbd:cmd-e", "kbd:ctrl-e"))
+        .unwrap();
+    assert!(button.contains(&kbd.center()));
+    f.press(cx, key("cmd-e", "ctrl-e"));
+    settle(cx);
+    assert!(f.has(cx, "schema.submit"));
+}
+
 /// A schema proposal with `n` and a field that may be a `geopoint`.
 fn inferred() -> InferredSchema {
     InferredSchema {
@@ -896,4 +913,150 @@ async fn read_only_profile_can_edit_schema_without_unlocking(cx: &mut TestAppCon
     assert!(!f.has(cx, "schema.submit"));
     assert!(!f.has(cx, "danger.input"));
     assert!(f.has(cx, "transfer.import.start"));
+}
+
+impl Fixture {
+    /// Loads the list again, now answering with `data`.
+    fn reload(
+        &self,
+        cx: &mut TestAppContext,
+        data: Option<(Vec<Collection>, Vec<tessera_client::Alias>)>,
+    ) {
+        *self.backend.data.lock().unwrap() = data;
+        cx.update(|cx| self.conn.update(cx, |c, cx| c.invalidate_collections(cx)));
+        cx.run_until_parked();
+    }
+
+    /// Chooses "New collection…" and tells what the select then holds.
+    fn select_new(
+        &self,
+        cx: &mut TestAppContext,
+        dialog: &Entity<DocumentImportDialog>,
+    ) -> Option<Target> {
+        self.update(cx, dialog, |d, window, cx| d.pick_new(window, cx));
+        cx.read(|cx| dialog.read(cx).chosen(cx))
+    }
+}
+
+#[gpui_kit::test]
+async fn empty_server_offers_a_new_collection(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.reload(cx, Some((Vec::new(), Vec::new())));
+    let dialog = f.open(cx, None, None);
+    assert_eq!(f.select_new(cx, &dialog), Some(Target::New));
+}
+
+#[gpui_kit::test]
+async fn failed_list_says_so_and_offers_a_new_collection(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    f.reload(cx, None);
+    let dialog = f.open(cx, None, None);
+    cx.run_until_parked();
+    let text = f.text(cx, "transfer.import.list_error").unwrap();
+    assert!(text.contains("could not be loaded"), "{text}");
+    assert_eq!(f.select_new(cx, &dialog), Some(Target::New));
+}
+
+#[gpui_kit::test]
+async fn preset_target_survives_a_list_still_loading(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    cx.update(|cx| f.conn.update(cx, |c, cx| c.invalidate_collections(cx)));
+    let dialog = f.open(
+        cx,
+        Some("books"),
+        Some(Source::Bytes(Arc::from(&b"{}\n"[..]))),
+    );
+    settle(cx);
+    assert!(!f.start_disabled(cx));
+    cx.update(|cx| f.conn.update(cx, |c, cx| c.invalidate_collections(cx)));
+    settle(cx);
+    assert_eq!(
+        cx.read(|cx| dialog.read(cx).chosen(cx)),
+        Some(Target::Collection("books".into()))
+    );
+}
+
+#[gpui_kit::test]
+async fn second_start_during_a_create_is_ignored(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    let release = f.backend.hold_create();
+    f.press(cx, START);
+    f.press(cx, START);
+    assert_eq!(f.backend.creates.lock().unwrap().len(), 1);
+    release.send(()).unwrap();
+    settle(cx);
+    assert_eq!(f.backend.creates.lock().unwrap().len(), 1);
+    assert_eq!(f.started(), 1);
+}
+
+#[gpui_kit::test]
+async fn created_collection_reaches_the_list(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let _new = f.new_target(cx).await;
+    f.start(cx);
+    let names: Vec<String> = cx.read(|cx| {
+        let cache = &f.conn.read(cx).collection_cache;
+        cache
+            .collections
+            .iter()
+            .flatten()
+            .map(|c| c.name.clone())
+            .collect()
+    });
+    assert!(names.contains(&"catalog__1_".to_string()), "{names:?}");
+}
+
+#[gpui_kit::test]
+async fn changed_file_reruns_the_estimate_and_the_danger(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let (_dir, path) = temp_file("books.jsonl", b"{}\n");
+    f.open(cx, Some("books"), Some(Source::File(path.clone())));
+    f.wait_for_source(cx).await;
+    f.set_action(cx, "upsert");
+    std::fs::write(&path, "{}\n".repeat(5000)).unwrap();
+    *f.fake.preview.lock().unwrap() = Some(Ok(preview(5000)));
+    let previews = f.previews();
+    f.click(cx, "transfer.import.start");
+    cx.wait_for(f.handle.into(), Duration::from_millis(5000), |window, _| {
+        window.try_find("transfer.import.file_changed").is_some()
+    })
+    .await;
+    settle(cx);
+    assert_eq!(f.started(), 0);
+    assert!(!f.has(cx, "confirm.ok"));
+    assert_eq!(f.previews(), previews + 1);
+    let shown = f.text(cx, "transfer.import.source").unwrap();
+    assert!(shown.contains("14.6 KB"), "the new size: {shown}");
+    f.click(cx, "transfer.import.start");
+    wait_for_element(cx, f.handle, "danger.input".into(), true).await;
+    assert!(!f.has(cx, "transfer.import.file_changed"));
+}
+
+#[gpui_kit::test]
+async fn file_gone_at_start_says_so(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let (_dir, path) = temp_file("books.jsonl", b"{}\n");
+    f.open(cx, Some("books"), Some(Source::File(path.clone())));
+    f.wait_for_source(cx).await;
+    std::fs::remove_file(&path).unwrap();
+    f.start(cx);
+    assert!(f.has(cx, "transfer.import.source_error"));
+    assert_eq!(f.started(), 0);
+}
+
+#[gpui_kit::test]
+async fn paste_cancels_a_file_still_being_read(cx: &mut TestAppContext) {
+    let f = connected(cx).await;
+    let (_dir, path) = temp_file("books.jsonl", b"{}\n");
+    let dialog = f.open(cx, Some("books"), None);
+    cx.write_to_clipboard(ClipboardItem::new_string("{}\n".into()));
+    f.act(cx, |window, cx| {
+        dialog.update(cx, |d, cx| d.read_file(path, cx));
+        window.press(PASTE, cx);
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    settle(cx);
+    let shown = f.text(cx, "transfer.import.source").unwrap();
+    assert!(shown.starts_with("Clipboard"), "{shown}");
 }

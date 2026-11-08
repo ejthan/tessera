@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::report::{Report, ReportRow};
 use super::source::{ReadError, ReadOptions, Record, RejectReason, Source, read_documents};
-use super::{BATCH_BYTES, BUSY_RETRIES, CHANNEL_BATCHES};
+use super::{BATCH_BYTES, BUSY_RETRIES, CHANNEL_BATCHES, cap_error};
 
 /// How a running job is told to end. Clones share the tokens.
 #[derive(Clone, Default)]
@@ -541,7 +541,7 @@ pub async fn run_import(
 
         rows.sort_by_key(|row| row.line);
         if state.first_error.is_none() {
-            state.first_error = rows.first().map(|row| Arc::from(row.error.as_str()));
+            state.first_error = rows.first().map(|row| Arc::from(cap_error(&row.error)));
         }
         let mut spool_failed = None;
         for row in rows {

@@ -43,14 +43,15 @@ use self::bulk::BulkMode;
 use self::inspector::{DocumentSaved, GoToResult, Inspector};
 use self::table::DocRows;
 use super::env_badge;
+use super::jobs::export_dialog::DocumentExportDialog;
 use super::jobs::import_dialog::DocumentImportDialog;
 use super::overview::grouped;
 use super::schema_view::COPIED_FOR;
 use crate::actions::{
     COLLECTION, ClearFilter, CopyCell, CopyCsv, CopyCurl, CopyJsonl, CopyRowJson, DOCUMENTS,
-    DeleteByQuery, DeleteDocuments, ExtendRows, FocusSearch, GoToId, ImportDocuments,
-    NarrowerColumn, NewDocument, OpenDocument, SelectLoaded, SortByColumn, ToggleColumns,
-    ToggleInspector, TogglePinColumn, ToggleRow, UpdateByQuery, WiderColumn, gated,
+    DeleteByQuery, DeleteDocuments, ExportDocuments, ExtendRows, FocusSearch, GoToId,
+    ImportDocuments, NarrowerColumn, NewDocument, OpenDocument, SelectLoaded, SortByColumn,
+    ToggleColumns, ToggleInspector, TogglePinColumn, ToggleRow, UpdateByQuery, WiderColumn, gated,
 };
 use crate::connection::{CollectionChanged, ConnectionState};
 use crate::documents::DocumentsBackendGlobal;
@@ -904,9 +905,27 @@ impl DocumentsView {
         );
     }
 
+    /// Opens the export dialog on the applied filter and the ticked rows. Not before the
+    /// schema has loaded.
+    pub fn export(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(schema) = self.inspector.read(cx).schema().cloned() else {
+            return;
+        };
+        let rows = self.table.read(cx).delegate();
+        let (filter, selection) = (rows.filter.clone(), rows.selection.ids());
+        DocumentExportDialog::open(
+            self.connection.clone(),
+            schema,
+            filter,
+            selection,
+            window,
+            cx,
+        );
+    }
+
     /// What the toolbar, the copy menu and the filter disable or do not show now, for
     /// [`gated`].
-    fn gates(&self, cx: &App) -> [(bool, &'static dyn Action); 15] {
+    fn gates(&self, cx: &App) -> [(bool, &'static dyn Action); 16] {
         let table = self.table.read(cx);
         let rows = table.delegate();
         let busy = self.deleting || rows.query_pending();
@@ -938,6 +957,7 @@ impl DocumentsView {
             (no_column, &NarrowerColumn),
             (no_column, &WiderColumn),
             (rows.found == 0, &SelectLoaded),
+            (!self.has_schema, &ExportDocuments),
         ]
     }
 
@@ -1052,6 +1072,19 @@ impl DocumentsView {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.import(None, window, cx);
                     })),
+            )
+            .child(
+                Button::new("documents.export")
+                    .ghost()
+                    .small()
+                    .disabled(!self.has_schema)
+                    .label(t!("documents.export").to_string())
+                    .children(Kbd::binding_for_action(
+                        &ExportDocuments,
+                        Some(COLLECTION),
+                        window,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.export(window, cx))),
             )
             .child(
                 Button::new("documents.new")

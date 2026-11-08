@@ -12,7 +12,7 @@ use tokio::io::{
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::{REPORT_PREVIEW_BYTES, REPORT_ROWS};
+use super::{ERROR_BYTES, REPORT_PREVIEW_BYTES, REPORT_ROWS};
 
 /// Starts a line of a saved failed file whose text is not the source's.
 pub const LOSSY_MARK: &str = "# changed or cut, fix it in the source:";
@@ -161,15 +161,17 @@ impl Report {
         }
     }
 
-    /// Adds a row to the spool and, while the table has room, to the table.
-    pub async fn add(&mut self, row: ReportRow) -> io::Result<()> {
+    /// Adds a row to the spool and, while the table has room, to the table, with `error`
+    /// cut to [`ERROR_BYTES`].
+    pub async fn add(&mut self, mut row: ReportRow) -> io::Result<()> {
+        row.error
+            .truncate(row.error.floor_char_boundary(ERROR_BYTES));
         let spool = self.spool.as_mut().ok_or_else(no_spool)?;
         let mut line = serde_json::to_vec(&row)?;
         line.push(b'\n');
         spool.writer.write_all(&line).await?;
         self.total += 1;
         if self.rows.len() < REPORT_ROWS {
-            let mut row = row;
             row.raw
                 .truncate(row.raw.floor_char_boundary(REPORT_PREVIEW_BYTES));
             self.rows.push(row);
@@ -267,6 +269,22 @@ mod tests {
     }
 
     fn is_send_sync<T: Send + Sync>() {}
+
+    #[tokio::test]
+    async fn error_is_capped_in_table_and_spool() {
+        let mut report = Report::new().await.unwrap();
+        let mut big = row(1, "x");
+        big.error = "é".repeat(ERROR_BYTES);
+        report.add(big).await.unwrap();
+        report.finish().await.unwrap();
+        assert!(report.rows()[0].error.len() <= ERROR_BYTES);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.jsonl");
+        report.save_report(&path).await.unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let saved: ReportRow = serde_json::from_str(text.trim()).unwrap();
+        assert!(saved.error.len() <= ERROR_BYTES);
+    }
 
     #[tokio::test]
     async fn spool_holds_more_than_the_preview() {

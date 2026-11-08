@@ -43,13 +43,14 @@ use super::super::overview::grouped;
 use super::super::request_detail::size;
 use super::super::root::RootView;
 use super::super::schema_dialog::SchemaDialog;
-use crate::actions::{IMPORT_DIALOG, PasteImport, PickImportFile, StartTransfer};
+use super::{infer_notes, note, note_owned};
+use crate::actions::{EditImportSchema, IMPORT_DIALOG, PasteImport, PickImportFile, StartTransfer};
 use crate::collections::CollectionsBackendGlobal;
 use crate::connection::{ConnectionState, long_error_text};
 use crate::jobs::JobsGlobal;
 use crate::runtime::Tokio;
 use crate::state::AppState;
-use crate::transfer::{TransferBackendGlobal, read_error_text};
+use crate::transfer::{FileStamp, TransferBackendGlobal, file_stamp, read_error_text};
 
 const WIDTH: f32 = 900.;
 /// A change settles for this long before the preview reruns.
@@ -83,7 +84,7 @@ const DIRTY: [DirtyValues; 4] = [
 ];
 
 /// What the select offers.
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Target {
     /// An existing collection.
     Collection(String),
@@ -120,39 +121,26 @@ struct NewTarget {
     task: Option<Task<()>>,
 }
 
-/// The sentence for a note of the inference.
-fn note_text(note: &InferNote) -> String {
-    match note {
-        InferNote::MaybeGeopoint(field) => {
-            t!("transfer.infer.note.maybe_geopoint", field = field)
-        }
-        InferNote::MixedTypes(field) => t!("transfer.infer.note.mixed", field = field),
-        InferNote::EmptyArray(field) => t!("transfer.infer.note.empty_array", field = field),
-        InferNote::OnlyNull(field) => t!("transfer.infer.note.only_null", field = field),
-        InferNote::SkippedName(field) => t!("transfer.infer.note.skipped", field = field),
-        InferNote::NonStringId => t!("transfer.infer.note.non_string_id"),
-    }
-    .to_string()
-}
-
 /// What will be read.
 #[derive(Clone)]
 struct Loaded {
     source: Source,
     /// The file name; `None` for the clipboard.
     name: Option<SharedString>,
+    /// The file as it was read; `None` for the clipboard.
+    stamp: Option<FileStamp>,
     /// The line above the options.
     shown: SharedString,
 }
 
 /// Why a path cannot be a source.
-enum Inspect {
+pub(crate) enum Inspect {
     NotAFile,
     Io(String),
 }
 
 /// The size and first bytes of `path`.
-fn inspect(path: &Path) -> Result<(u64, Vec<u8>), Inspect> {
+pub(crate) fn inspect(path: &Path) -> Result<(u64, Vec<u8>), Inspect> {
     let meta = std::fs::metadata(path).map_err(|e| Inspect::Io(e.to_string()))?;
     if !meta.is_file() {
         return Err(Inspect::NotAFile);
@@ -163,6 +151,14 @@ fn inspect(path: &Path) -> Result<(u64, Vec<u8>), Inspect> {
         .read_to_end(&mut head)
         .map_err(|e| Inspect::Io(e.to_string()))?;
     Ok((meta.len(), head))
+}
+
+/// The line above the options for a file.
+fn file_shown(name: Option<&SharedString>, bytes: u64) -> SharedString {
+    let name = name.cloned().unwrap_or_default();
+    t!("transfer.import.file", name = name, size = size(bytes))
+        .to_string()
+        .into()
 }
 
 /// `n` documents per batch, if `text` is a size the import takes.
@@ -181,11 +177,15 @@ pub struct DocumentImportDialog {
     source: Option<Loaded>,
     source_error: Option<SharedString>,
     source_task: Option<Task<()>>,
+    /// Start found the file changed, and the estimate is new.
+    file_changed: bool,
+    /// Compares the file before Start goes on.
+    check_task: Option<Task<()>>,
     format: Format,
     csv: CsvOptions,
     target: Entity<SelectState<Vec<TargetItem>>>,
-    /// The names `target` holds.
-    offered: Vec<String>,
+    /// The names `target` holds; `None` until it is filled.
+    offered: Option<Vec<String>>,
     /// The chosen collection.
     collection: Option<String>,
     /// Set while "New collection…" is chosen, instead of `collection`.
@@ -302,10 +302,12 @@ impl DocumentImportDialog {
             source: None,
             source_error: None,
             source_task: None,
+            file_changed: false,
+            check_task: None,
             format: Format::Jsonl,
             csv: CsvOptions::default(),
             target: select,
-            offered: Vec::new(),
+            offered: None,
             collection: target,
             new: None,
             new_name,
@@ -319,24 +321,22 @@ impl DocumentImportDialog {
             preview_task: None,
             _subscriptions: subscriptions,
         };
-        let loaded = this
-            .connection
-            .read(cx)
-            .collection_cache
-            .collections
-            .is_some();
-        if loaded {
-            this.collections_changed(window, cx);
-        } else {
+        if !this.list_loaded(cx) {
             this.connection
                 .update(cx, |c, cx| c.load_collection_list(cx));
         }
+        this.collections_changed(window, cx);
         match source {
             Some(Source::File(path)) => this.read_file(path, cx),
             Some(Source::Bytes(bytes)) => this.read_bytes(bytes, cx),
             None => {}
         }
         this
+    }
+
+    fn list_loaded(&self, cx: &App) -> bool {
+        let cache = &self.connection.read(cx).collection_cache;
+        cache.collections.is_some()
     }
 
     /// The names of the connection's collections.
@@ -346,17 +346,22 @@ impl DocumentImportDialog {
         all.map(|c| c.name.clone()).collect()
     }
 
-    /// Fills the select from the list, which may arrive after the dialog opened.
+    /// Fills the select from the list, which may arrive after the dialog opened. The first
+    /// call fills it whatever the list holds: "New collection…" needs no list.
     fn collections_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let names = self.names(cx);
-        // The connection also notifies for changes that leave the list as it was.
-        if names == self.offered {
+        let loaded = self.list_loaded(cx);
+        // The connection also notifies for changes that leave the list as it was, and a
+        // reload drops the list for a moment.
+        if (self.offered.as_ref()).is_some_and(|offered| !loaded || *offered == names) {
             cx.notify();
             return;
         }
-        self.offered = names.clone();
+        self.offered = Some(names.clone());
         // A collection that went away is no target; the list keeps it out of the job too.
-        self.collection = self.collection.take().filter(|name| names.contains(name));
+        if loaded {
+            self.collection = self.collection.take().filter(|name| names.contains(name));
+        }
         let items: Vec<_> = names
             .iter()
             .cloned()
@@ -405,6 +410,11 @@ impl DocumentImportDialog {
             select.set_selected_value(&Target::New, window, cx);
         });
         self.infer(cx);
+    }
+
+    /// What the select shows as chosen.
+    pub fn chosen(&self, cx: &App) -> Option<Target> {
+        self.target.read(cx).selected_value().cloned()
     }
 
     /// The name typed for the new collection.
@@ -582,27 +592,26 @@ impl DocumentImportDialog {
     pub fn read_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let tokio = cx.global::<Tokio>().0.clone();
         self.source_error = None;
+        self.file_changed = false;
         let shown = path.clone();
-        let read = tokio.spawn_blocking(move || inspect(&shown));
+        let read = tokio.spawn_blocking(move || {
+            let stamp = file_stamp(&shown).ok();
+            inspect(&shown).map(|(bytes, head)| (bytes, head, stamp))
+        });
         self.source_task = Some(cx.spawn(async move |this, cx| {
             let read = read.await;
             this.update(cx, |this, cx| match read {
-                Ok(Ok((bytes, head))) => {
+                Ok(Ok((bytes, head, stamp))) => {
                     let name: Option<SharedString> = path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned().into());
                     let (format, csv) = sniff(Some(&path), &head);
                     (this.format, this.csv) = (format, csv);
                     this.source = Some(Loaded {
-                        shown: t!(
-                            "transfer.import.file",
-                            name = name.clone().unwrap_or_default(),
-                            size = size(bytes)
-                        )
-                        .to_string()
-                        .into(),
+                        shown: file_shown(name.as_ref(), bytes),
                         source: Source::File(path),
                         name,
+                        stamp,
                     });
                     this.refresh(cx);
                 }
@@ -624,13 +633,17 @@ impl DocumentImportDialog {
     fn read_bytes(&mut self, bytes: Arc<[u8]>, cx: &mut Context<Self>) {
         let (format, csv) = sniff(None, &bytes[..bytes.len().min(HEAD_BYTES)]);
         (self.format, self.csv) = (format, csv);
+        // A file still being read must not replace this.
+        self.source_task = None;
         self.source_error = None;
+        self.file_changed = false;
         self.source = Some(Loaded {
             shown: t!("transfer.import.clipboard", size = size(bytes.len() as u64))
                 .to_string()
                 .into(),
             source: Source::Bytes(bytes),
             name: None,
+            stamp: None,
         });
         self.refresh(cx);
     }
@@ -713,8 +726,49 @@ impl DocumentImportDialog {
         })
     }
 
-    /// Validates, asks to unlock a read-only connection, confirms, then runs the job.
+    /// Compares a file with what was read off the GPUI thread, then goes on. A file that
+    /// changed stays in the dialog with a new estimate, so the danger level follows it.
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A second create would drop the first in flight.
+        if self.creating || self.job(cx).is_none() {
+            return;
+        }
+        self.file_changed = false;
+        cx.notify();
+        let file = self
+            .source
+            .as_ref()
+            .and_then(|loaded| match &loaded.source {
+                Source::File(path) => Some((path.clone(), loaded.stamp)),
+                Source::Bytes(_) => None,
+            });
+        let Some((path, read)) = file else {
+            return self.unlock_and_confirm(window, cx);
+        };
+        let check = cx.global::<TransferBackendGlobal>().0.file_stamp(path);
+        self.check_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let now = check.await;
+            this.update_in(cx, |this, window, cx| match now {
+                Ok(now) if Some(now) == read => this.unlock_and_confirm(window, cx),
+                Ok(now) => this.source_stale(now, cx),
+                Err(e) => this.fail_source(read_error_text(&e), cx),
+            })
+            .ok();
+        }));
+    }
+
+    /// Takes the file as it is now and estimates it again. A draft keeps the user's edits.
+    fn source_stale(&mut self, now: FileStamp, cx: &mut Context<Self>) {
+        if let Some(loaded) = &mut self.source {
+            loaded.stamp = Some(now);
+            loaded.shown = file_shown(loaded.name.as_ref(), now.0);
+        }
+        self.file_changed = true;
+        self.schedule_preview(cx);
+    }
+
+    /// Validates, asks to unlock a read-only connection, then confirms.
+    fn unlock_and_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(job) = self.job(cx) else {
             return;
         };
@@ -849,7 +903,11 @@ impl DocumentImportDialog {
             this.update_in(cx, |this, window, cx| {
                 this.creating = false;
                 match result {
-                    Ok(_) => this.run(job, window, cx),
+                    Ok(_) => {
+                        this.connection
+                            .update(cx, |c, cx| c.invalidate_collections(cx));
+                        this.run(job, window, cx);
+                    }
                     Err(e) => {
                         let detail = long_error_text(&e, &profile);
                         let text = t!("transfer.import.create_failed", detail = detail);
@@ -968,7 +1026,7 @@ impl DocumentImportDialog {
             })
     }
 
-    fn render_options(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_options(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         // Not a `ButtonGroup`: it overwrites the `disabled` of its children.
         let actions = h_flex().gap_1().children(ACTIONS.into_iter().map(|action| {
             let name = action.as_str();
@@ -1044,6 +1102,11 @@ impl DocumentImportDialog {
                                 .small()
                                 .disabled(self.new.as_ref().is_none_or(|n| n.draft.is_none()))
                                 .label(t!("transfer.import.edit_schema").to_string())
+                                .children(Kbd::binding_for_action(
+                                    &EditImportSchema,
+                                    Some(IMPORT_DIALOG),
+                                    window,
+                                ))
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.edit_schema(window, cx)),
                                 ),
@@ -1114,32 +1177,10 @@ impl DocumentImportDialog {
                 .child(note("transfer.infer.fields", fields, muted))
                 .child(note("transfer.infer.sampled", sampled, muted));
         }
-        for (n, item) in new.notes.iter().enumerate() {
-            let id = format!("transfer.infer.note.{n}");
-            let row = h_flex().gap_2().items_center().child(note_owned(
-                id,
-                note_text(item),
-                cx.theme().warning,
-            ));
-            let row = match item {
-                InferNote::MaybeGeopoint(field) => {
-                    let field = field.clone();
-                    row.child(
-                        Button::new(SharedString::from(format!(
-                            "transfer.infer.use_geopoint.{field}"
-                        )))
-                        .ghost()
-                        .xsmall()
-                        .label(t!("transfer.infer.use_geopoint").to_string())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.use_geopoint(&field, cx);
-                        })),
-                    )
-                }
-                _ => row,
-            };
-            lines = lines.child(row);
-        }
+        let notes = infer_notes(&new.notes, cx, |this, field, _, cx| {
+            this.use_geopoint(field, cx);
+        });
+        lines = lines.children(notes);
         let errors = self.draft_errors();
         if !errors.is_empty() {
             lines = lines.child(note(
@@ -1250,31 +1291,17 @@ fn field_label(key: &'static str) -> impl IntoElement {
         .child(t!(key).to_string())
 }
 
-fn note(id: &'static str, text: String, color: gpui_kit::Hsla) -> impl IntoElement {
-    note_owned(id.to_string(), text, color)
-}
-
-fn note_owned(id: String, text: String, color: gpui_kit::Hsla) -> impl IntoElement {
-    let text = SharedString::from(text);
-    div()
-        .id(SharedString::from(id))
-        .test_support()
-        .aria_label(text.clone())
-        .text_xs()
-        .text_color(color)
-        .child(text)
-}
-
 impl Render for DocumentImportDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locked = self.connection.read(cx).writes_locked();
         let can_start = self.job(cx).is_some();
         let source = self.render_source(window, cx);
         let format = self.render_format(cx);
-        let options = self.render_options(cx);
+        let options = self.render_options(window, cx);
         let preview = self.render_preview(cx);
+        let list_error = self.connection.read(cx).collection_cache.error.clone();
         let theme = cx.theme();
-        let (danger, muted) = (theme.danger, theme.muted_foreground);
+        let (danger, muted, warning) = (theme.danger, theme.muted_foreground, theme.warning);
         v_flex()
             .key_context(IMPORT_DIALOG)
             .track_focus(&self.focus_handle)
@@ -1288,6 +1315,9 @@ impl Render for DocumentImportDialog {
                 this.choose_file(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PasteImport, _, cx| this.paste(cx)))
+            .on_action(cx.listener(|this, _: &EditImportSchema, window, cx| {
+                this.edit_schema(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &StartTransfer, window, cx| this.start(window, cx)))
             .child(source)
             .children(
@@ -1295,7 +1325,15 @@ impl Render for DocumentImportDialog {
                     .clone()
                     .map(|e| note("transfer.import.source_error", e.to_string(), danger)),
             )
+            .when(self.file_changed, |el| {
+                let text = t!("transfer.import.file_changed").to_string();
+                el.child(note("transfer.import.file_changed", text, warning))
+            })
             .child(format)
+            .children(list_error.map(|detail| {
+                let text = t!("transfer.import.list_error", detail = detail).to_string();
+                note("transfer.import.list_error", text, danger)
+            }))
             .child(options)
             .children(preview)
             .children(

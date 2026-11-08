@@ -329,7 +329,7 @@ pub trait TransferBackend: Send + Sync {
 
 ### 7.2 Jobs
 
-`crates/tessera-app/src/jobs.rs`. `Jobs` is an entity in the global `JobsGlobal`, installed by `jobs::init(cx)` in `run` and in the test setup. It is not a field of a view or of `ConnectionState`, so closing a tab, closing a dialog, or disconnecting never drops a job (D48). It emits `RunningChanged(usize)` when the running count changes and `JobFinished(JobId)`.
+`crates/tessera-app/src/jobs.rs`. `Jobs` is an entity in the global `JobsGlobal`, installed by `jobs::init(cx)` in `run` and in the test setup. It is not a field of a view or of `ConnectionState`, so closing a tab, closing a dialog, or disconnecting never drops a job (D48). A disconnect does lock the client the job shares: a write job on an unlocked read-only connection stops at its next batch as locked by disconnect. It emits `RunningChanged(usize)` when the running count changes and `JobFinished(JobId)`.
 
 ```rust
 pub struct Job { pub id: JobId, pub kind: JobKind, pub connection: Uuid, pub connection_name: SharedString,
@@ -537,7 +537,7 @@ Recorded in `docs/spec.md` together with this design: §4 (the crates actually u
 | D45 | One streamed `POST` or one `POST` per batch? | One per batch, sent in sequence. The cancel AC speaks of a batch round trip, an abort of a streamed body showed nothing stored after 20 MB of 64 MB, a failed batch stays one batch, and the answer stays bound. A second press drops the request in flight, and its documents count as unconfirmed |
 | D46 | Import defaults | `dirty_values` is `coerce_or_reject`, always sent, because the server's own default rejects on 30.0 and 30.2. `return_id=true` always, so the report has ids, and no option for it. `return_doc` never: the client holds what it sent |
 | D47 | Where the error report lives | The first 1,000 rows in memory, all rows in an unnamed private temp file that disappears with the job or process. A million failures must not grow the app. §9 concerns keys and the log file; this holds the user's own documents for as long as the job row exists |
-| D48 | Who owns a job? | A global `Jobs` entity. Closing a dialog or tab or disconnecting does not stop it. `Lock again` stops an import at its next batch. Quit stops all jobs; there is no veto (D31) |
+| D48 | Who owns a job? | A global `Jobs` entity. Closing a dialog or tab or disconnecting does not stop it, except that a disconnect locks a read-only connection again (§7.1), which stops a write job on it at its next batch as locked by disconnect, with the line it stopped at. `Lock again` stops an import at its next batch. Quit stops all jobs; there is no veto (D31) |
 | D49 | Confirmation for imports | `create` or a new collection: none, or `Confirm` on prod. `upsert`, `update`, `emplace`: `danger_level` on the estimated count, so typing the name above 1,000 or on prod. Export needs none: it is a read |
 | D50 | Inference rules | Integers are `int64`, since a sample cannot prove `int32`. Mixed types are `string` with a note. A 2-number array in lat/lng range stays numeric with a "Use geopoint" suggestion. Keys Typesense would misread (`*`, `id`) make no field |
 | D51 | CSV conversion | Cells follow the target's types. Arrays and objects are JSON in the cell, the same form CSV export writes. An empty cell leaves the key out. `a.b` headers nest. The sync `csv` crate, not `csv-async`, because the JSON array reader is sync anyway |

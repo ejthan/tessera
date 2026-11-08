@@ -2,8 +2,9 @@
 
 //! Import and export: the backend seam the dialogs and jobs go through.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use gpui_kit::Global;
 use rust_i18n::t;
@@ -19,6 +20,15 @@ use tokio::runtime::Handle;
 use tokio::sync::watch;
 
 use crate::collections::{BoxFuture, TokioBackend};
+
+/// Size and mtime, which tell that a file changed since it was read.
+pub type FileStamp = (u64, Option<SystemTime>);
+
+/// The stamp of `path` now. Blocks.
+pub fn file_stamp(path: &Path) -> std::io::Result<FileStamp> {
+    let meta = std::fs::metadata(path)?;
+    Ok((meta.len(), meta.modified().ok()))
+}
 
 /// What the dialogs and jobs do with a file and the server. The app installs
 /// [`tokio_backend`]; UI tests install fakes, because GPUI's test executor does not wait for
@@ -39,6 +49,9 @@ pub trait TransferBackend: Send + Sync {
         source: Source,
         options: ReadOptions,
     ) -> BoxFuture<Result<InferredSchema, ReadError>>;
+
+    /// The stamp of `path` now.
+    fn file_stamp(&self, path: PathBuf) -> BoxFuture<Result<FileStamp, ReadError>>;
 
     /// Runs an import to its end.
     fn import(
@@ -73,6 +86,14 @@ pub struct TransferBackendGlobal(pub Arc<dyn TransferBackend>);
 impl Global for TransferBackendGlobal {}
 
 impl TransferBackend for TokioBackend {
+    fn file_stamp(&self, path: PathBuf) -> BoxFuture<Result<FileStamp, ReadError>> {
+        self.run(async move {
+            let read = tokio::task::spawn_blocking(move || file_stamp(&path));
+            let stamp = read.await.map_err(|e| ReadError::Io(e.to_string()))?;
+            stamp.map_err(|e| ReadError::Io(e.to_string()))
+        })
+    }
+
     fn preview(
         &self,
         source: Source,
