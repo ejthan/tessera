@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::collections::BoxFuture;
 use crate::connection::{ConnectionState, long_error_text};
 use crate::transfer::{TransferBackendGlobal, archive_error_text, read_error_text};
+use crate::ui_budget::span;
 
 /// The shortest time between two progress updates: at most 30 a second.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(34);
@@ -536,7 +537,10 @@ impl Jobs {
         job.throttle = Some(cx.spawn(async move |this, cx| {
             while progress.changed().await.is_ok() {
                 let snapshot = live(progress.borrow_and_update().clone());
-                let shown = this.update(cx, |jobs, cx| jobs.set_live(id, snapshot, cx));
+                let shown = this.update(cx, |jobs, cx| {
+                    let _budget = span("jobs.progress");
+                    jobs.set_live(id, snapshot, cx)
+                });
                 if shown.is_err() {
                     break;
                 }

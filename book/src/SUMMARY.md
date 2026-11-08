@@ -1,0 +1,23 @@
+# Summary
+
+[Introduction](index.md)
+
+- [Install](install.md)
+- [Getting started](getting-started.md)
+- [Connections](connections.md)
+- [Collections and schema](collections.md)
+- [Documents](documents.md)
+- [Search](search.md)
+- [Import and export](import-export.md)
+- [Backup and restore](backup-restore.md)
+- [Relevance resources](relevance.md)
+- [API keys](keys.md)
+- [Analytics and AI](analytics-ai.md)
+- [Operations](operations.md)
+- [Raw console](console.md)
+- [Request log](request-log.md)
+- [Shortcuts](shortcuts.md)
+- [Command-line flags](cli.md)
+- [Settings](settings.md)
+- [Security](security.md)
+- [Troubleshooting](troubleshooting.md)

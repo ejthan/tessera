@@ -8,6 +8,8 @@ use std::sync::Mutex;
 use secrecy::{ExposeSecret, SecretString};
 use uuid::Uuid;
 
+use crate::ui_thread::assert_off;
+
 /// Keychain service name under which all keys are stored.
 const SERVICE: &str = "tessera";
 
@@ -65,6 +67,7 @@ impl From<keyring::Error> for SecretError {
 
 impl SecretStore for KeyringStore {
     fn get(&self, id: Uuid) -> Result<Option<SecretString>, SecretError> {
+        assert_off("KeyringStore::get");
         match Self::entry(id)?.get_password() {
             Ok(p) => Ok(Some(SecretString::from(p))),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -73,11 +76,13 @@ impl SecretStore for KeyringStore {
     }
 
     fn set(&self, id: Uuid, key: &SecretString) -> Result<(), SecretError> {
+        assert_off("KeyringStore::set");
         Self::entry(id)?.set_password(key.expose_secret())?;
         Ok(())
     }
 
     fn delete(&self, id: Uuid) -> Result<(), SecretError> {
+        assert_off("KeyringStore::delete");
         match Self::entry(id)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(e.into()),

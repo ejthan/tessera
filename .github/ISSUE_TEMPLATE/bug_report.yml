@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in Tessera does not work as it should.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste API keys.** Check logs, screenshots and `curl` lines first: Tessera masks keys in its own logs, but a value you copied by hand may hold one.
+        A security problem belongs in a private report, not here. See `SECURITY.md`.
+  - type: input
+    id: tessera-version
+    attributes:
+      label: Tessera version
+      description: Settings → About.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 15.4, Windows 11, Ubuntu 24.04"
+    validations:
+      required: true
+  - type: input
+    id: typesense-version
+    attributes:
+      label: Typesense version
+      description: The status bar shows it once connected.
+      placeholder: "30.2"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Connect to ...
+        2. Open ...
+        3. Press ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Optional. The log folder is listed in Settings → Storage. Remove anything private first.
+      render: text

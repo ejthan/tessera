@@ -3,7 +3,7 @@ members = ["crates/*", "xtask"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 publish = false
@@ -26,6 +26,7 @@ jiff = "=0.2.39"
 keyring = "=4.2.0"
 lsp-types = "=0.97.0"
 percent-encoding = "=2.3.2"
+png = "=0.18.1"
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json", "http2", "charset", "stream"] }
 rust-i18n = "=4.2.4"
 # Only for telling TLS failures apart; must stay the version reqwest uses.
@@ -59,12 +60,80 @@ unwrap_used = "deny"
 
 [profile.release]
 strip = true
-# NF5 (< 40 MB): without these the Linux binary is 48 MB. Fat LTO with one
-# codegen unit cut the macOS binary by 20 % (22.8 → 18.2 MB).
+# NF5 (< 40 MiB, 41,943,040 bytes): fat LTO with one codegen unit cut the macOS
+# binary by 20 % (22.8 to 18.2 MB).
 lto = "fat"
 codegen-units = 1
-# The request log and dock pushed Linux to 43.0 MB. Without unwind tables macOS
-# went from 21.4 to 17.7 MB. A panic already ended the app (GPUI main thread,
-# tokio tasks re-panic in the connector); only tests catch unwinds, and they
-# build with the test profile.
+# Without unwind tables macOS went from 21.4 to 17.7 MB. A panic already ended
+# the app (GPUI main thread, tokio tasks re-panic in the connector); only tests
+# catch unwinds, and they build with the test profile.
 panic = "abort"
+
+# NF5, D115: at opt-level 3 Linux was 52.7 MB on x86_64 and 45.3 MB on aarch64,
+# nearly all of it .text, spread over tens of thousands of functions. See
+# .cargo/config.toml for the linker half.
+[profile.release.package]
+# Everything not named here is off the hot paths.
+"*" = { opt-level = "z" }
+# Most code here is generics instantiated in this crate, so its level does the
+# most. It also sets the level of the LTO pass over the whole binary, the render
+# crates below included. Cargo drops `strip` to "debuginfo" for a package with
+# an override unless the override repeats it.
+tessera-app = { opt-level = "s", strip = true }
+tessera-widgets = { opt-level = "s" }
+gpui-base = { opt-level = "s" }
+gpui-component = { opt-level = "s" }
+# NF2: render, layout, text and GPU.
+gpui-pre = { opt-level = 3 }
+gpui-pre-collections = { opt-level = 3 }
+gpui-pre-linux = { opt-level = 3 }
+gpui-pre-macos = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+gpui-pre-refineable = { opt-level = 3 }
+gpui-pre-scheduler = { opt-level = 3 }
+gpui-pre-shared-string = { opt-level = 3 }
+gpui-pre-sum-tree = { opt-level = 3 }
+gpui-pre-util = { opt-level = 3 }
+gpui-pre-wgpu = { opt-level = 3 }
+gpui-pre-windows = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ash = { opt-level = 3 }
+gpu-allocator = { opt-level = 3 }
+wgpu = { opt-level = 3 }
+wgpu-core = { opt-level = 3 }
+wgpu-hal = { opt-level = 3 }
+wgpu-types = { opt-level = 3 }
+cosmic-text = { opt-level = 3 }
+font-types = { opt-level = 3 }
+harfrust = { opt-level = 3 }
+read-fonts = { opt-level = 3 }
+skrifa = { opt-level = 3 }
+swash = { opt-level = 3 }
+zeno = { opt-level = 3 }
+# NF3: network, TLS, JSON, CSV, zstd.
+aws-lc-rs = { opt-level = 3 }
+aws-lc-sys = { opt-level = 3 }
+bytes = { opt-level = 3 }
+csv = { opt-level = 3 }
+csv-core = { opt-level = 3 }
+futures-core = { opt-level = 3 }
+futures-util = { opt-level = 3 }
+h2 = { opt-level = 3 }
+http = { opt-level = 3 }
+http-body = { opt-level = 3 }
+hyper = { opt-level = 3 }
+hyper-rustls = { opt-level = 3 }
+hyper-util = { opt-level = 3 }
+memchr = { opt-level = 3 }
+reqwest = { opt-level = 3 }
+rustls = { opt-level = 3 }
+rustls-webpki = { opt-level = 3 }
+serde = { opt-level = 3 }
+serde_core = { opt-level = 3 }
+serde_json = { opt-level = 3 }
+tokio = { opt-level = 3 }
+tokio-rustls = { opt-level = 3 }
+tokio-util = { opt-level = 3 }
+zstd = { opt-level = 3 }
+zstd-safe = { opt-level = 3 }
+zstd-sys = { opt-level = 3 }

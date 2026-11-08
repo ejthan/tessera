@@ -6,6 +6,41 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# Paths are relative to this crate: cargo-packager changes into it before reading them.
+[package.metadata.packager]
+product-name = "Tessera"
+identifier = "org.tessera.Tessera"
+description = "Native desktop client for Typesense."
+homepage = "https://github.com/ejthan/tessera"
+# The .deb writes this as its Maintainer line, which must not stay empty.
+authors = ["Tessera contributors"]
+category = "DeveloperTool"
+before-packaging-command = "cargo build --release --locked -p tessera-app"
+icons = [
+    "../../assets/icons/app/tessera.icns",
+    "../../assets/icons/app/tessera.ico",
+    "../../assets/icons/app/*.png",
+]
+resources = ["../../LICENSE", "../../THIRD_PARTY_NOTICES.md"]
+
+[package.metadata.packager.macos]
+minimum-system-version = "13.0"
+signing-identity = "-"
+
+[package.metadata.packager.deb]
+depends = ["libfontconfig1", "libxkbcommon0", "libxkbcommon-x11-0", "libxcb1", "libvulkan1"]
+
+# Source paths are from the workspace root, the first place cargo-generate-rpm looks.
+[package.metadata.generate-rpm]
+name = "tessera"
+assets = [
+    { source = "target/release/tessera", dest = "/usr/bin/tessera", mode = "755" },
+    { source = "packaging/linux/tessera.desktop", dest = "/usr/share/applications/", mode = "644" },
+    { source = "assets/icons/app/256.png", dest = "/usr/share/icons/hicolor/256x256/apps/tessera.png", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/doc/tessera/", mode = "644", doc = true },
+    { source = "THIRD_PARTY_NOTICES.md", dest = "/usr/share/doc/tessera/", mode = "644", doc = true },
+]
+
 [[bin]]
 name = "tessera"
 path = "src/main.rs"

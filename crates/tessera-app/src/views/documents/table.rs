@@ -31,6 +31,7 @@ use super::copy;
 use super::selection::Selection;
 use crate::connection::{ConnectionState, error_text};
 use crate::documents::{DocumentsBackendGlobal, PageResult};
+use crate::ui_budget::span;
 
 /// How often a scroll may start fetches; a running timer is left alone, so continuous
 /// scrolling still fetches.
@@ -280,6 +281,7 @@ impl DocRows {
         result: Result<PageResult, Error>,
         cx: &mut Context<TableState<Self>>,
     ) -> bool {
+        let _budget = span("documents.page");
         if generation != self.generation {
             return false;
         }

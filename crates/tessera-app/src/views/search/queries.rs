@@ -260,12 +260,20 @@ impl Render for NameDialog {
         v_flex()
             .gap_2()
             .child(t!("search.save.name").to_string())
-            .child(Input::new(&self.name).id("search.save.name"))
+            .child(
+                Input::new(&self.name)
+                    .id("search.save.name")
+                    .aria_label(t!("search.save.name").to_string()),
+            )
             .children(self.tags.as_ref().map(|tags| {
                 v_flex()
                     .gap_2()
                     .child(t!("search.save.tags").to_string())
-                    .child(Input::new(tags).id("search.save.tags"))
+                    .child(
+                        Input::new(tags)
+                            .id("search.save.tags")
+                            .aria_label(t!("search.save.tags").to_string()),
+                    )
             }))
             .children(self.error.clone().map(|error| {
                 div()
@@ -998,6 +1006,7 @@ impl SearchWorkbench {
             .child(
                 Input::new(&self.queries.filter)
                     .id("search.queries.filter")
+                    .aria_label(t!("search.queries.filter").to_string())
                     .small(),
             )
             .child(self.list_rows(kind, cx))

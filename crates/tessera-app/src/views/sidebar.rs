@@ -23,6 +23,7 @@ use uuid::Uuid;
 use super::connect_dialog::ConnectDialog;
 use super::env_badge;
 use super::import_dialog::ImportDialog;
+use super::root::RootView;
 use crate::actions::{
     ConnectSelected, DeleteConnection, DisconnectSelected, EditConnection, ExportProfiles,
     ImportProfiles, NewConnection, OpenAi, OpenAliases, OpenAnalytics, OpenBackup, OpenConsoleTab,
@@ -147,8 +148,9 @@ impl Sidebar {
     }
 
     /// Saved profiles in order, then the temporary and other unsaved connections.
-    fn entries(&self, cx: &Context<Self>) -> Vec<Entry> {
+    fn entries(&self, window: &Window, cx: &Context<Self>) -> Vec<Entry> {
         let state = self.state.read(cx);
+        let active = RootView::window_connection(window, cx).map(|c| c.read(cx).profile.id);
         let mut profiles: Vec<(Profile, bool)> =
             state.profiles.iter().map(|p| (p.clone(), true)).collect();
         let unsaved = state
@@ -171,7 +173,7 @@ impl Sidebar {
                         .temporary
                         .as_ref()
                         .is_some_and(|(p, _)| p.id == profile.id),
-                    selected: state.selected == Some(profile.id),
+                    selected: active == Some(profile.id),
                     connecting: conn.is_some_and(|c| c.connecting),
                     connected: conn.is_some_and(|c| c.connected.is_some()),
                     supported: conn
@@ -617,7 +619,7 @@ fn resource_shortcut(kind: ResourceKind, window: &Window) -> Option<Kbd> {
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let entries = self.entries(cx);
+        let entries = self.entries(window, cx);
         self.focus
             .retain(|id, _| entries.iter().any(|e| e.profile.id == *id));
         self.overview_focus

@@ -30,6 +30,8 @@ Every new Typesense endpoint gets an integration test against the dev server bef
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace
+cargo xtask i18n
+cargo xtask governance
 ```
 
 Integration tests need a running Typesense server:

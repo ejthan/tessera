@@ -32,6 +32,7 @@ use super::env_badge;
 use super::request_detail::{self, Detail};
 use crate::actions::{CopyAsCurl, REQUEST_LOG, ShowFullBody, gated};
 use crate::state::AppState;
+use crate::ui_budget::span;
 
 /// Part of the window a full body's dialog takes.
 const FULL_VIEW_SHARE: f32 = 0.8;
@@ -382,6 +383,7 @@ impl RequestLogPanel {
             .update(cx, |t, _| std::mem::take(&mut t.delegate_mut().rows))
             .into_iter()
             .peekable();
+        let budget = span("log.filter");
         // Both lists are ordered by id, so a row built earlier is found by walking along.
         let rows: Vec<Row> = self
             .state
@@ -395,6 +397,7 @@ impl RequestLogPanel {
                     .unwrap_or_else(|| Row::new(e))
             })
             .collect();
+        drop(budget);
         let selected = self
             .selected
             .and_then(|id| rows.iter().position(|r| r.id == id));
@@ -453,6 +456,17 @@ impl RequestLogPanel {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// Shows entry `id` whatever hid it: the filter goes back to its default, because any
+    /// other could leave the entry out.
+    pub fn show_entry(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.filter = Filter::default();
+        self.refresh(cx);
+        let rows = &self.table.read(cx).delegate().rows;
+        if let Some(ix) = rows.iter().position(|r| r.id == id) {
+            self.table.update(cx, |t, cx| t.set_selected_row(ix, cx));
+        }
     }
 
     /// The dialog's view of a full body, while the dialog is open.

@@ -18,7 +18,7 @@ use gpui_kit::{
 use rust_i18n::t;
 
 use super::collections_list::CollectionsList;
-use super::connect_dialog::ConnectDialog;
+use super::connect_dialog::{ConnectDialog, local_profile};
 use super::console::ConsoleView;
 use super::documents::DocumentsView;
 use super::import_dialog::ImportDialog;
@@ -414,6 +414,11 @@ impl CollectionPanel {
     /// The connection this tab shows.
     pub fn connection(&self) -> &Entity<ConnectionState> {
         &self.connection
+    }
+
+    /// Whether the inspector's text differs from the document, shown yet or not.
+    pub fn is_dirty(&self, cx: &App) -> bool {
+        self.documents.read(cx).inspector_dirty(cx)
     }
 
     /// The collection this tab shows.
@@ -1132,6 +1137,7 @@ impl Render for WelcomePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let add_state = self.state.clone();
         let import_state = self.state.clone();
+        let local_state = self.state.clone();
         let this = cx.entity();
         div()
             .track_focus(&self.focus_handle)
@@ -1142,6 +1148,16 @@ impl Render for WelcomePanel {
                 move |_, window, cx| ConnectDialog::open_new(add_state.clone(), None, window, cx),
                 move |_, window, cx| ImportDialog::open(import_state.clone(), window, cx),
                 move |_, _, cx| this.update(cx, |view, cx| view.copy_docker_command(cx)),
+                move |_, window, cx| {
+                    // A second press edits the first one, so Save makes no second `local`.
+                    let state = local_state.clone();
+                    let local = local_profile();
+                    let saved = state.read(cx).profiles.iter();
+                    match saved.filter(|p| p.name == local.name).map(|p| p.id).next() {
+                        Some(id) => ConnectDialog::open_edit(state, id, window, cx),
+                        None => ConnectDialog::open_new(state, Some((local, None)), window, cx),
+                    }
+                },
                 window,
                 cx,
             ))

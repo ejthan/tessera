@@ -809,7 +809,6 @@ async fn save_anyway_closes_the_old_connection_of_an_edited_profile(cx: &mut Tes
             s.connections.is_empty(),
             "the old staging connection is closed"
         );
-        assert_eq!(s.selected, None);
     });
     // Sidebar and window agree: the profile is prod, and no stale staging connection shows.
     cx.update_window(handle.into(), |_, window, cx| {

@@ -1,2 +1,7 @@
 [alias]
 xtask = "run -p xtask --"
+
+# NF5, D115: packed relative relocations cut .rela.dyn by 2 MB. They need glibc
+# 2.36, and a binary built on Ubuntu 24.04 already needs 2.39.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,-z,pack-relative-relocs"]

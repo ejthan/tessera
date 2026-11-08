@@ -113,6 +113,11 @@ fn toggle_log(cx: &mut TestAppContext, handle: WindowHandle<Root>) {
     .unwrap();
 }
 
+#[cfg(target_os = "macos")]
+const SHOW_LAST_FAILURE: &str = "alt-cmd-r";
+#[cfg(not(target_os = "macos"))]
+const SHOW_LAST_FAILURE: &str = "ctrl-alt-r";
+
 fn row(id: u64) -> String {
     format!("log.row.{id}")
 }
@@ -562,6 +567,113 @@ async fn connection_column_only_with_two_connections(cx: &mut TestAppContext) {
     assert!(!row_label(cx, handle, 5).contains("staging-eu"));
 }
 
+/// A failed GET of `profile`, which the Writes filter hides.
+fn failure(id: u64, profile: &Profile) -> LogEntry {
+    let mut e = entry(event(id, Method::GET, "/nope", Some(404), Origin::User));
+    e.connection = profile.id;
+    e.connection_name = profile.name.as_str().into();
+    e
+}
+
+/// Two profiles, both connected, the first shown; the log is closed.
+async fn connected_pair(
+    cx: &mut TestAppContext,
+) -> (
+    WindowHandle<Root>,
+    Entity<AppState>,
+    Profile,
+    Profile,
+    tokio::runtime::Runtime,
+) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let (staging, prod, secrets) = two_profiles();
+    let (handle, state, rt) = open_app(cx, vec![staging.clone(), prod.clone()], secrets);
+    state.update(cx, |s, cx| s.connect(prod.id, None, cx));
+    wait_for_label(cx, handle, "status.text".into(), "prod-ch").await;
+    state.update(cx, |s, cx| s.connect(staging.id, None, cx));
+    wait_for_label(cx, handle, "status.text".into(), "staging-eu").await;
+    (handle, state, staging, prod, rt)
+}
+
+#[gpui_kit::test]
+async fn last_failure_shows_for_its_own_connection_alone(cx: &mut TestAppContext) {
+    let (handle, state, staging, prod, _rt) = connected_pair(cx).await;
+    let shown = |cx: &mut TestAppContext| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find("status.last_failure").is_some()
+        })
+        .unwrap()
+    };
+    assert!(!shown(cx), "nothing failed yet");
+    send(cx, &state, vec![failure(1, &prod)]);
+    cx.run_until_parked();
+    assert_eq!(
+        state.read_with(cx, |s, _| s.log().latest_failed(prod.id)),
+        Some(1)
+    );
+    assert!(!shown(cx), "the other connection's failure stays out");
+    send(cx, &state, vec![failure(2, &staging)]);
+    wait_for_element(cx, handle, "status.last_failure".into(), true).await;
+}
+
+#[gpui_kit::test]
+async fn the_chord_finds_a_failure_the_filter_hid(cx: &mut TestAppContext) {
+    let (handle, state, staging, _prod, _rt) = connected_pair(cx).await;
+    toggle_log(cx, handle);
+    send(cx, &state, vec![failure(1, &staging)]);
+    wait_for_element(cx, handle, row(1), true).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("log.filter.writes", cx);
+    })
+    .unwrap();
+    wait_for_element(cx, handle, row(1), false).await;
+    toggle_log(cx, handle);
+    wait_for_element(cx, handle, "log.filter.writes".into(), false).await;
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press(SHOW_LAST_FAILURE, cx);
+    })
+    .unwrap();
+    wait_for_element(cx, handle, row(1), true).await;
+    wait_for_label(cx, handle, "log.detail".into(), "/nope").await;
+    wait_for_label(cx, handle, "log.detail".into(), "404").await;
+}
+
+#[gpui_kit::test]
+async fn the_chord_without_a_failure_does_nothing(cx: &mut TestAppContext) {
+    let (handle, _state, _staging, _prod, _rt) = connected_pair(cx).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press(SHOW_LAST_FAILURE, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("log.filter.writes").is_none(), "log closed");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn last_failure_shows_its_shortcut(cx: &mut TestAppContext) {
+    let (handle, state, staging, _prod, _rt) = connected_pair(cx).await;
+    send(cx, &state, vec![failure(1, &staging)]);
+    wait_for_element(cx, handle, "status.last_failure".into(), true).await;
+    let button = cx
+        .update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.find("status.last_failure").bounds()
+        })
+        .unwrap();
+    let kbd = gpui_kit::VisualTestContext::from_window(handle.into(), cx)
+        .debug_bounds(key("kbd:alt-cmd-r", "kbd:ctrl-alt-r"))
+        .expect("a Kbd for the shortcut is drawn");
+    assert!(button.contains(&kbd.center()), "{kbd:?} not in {button:?}");
+}
+
 /// Everything traced at any level, on this thread and on the threads of the runtime it returns.
 /// The capture of this thread ends with the guard.
 fn traced_runtime() -> (
@@ -930,4 +1042,24 @@ async fn copy_as_curl_does_nothing_while_the_log_is_hidden(cx: &mut TestAppConte
         cx.read_from_clipboard().is_some(),
         "the selection survives hiding"
     );
+}
+
+#[gpui_kit::test]
+async fn the_palette_offers_the_last_failure_only_when_there_is_one(cx: &mut TestAppContext) {
+    let (handle, state, staging, _prod, _rt) = connected_pair(cx).await;
+    // The palette lists the available actions.
+    let offered = |cx: &mut TestAppContext| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .available_actions(cx)
+                .iter()
+                .any(|action| action.name() == "tessera::ShowLastFailure")
+        })
+        .unwrap()
+    };
+    assert!(!offered(cx), "nothing failed yet");
+    send(cx, &state, vec![failure(1, &staging)]);
+    wait_for_element(cx, handle, "status.last_failure".into(), true).await;
+    assert!(offered(cx));
 }

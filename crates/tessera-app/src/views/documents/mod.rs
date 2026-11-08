@@ -754,6 +754,11 @@ impl DocumentsView {
         });
     }
 
+    /// Whether the inspector's text differs from the document.
+    pub fn inspector_dirty(&self, cx: &App) -> bool {
+        self.inspector.read(cx).is_dirty(cx)
+    }
+
     /// Whether the tab must not close without asking.
     pub fn shows_unsaved(&self, cx: &App) -> bool {
         self.deleting || self.inspector.read(cx).shows_unsaved()

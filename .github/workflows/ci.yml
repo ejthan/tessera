@@ -31,7 +31,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.3
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo xtask i18n
+      - run: cargo xtask governance
       - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2.9.3
+      - run: cargo xtask dco "origin/$BASE_REF"
+        env:
+          BASE_REF: ${{ github.base_ref }}
 
   test:
     strategy:
@@ -120,6 +134,14 @@ jobs:
           TESSERA_IT_KEY: xyz
           TESSERA_IT_ANALYTICS: "1"
           TESSERA_IT_STUB_HOST: host.docker.internal
+      - run: cargo test -p tessera-client --test live_relevance --locked -- --ignored
+        env:
+          TESSERA_IT_URL: http://localhost:8108
+          TESSERA_IT_KEY: xyz
+      - run: cargo test -p tessera-core --test live_export --test live_raw --test live_transfer --locked -- --ignored
+        env:
+          TESSERA_IT_URL: http://localhost:8108
+          TESSERA_IT_KEY: xyz
 
   build:
     strategy:

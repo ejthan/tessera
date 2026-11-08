@@ -459,8 +459,10 @@ impl Render for TestPanel {
                         div().w(px(180.)).child(
                             Input::new(&self.query_by)
                                 .small()
+                                // i18n-ok: Typesense parameter name
                                 .prefix(div().text_sm().child("query_by"))
                                 .id("test.query_by")
+                                // i18n-ok: Typesense parameter name
                                 .aria_label("query_by"),
                         ),
                     )

@@ -9,11 +9,12 @@ mod common;
 
 use gpui_kit::base::{Placement, Root};
 use gpui_kit::component::dock::{DockArea, DockPlacement, InsertTarget, NodeId, PaneRef, PanelId};
-use gpui_kit::test::TestWindowExt as _;
+use gpui_kit::test::{TestEventExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle, px};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tessera_app::actions::{Refresh, ToggleJobs, ToggleRequestLog, apply_keymap};
+use tessera_app::actions::{Refresh, ToggleJobs, ToggleKeyMask, ToggleRequestLog, apply_keymap};
 use tessera_app::state::AppState;
 use tessera_app::views::dock::OverviewPanel;
 use tessera_app::views::root::RootView;
@@ -383,7 +384,7 @@ fn rebuilt_dock(
 ) -> Entity<DockArea> {
     let state = state.clone();
     cx.update_window(handle.into(), |_, window, cx| {
-        let root = cx.new(|cx| RootView::new(state, window, cx));
+        let root = cx.new(|cx| RootView::new(state, true, window, cx));
         root.read(cx).dock().clone()
     })
     .unwrap()
@@ -468,7 +469,12 @@ fn welcome_offers_each_way_in(cx: &mut TestAppContext) {
     let handle = open(cx);
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
-        for id in ["welcome.add_connection", "welcome.import", "welcome.copy"] {
+        for id in [
+            "welcome.add_connection",
+            "welcome.import",
+            "welcome.copy",
+            "welcome.connect_local",
+        ] {
             assert!(window.find(id).visible(), "{id}");
         }
     })
@@ -556,6 +562,59 @@ async fn sidebar_activates_a_tab_in_another_split_group(cx: &mut TestAppContext)
     cx.update_window(handle.into(), |_, window, cx| {
         assert!(!prod_frame(window, cx), "staging active");
         assert!(window.find(tab(&prod)).visible(), "prod still on screen");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn the_shortcut_leaves_the_active_lone_tab_while_focus_is_in_another_region(
+    cx: &mut TestAppContext,
+) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let (staging, prod, secrets) = two_profiles();
+    let (handle, _rt) = open_profiles(cx, vec![staging.clone(), prod.clone()], secrets);
+    open_tab(cx, handle, &staging).await;
+    open_tab(cx, handle, &prod).await;
+    let area = dock(cx, handle);
+    let id = handle
+        .update(cx, |_, _, cx| tab_panel(area.read(cx), &prod, cx).0)
+        .unwrap();
+    // Prod goes into the open bottom dock, so staging is alone in the center and active.
+    handle
+        .update(cx, |_, window, cx| {
+            let mut bottom = None;
+            let tree = area.read(cx).layout(DockPlacement::Bottom).unwrap();
+            tree.root().walk(&mut |node| {
+                if matches!(node.kind(), PaneRef::Tabs { .. }) {
+                    bottom.get_or_insert(node.id());
+                }
+            });
+            let target = InsertTarget::Tabs {
+                node: bottom.unwrap(),
+                ix: None,
+                activate: true,
+            };
+            area.update(cx, |area, cx| {
+                area.move_panel(id, target, window, cx);
+                area.toggle_dock(DockPlacement::Bottom, window, cx);
+            });
+        })
+        .unwrap();
+    cx.run_until_parked();
+    click_overview(cx, handle, &staging).await;
+    handle
+        .update(cx, |_, window, cx| {
+            let focus = area.read(cx).panel(id).unwrap().focus_handle(cx);
+            focus.focus(window, cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| window.press(CLOSE_TAB, cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(tab(&staging)).is_some(), "staging stays");
     })
     .unwrap();
 }
@@ -837,4 +896,246 @@ fn keymap_errors_show_in_the_window(cx: &mut TestAppContext) {
         .unwrap();
     assert!(text.contains("line 3: nope"), "{text}");
     assert!(text.contains("line 9: no"), "{text}");
+}
+
+/// A window connected to `name` on `environment`, on its overview tab.
+async fn on_overview(
+    cx: &mut TestAppContext,
+    name: &str,
+    environment: Environment,
+) -> (
+    WindowHandle<Root>,
+    Entity<AppState>,
+    Profile,
+    tokio::runtime::Runtime,
+) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let mut profile = Profile::new(name, vec![node()]);
+    profile.environment = environment;
+    let secrets = Arc::new(tessera_core::secrets::MemoryStore::default());
+    let (handle, state, rt) = open_app(cx, vec![profile.clone()], secrets);
+    state.update(cx, |s, cx| {
+        s.connect(profile.id, Some("k".to_string().into()), cx)
+    });
+    wait_for_element(cx, handle, "titlebar.breadcrumb".into(), true).await;
+    (handle, state, profile, rt)
+}
+
+fn crumb_path(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> String {
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        label(window, "titlebar.breadcrumb")
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+fn the_welcome_tab_has_no_breadcrumb(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("titlebar.breadcrumb").is_none());
+        assert!(window.find("titlebar.search").visible());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn crumbs_name_the_connection_the_section_and_the_collection(cx: &mut TestAppContext) {
+    let (handle, state, profile, _rt) = on_overview(cx, "staging", Environment::Staging).await;
+    assert_eq!(crumb_path(cx, handle), "staging / Overview");
+    state.update(cx, |s, cx| {
+        s.open_collection(profile.id, "books".into(), cx)
+    });
+    wait_for_label(cx, handle, "titlebar.breadcrumb".into(), "books").await;
+    assert_eq!(crumb_path(cx, handle), "staging / Collections / books");
+}
+
+#[gpui_kit::test]
+async fn the_connection_crumb_leads_to_the_overview(cx: &mut TestAppContext) {
+    let (handle, state, profile, _rt) = on_overview(cx, "staging", Environment::Staging).await;
+    state.update(cx, |s, cx| {
+        s.open_collection(profile.id, "books".into(), cx)
+    });
+    wait_for_label(cx, handle, "titlebar.breadcrumb".into(), "books").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // The first crumb starts at the left edge; the kit gives it no id of its own.
+        let bounds = window.find("titlebar.breadcrumb").bounds();
+        let at = bounds.origin + gpui_kit::point(px(4.), bounds.size.height / 2.);
+        window.pointer_move(at, None, cx);
+        window.pointer_down(at, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(at, gpui_kit::MouseButton::Left, cx);
+    })
+    .unwrap();
+    wait_for_label(cx, handle, "titlebar.breadcrumb".into(), "Overview").await;
+}
+
+#[gpui_kit::test]
+fn the_search_field_opens_the_palette(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("titlebar.search", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find("palette").visible());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn the_search_field_shows_its_shortcut(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    let button = cx
+        .update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.find("titlebar.search").bounds()
+        })
+        .unwrap();
+    let kbd = VisualTestContext::from_window(handle.into(), cx)
+        .debug_bounds(key("kbd:cmd-k", "kbd:ctrl-k"))
+        .expect("a Kbd for the shortcut is drawn");
+    assert!(button.contains(&kbd.center()), "{kbd:?} not in {button:?}");
+}
+
+#[gpui_kit::test]
+async fn the_prod_badge_stays_at_the_smallest_window(cx: &mut TestAppContext) {
+    let name = "a very long name of a production cluster ".repeat(4);
+    let (handle, _state, _profile, _rt) = on_overview(cx, &name, Environment::Prod).await;
+    let width = px(960.);
+    cx.simulate_window_resize(handle.into(), gpui_kit::size(width, px(600.)));
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let badge = window.find("titlebar.env").bounds();
+        assert!(badge.size.width > px(0.), "{badge:?}");
+        assert!(badge.origin.x + badge.size.width < width, "{badge:?}");
+        let search = window.find("titlebar.search").bounds();
+        assert!(
+            badge.origin.x + badge.size.width <= search.origin.x,
+            "{badge:?} {search:?}"
+        );
+        assert!(window.find("titlebar.settings").bounds().origin.x < width);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn a_saved_local_profile_opens_for_editing(cx: &mut TestAppContext) {
+    fake_connector(cx, |_| Ok(server("30.2", true)));
+    let mut local = Profile::new("local", vec![node()]);
+    local.nodes[0].port = 9999;
+    let (staging, _, secrets) = two_profiles();
+    let (handle, state, _rt) = open_app(cx, vec![staging, local.clone()], secrets);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("welcome.connect_local", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("connect.node.0.port").value(), Some("9999"));
+        window.press(SAVE, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let names = cx.read(|cx| {
+        state
+            .read(cx)
+            .profiles
+            .iter()
+            .filter(|p| p.name == "local")
+            .count()
+    });
+    assert_eq!(names, 1);
+}
+
+#[gpui_kit::test]
+fn connect_to_it_fills_the_form_and_connects_to_nothing(cx: &mut TestAppContext) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    fake_connector(cx, move |_| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        Ok(server("30.2", true))
+    });
+    let (handle, state) = open_with_state(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("welcome.connect_local", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("connect.name").value(), Some("local"));
+        assert_eq!(
+            window.find("connect.node.0.host").value(),
+            Some("localhost")
+        );
+        assert_eq!(window.find("connect.node.0.port").value(), Some("8108"));
+        // The field is masked, so its value shows only with the mask off.
+        window.dispatch_action(Box::new(ToggleKeyMask), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("connect.key").value(), Some(""));
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("connect.name").is_none(), "dialog closed");
+    })
+    .unwrap();
+    assert!(cx.read(|cx| state.read(cx).profiles.is_empty()));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[gpui_kit::test]
+fn the_welcome_screen_shows_the_palette_and_settings_chords(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let line = label(window, "welcome.next");
+        for chord in [key("⌘K", "Ctrl+K"), key("⌘,", "Ctrl+,")] {
+            assert!(line.contains(chord), "{chord:?} missing in {line:?}");
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn the_section_crumb_leads_to_the_list(cx: &mut TestAppContext) {
+    let (handle, state, profile, _rt) = on_overview(cx, "staging", Environment::Staging).await;
+    state.update(cx, |s, cx| {
+        s.open_collection(profile.id, "books".into(), cx)
+    });
+    wait_for_label(cx, handle, "titlebar.breadcrumb".into(), "books").await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // The kit gives a crumb no id, so this walks the path until the tab changes.
+        let bounds = window.find("titlebar.breadcrumb").bounds();
+        for x in (70..200).step_by(10) {
+            let at = bounds.origin + gpui_kit::point(px(x as f32), bounds.size.height / 2.);
+            window.pointer_move(at, None, cx);
+            window.pointer_down(at, gpui_kit::MouseButton::Left, cx);
+            window.pointer_up(at, gpui_kit::MouseButton::Left, cx);
+        }
+    })
+    .unwrap();
+    wait_for_label(
+        cx,
+        handle,
+        "titlebar.breadcrumb".into(),
+        "staging / Collections",
+    )
+    .await;
+    assert_eq!(crumb_path(cx, handle), "staging / Collections");
 }

@@ -15,7 +15,7 @@ use rust_i18n::t;
 
 use super::env_badge::PROD_RED;
 use super::overview::role_text;
-use crate::actions::{ToggleJobs, ToggleRequestLog};
+use crate::actions::{ShowLastFailure, ToggleJobs, ToggleRequestLog};
 use crate::connection::{ConnectionState, host_label};
 
 /// What the status bar says about a connected connection (spec §7.3).
@@ -80,11 +80,13 @@ pub struct JobsEntry {
 }
 
 /// Renders the status bar for the active connection, with the request log toggle and, while
-/// a job exists, the jobs toggle.
+/// a job exists, the jobs toggle. `last_failure` is the id of the connection's newest failed
+/// request; with one the bar links to it.
 pub fn render(
     selected: Option<&ConnectionState>,
     log_open: bool,
     jobs: Option<JobsEntry>,
+    last_failure: Option<u64>,
     window: &Window,
     cx: &App,
 ) -> impl IntoElement {
@@ -138,6 +140,17 @@ pub fn render(
                 .gap_2()
                 .items_center()
                 .children(prod_read_only)
+                .children(last_failure.map(|_| {
+                    Button::new("status.last_failure")
+                        .ghost()
+                        .xsmall()
+                        .text_color(theme.danger)
+                        .label(t!("status.last_failure").to_string())
+                        .children(Kbd::global_binding_for_action(&ShowLastFailure, window))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ShowLastFailure), cx)
+                        })
+                }))
                 .children(jobs.map(|jobs| {
                     let text = match jobs.running {
                         0 => t!("status.jobs_idle").to_string(),

@@ -5,20 +5,25 @@
 use std::time::Duration;
 
 use gpui_kit::base::{Root, TestSupportExt as _};
+use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{
-    DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, PaneRef, PanelId, panel_handle,
+    ClosePanel, DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, PaneRef, PanelId,
+    panel_handle,
 };
+use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
-    prelude::*, px, rgb,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, Global,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window,
+    div, prelude::*, px, rgb,
 };
 use rust_i18n::t;
 use tessera_core::layout::{BottomTab, Layout};
+use uuid::Uuid;
 
 use super::connect_dialog::ConnectDialog;
 use super::dock::{
@@ -31,10 +36,10 @@ use super::request_log::RequestLogPanel;
 use super::settings::SettingsDialog;
 use super::{env_badge, status_bar};
 use crate::actions::{
-    CopyAsCurl, NewConnection, OpenAi, OpenAliases, OpenAnalytics, OpenBackup, OpenConsoleTab,
-    OpenCurations, OpenKeys, OpenOperations, OpenPalette, OpenPresetsTab, OpenSearchTab,
-    OpenSettings, OpenStemming, OpenStopwords, OpenSynonyms, QuickSwitch, ToggleJobs,
-    ToggleRequestLog,
+    CloseWindow, CopyAsCurl, NewConnection, NewWindow, OpenAi, OpenAliases, OpenAnalytics,
+    OpenBackup, OpenConsoleTab, OpenCurations, OpenKeys, OpenOperations, OpenPalette,
+    OpenPresetsTab, OpenSearchTab, OpenSettings, OpenStemming, OpenStopwords, OpenSynonyms,
+    QuickSwitch, ShowLastFailure, ToggleJobs, ToggleRequestLog,
 };
 use crate::connection::ConnectionState;
 use crate::jobs::{JobFinished, JobId, JobKind, Jobs, JobsGlobal, RunningChanged};
@@ -46,6 +51,8 @@ use crate::state::{
 
 /// Tallest the list of `keymap.toml` errors gets before it scrolls.
 const KEYMAP_ERRORS_HEIGHT: f32 = 96.;
+/// Widest the connection's name gets in the title bar.
+const TITLE_WIDTH: f32 = 240.;
 /// How long a layout change must stand before it is saved.
 const LAYOUT_SAVE_DELAY: Duration = Duration::from_millis(500);
 
@@ -53,6 +60,8 @@ const LAYOUT_SAVE_DELAY: Duration = Duration::from_millis(500);
 pub struct RootView {
     focus_handle: FocusHandle,
     state: Entity<AppState>,
+    /// Whether this window keeps the layout.
+    primary: bool,
     dock: Entity<DockArea>,
     welcome: Entity<WelcomePanel>,
     log: Entity<RequestLogPanel>,
@@ -72,6 +81,34 @@ pub struct RootView {
     _subscriptions: Vec<Subscription>,
 }
 
+/// The window for what belongs to the app and to no window: the active one, or the first.
+fn front_window(cx: &App) -> Option<AnyWindowHandle> {
+    let windows = cx.windows();
+    let active = cx.active_window().filter(|window| windows.contains(window));
+    active.or(windows.first().copied())
+}
+
+/// Whether `window` is the one to act on connection `id`: its owner when it has one, which
+/// comes forward, otherwise the front window. Every window hears every open.
+fn targeted(state: &Entity<AppState>, id: Uuid, window: &Window, cx: &App) -> bool {
+    let owner = state.read(cx).window_of(id);
+    if owner.or_else(|| front_window(cx)) != Some(window.window_handle()) {
+        return false;
+    }
+    if owner.is_some() && !window.is_window_active() {
+        window.activate_window();
+    }
+    true
+}
+
+/// Holds the app state for the app's life. Without it the state goes with the last window, and
+/// its quit hooks and queued writes with it.
+struct StateGlobal {
+    _state: Entity<AppState>,
+}
+
+impl Global for StateGlobal {}
+
 /// What the status bar counts.
 fn count_running(jobs: &Jobs) -> Option<usize> {
     (!jobs.jobs().is_empty()).then(|| jobs.running())
@@ -79,7 +116,18 @@ fn count_running(jobs: &Jobs) -> Option<usize> {
 
 impl RootView {
     /// Builds the view and keeps the theme in sync with the system appearance.
-    pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// Only the `primary` window restores and saves the layout and checks for updates.
+    pub fn new(
+        state: Entity<AppState>,
+        primary: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        if primary {
+            cx.set_global(StateGlobal {
+                _state: state.clone(),
+            });
+        }
         settings::apply(&state.read(cx).settings.clone(), window, cx);
         let (dock, skin) = DockSkin::dock_area("tessera", None, window, cx);
         skin.set_close_button_visible(true, cx);
@@ -87,7 +135,11 @@ impl RootView {
         let log = cx.new(|cx| RequestLogPanel::new(state.clone(), window, cx));
         let jobs = cx.new(|cx| JobsPanel::new(state.clone(), window, cx));
         let welcome = cx.new(|cx| WelcomePanel::new(state.clone(), cx));
-        let layout = state.read(cx).layout.clone();
+        let layout = if primary {
+            state.read(cx).layout.clone()
+        } else {
+            Layout::default()
+        };
         dock.update(cx, |area, cx| {
             let tabs = |panel| DockLayout::tabs().panel_view(panel, cx);
             let (left, bottom, center) = (
@@ -108,12 +160,26 @@ impl RootView {
             }
             area.set_center(center, window, cx);
         });
-        if state.read(cx).settings.update_check {
+        if primary && state.read(cx).settings.update_check {
             state.update(cx, |s, cx| s.check_for_update(cx));
         }
         let job_list = cx.global::<JobsGlobal>().0.clone();
         let running_jobs = count_running(job_list.read(cx));
-        let subscriptions = vec![
+        let handle = window.window_handle();
+        let mut subscriptions = vec![
+            cx.on_release(move |this, cx| {
+                this.state
+                    .update(cx, |s, _| s.retain_window_of(handle, |_| false));
+                // The quit hook and a waiting save end with this view, so a close writes here.
+                if this.primary {
+                    let layout = this.current_layout(cx);
+                    if layout != this.state.read(cx).layout {
+                        this.state
+                            .update(cx, |s, cx| s.save_layout(layout, cx))
+                            .detach();
+                    }
+                }
+            }),
             cx.subscribe(&job_list, |this, jobs, _: &RunningChanged, cx| {
                 this.running_jobs = count_running(jobs.read(cx));
                 cx.notify();
@@ -132,31 +198,42 @@ impl RootView {
                 cx.notify();
             }),
             cx.subscribe_in(&state, window, |_, _, event: &UpdateFound, window, cx| {
-                let text = t!("settings.update.toast", version = event.0.as_str());
-                window.push_notification(text.to_string(), cx);
+                if front_window(cx) == Some(window.window_handle()) {
+                    let text = t!("settings.update.toast", version = event.0.as_str());
+                    window.push_notification(text.to_string(), cx);
+                }
             }),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &OpenOverview, window, cx| {
-                    this.open_tab(event.0, Kind::Overview, window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Overview, window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &OpenCollections, window, cx| {
-                    this.open_tab(event.0, Kind::Collections, window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Collections, window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &OpenCollection, window, cx| {
-                    this.open_tab(event.0, Kind::Collection(event.1.clone()), window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Collection(event.1.clone()), window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(&state, window, |this, _, event: &OpenSearch, window, cx| {
+                if !targeted(&this.state, event.0, window, cx) {
+                    return;
+                }
                 this.open_tab(event.0, Kind::Search, window, cx);
                 let Some((drafts, union)) = event.1.clone() else {
                     return;
@@ -176,38 +253,50 @@ impl RootView {
                 &state,
                 window,
                 |this, _, event: &OpenConsole, window, cx| {
-                    this.open_tab(event.0, Kind::Console, window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Console, window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &OpenResource, window, cx| {
-                    this.open_tab(event.0, Kind::Resource(event.1), window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Resource(event.1), window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &OpenReindex, window, cx| {
-                    this.open_tab(event.0, Kind::Reindex(event.1.clone()), window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.open_tab(event.0, Kind::Reindex(event.1.clone()), window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(
                 &state,
                 window,
                 |this, _, event: &CloseCollection, window, cx| {
-                    this.close_collection_tab(event.0, &event.1, window, cx);
+                    if targeted(&this.state, event.0, window, cx) {
+                        this.close_collection_tab(event.0, &event.1, window, cx);
+                    }
                 },
             ),
             cx.subscribe_in(&dock, window, |this, _, event: &DockEvent, window, cx| {
                 if matches!(event, DockEvent::LayoutChanged) {
                     this.layout_changed(window, cx);
-                    this.save_layout_soon(cx);
+                    if this.primary {
+                        this.save_layout_soon(cx);
+                    }
                 }
             }),
+        ];
+        if primary {
             // Quitting drops a save still waiting out `LAYOUT_SAVE_DELAY`, so it is written here.
-            cx.on_app_quit(|this, cx| {
+            subscriptions.push(cx.on_app_quit(|this, cx| {
                 let layout = this.current_layout(cx);
                 let changed = layout != this.state.read(cx).layout;
                 let write =
@@ -217,13 +306,14 @@ impl RootView {
                         write.await;
                     }
                 }
-            }),
-        ];
+            }));
+        }
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         Self {
             focus_handle,
             state,
+            primary,
             dock,
             welcome,
             log,
@@ -240,6 +330,12 @@ impl RootView {
     /// The connection of the active tab.
     pub fn active_connection(&self, cx: &App) -> Option<Entity<ConnectionState>> {
         Some(connection_tab(self.dock.read(cx), self.active?)?.connection(cx))
+    }
+
+    /// The connection of the active tab of `window`, for a view inside it.
+    pub fn window_connection(window: &Window, cx: &App) -> Option<Entity<ConnectionState>> {
+        let root = Root::read(window, cx).view().clone().downcast::<Self>();
+        root.ok()?.read(cx).active_connection(cx)
     }
 
     /// The request log panel.
@@ -305,6 +401,100 @@ impl RootView {
         cx.notify();
     }
 
+    /// The title bar's path to the active tab; empty without a connection tab. The last crumb
+    /// has no target.
+    fn crumbs(&self, cx: &App) -> Vec<(SharedString, Option<CrumbTarget>)> {
+        let Some(tab) = self
+            .active
+            .and_then(|id| connection_tab(self.dock.read(cx), id))
+        else {
+            return Vec::new();
+        };
+        let connection = tab.connection(cx);
+        let profile = &connection.read(cx).profile;
+        let id = profile.id;
+        let (section, target, item) = match tab.kind(cx) {
+            Kind::Overview => ("sidebar.overview".to_string(), None, None),
+            Kind::Collections => ("sidebar.collections".to_string(), None, None),
+            Kind::Collection(name) => (
+                "sidebar.collections".to_string(),
+                Some(CrumbTarget::Collections(id)),
+                Some(name),
+            ),
+            Kind::Search => ("sidebar.search".to_string(), None, None),
+            Kind::Console => ("sidebar.console".to_string(), None, None),
+            Kind::Resource(kind) => (kind.title_key(), None, None),
+            Kind::Reindex(alias) => ("sidebar.aliases".to_string(), None, Some(alias)),
+        };
+        let mut crumbs = vec![
+            (
+                SharedString::from(profile.name.clone()),
+                Some(CrumbTarget::Overview(id)),
+            ),
+            (SharedString::from(t!(section).to_string()), target),
+        ];
+        crumbs.extend(item.map(|name| (SharedString::from(name), None)));
+        crumbs
+    }
+
+    /// The crumbs of the active tab, which shrink first when the title bar runs out of room.
+    fn breadcrumb(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let crumbs = self.crumbs(cx);
+        let path = crumbs.iter().map(|(text, _)| text.as_ref());
+        let path = SharedString::from(path.collect::<Vec<_>>().join(" / "));
+        let items = crumbs.into_iter().map(|(text, target)| {
+            let item = BreadcrumbItem::new(text).min_w_0().truncate();
+            match target {
+                Some(target) => item.on_click(cx.listener(move |this, _, window, cx| {
+                    this.follow_crumb(target, window, cx);
+                })),
+                None => item,
+            }
+        });
+        let items: Vec<_> = items.collect();
+        // Absolute: the kit's title bar never shrinks, so a child in flow would widen it.
+        div()
+            .flex_1()
+            .h_full()
+            .relative()
+            .when(!items.is_empty(), |el| {
+                el.child(
+                    h_flex()
+                        .id("titlebar.breadcrumb")
+                        .test_support()
+                        .aria_label(path)
+                        .absolute()
+                        .inset_0()
+                        .items_center()
+                        .overflow_hidden()
+                        .child(Breadcrumb::new().min_w_0().children(items)),
+                )
+            })
+    }
+
+    fn follow_crumb(&mut self, target: CrumbTarget, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            CrumbTarget::Overview(id) => self.open_tab(id, Kind::Overview, window, cx),
+            CrumbTarget::Collections(id) => self.open_tab(id, Kind::Collections, window, cx),
+        }
+    }
+
+    /// Opens the log on the newest failed request of the active connection, if it has one.
+    fn show_last_failure(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(connection) = self.active_connection(cx) else {
+            return;
+        };
+        let profile = connection.read(cx).profile.id;
+        let Some(id) = self.state.read(cx).log().latest_failed(profile) else {
+            return;
+        };
+        self.reveal(self.log_id(), window, cx);
+        self.log_panel()
+            .clone()
+            .update(cx, |log, cx| log.show_entry(id, cx));
+        cx.notify();
+    }
+
     /// Shows the jobs tab of the window's root view, from a dialog.
     pub fn reveal_jobs(window: &mut Window, cx: &mut App) {
         let root = Root::read(window, cx).view().clone().downcast::<Self>();
@@ -348,6 +538,10 @@ impl RootView {
 
     /// A job ending is a background event, so it is the one toast, unless its tab is on screen.
     fn job_finished(&mut self, id: JobId, window: &mut Window, cx: &mut Context<Self>) {
+        // Every window hears this; one reloads, and one toast shows.
+        if front_window(cx) != Some(window.window_handle()) {
+            return;
+        }
         self.reload_after(id, cx);
         if self.bottom_shows(self.jobs_id(), cx) {
             return;
@@ -368,7 +562,10 @@ impl RootView {
 
     fn open_palette(&self, mode: PaletteMode, window: &mut Window, cx: &mut Context<Self>) {
         if !window.has_active_dialog(cx) {
-            palette::open(mode, self.state.clone(), window, cx);
+            let active = self
+                .active_connection(cx)
+                .map(|connection| connection.read(cx).profile.id);
+            palette::open(mode, self.state.clone(), active, window, cx);
         }
     }
 
@@ -419,22 +616,16 @@ impl RootView {
         displayed
     }
 
-    /// Makes `active` the active tab; the sidebar selection follows when it changes.
+    /// Makes `active` the active tab. The sidebar and the jobs panel read it in `render`, and the
+    /// dock caches them.
     fn set_active(&mut self, active: Option<PanelId>, cx: &mut Context<Self>) {
         cx.notify();
         if self.active == active {
             return;
         }
         self.active = active;
-        let Some(id) = self.active_connection(cx).map(|c| c.read(cx).profile.id) else {
-            return;
-        };
-        self.state.update(cx, |s, cx| {
-            if s.selected != Some(id) {
-                s.selected = Some(id);
-                cx.notify();
-            }
-        });
+        self.state.update(cx, |_, cx| cx.notify());
+        self.jobs.update(cx, |_, cx| cx.notify());
     }
 
     /// Opens the `kind` tab of profile `id`, or shows and activates the one already open,
@@ -511,6 +702,9 @@ impl RootView {
             area.select_panel(id, window, cx);
             id
         });
+        let handle = window.window_handle();
+        self.state
+            .update(cx, |s, _| s.set_window_of(id, Some(handle)));
         // Set here, not from the layout event: selecting a displayed tab changes no layout.
         self.displayed = self.displayed_tabs(cx);
         self.set_active(Some(panel), cx);
@@ -564,17 +758,40 @@ impl RootView {
         }
         self.dock.update(cx, |area, cx| {
             for tab in stale {
-                match tab {
-                    ConnectionTab::Overview(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Collections(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Collection(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Search(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Console(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Resource(panel) => area.remove_panel(panel, window, cx),
-                    ConnectionTab::Reindex(panel) => area.remove_panel(panel, window, cx),
-                }
+                tab.remove(area, window, cx);
             }
         });
+    }
+
+    /// ⌘W on the only tab of a region: the kit refuses it, as a dock's last panel. A tab with
+    /// something to ask or wait for goes on to its own handler. Returns whether it closed.
+    fn close_lone_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(active) = self.active else {
+            return false;
+        };
+        let tab_focus = self.dock.read(cx).panel(active).map(|p| p.focus_handle(cx));
+        // Only the tab the keyboard is in, or the window itself: not a tab of another region.
+        let focused = window.focused(cx).is_none()
+            || self.focus_handle.is_focused(window)
+            || tab_focus.is_some_and(|focus| focus.contains_focused(window, cx));
+        if !focused || window.has_active_dialog(cx) {
+            return false;
+        }
+        let area = self.dock.read(cx);
+        let alone = REGIONS.into_iter().any(|placement| {
+            area.layout(placement).is_some_and(|tree| {
+                tree.panels().any(|id| id == active) && tree.panels().count() == 1
+            })
+        });
+        let Some(tab) = connection_tab(area, active).filter(|tab| tab.closes_silently(cx)) else {
+            return false;
+        };
+        if !alone || !area.panel(active).is_some_and(|panel| panel.closable(cx)) {
+            return false;
+        }
+        self.dock
+            .update(cx, |area, cx| tab.remove(area, window, cx));
+        true
     }
 
     /// Finds the active tab after a layout change and brings the welcome screen back into
@@ -633,6 +850,15 @@ impl RootView {
             .or(displayed.first())
             .copied();
         self.displayed = displayed;
+        let open: Vec<Uuid> = self
+            .connection_tabs(cx)
+            .iter()
+            .map(|(_, tab)| tab.connection(cx).read(cx).profile.id)
+            .collect();
+        let handle = window.window_handle();
+        self.state.update(cx, |s, _| {
+            s.retain_window_of(handle, |id| open.contains(&id))
+        });
         let center_empty = self
             .dock
             .read(cx)
@@ -655,6 +881,13 @@ const REGIONS: [DockPlacement; 4] = [
     DockPlacement::Right,
     DockPlacement::Bottom,
 ];
+
+/// Where a crumb of the title bar leads.
+#[derive(Clone, Copy)]
+enum CrumbTarget {
+    Overview(Uuid),
+    Collections(Uuid),
+}
 
 /// The kinds of tab a connection has.
 #[derive(Clone, PartialEq)]
@@ -682,6 +915,26 @@ enum ConnectionTab {
 }
 
 impl ConnectionTab {
+    fn remove(self, area: &mut DockArea, window: &mut Window, cx: &mut Context<DockArea>) {
+        match self {
+            Self::Overview(panel) => area.remove_panel(panel, window, cx),
+            Self::Collections(panel) => area.remove_panel(panel, window, cx),
+            Self::Collection(panel) => area.remove_panel(panel, window, cx),
+            Self::Search(panel) => area.remove_panel(panel, window, cx),
+            Self::Console(panel) => area.remove_panel(panel, window, cx),
+            Self::Resource(panel) => area.remove_panel(panel, window, cx),
+            Self::Reindex(panel) => area.remove_panel(panel, window, cx),
+        }
+    }
+
+    /// Whether nothing has to ask first. The inspector's text can differ before it says so.
+    fn closes_silently(&self, cx: &App) -> bool {
+        match self {
+            Self::Collection(panel) => !panel.read(cx).is_dirty(cx),
+            _ => true,
+        }
+    }
+
     fn kind(&self, cx: &App) -> Kind {
         match self {
             Self::Overview(_) => Kind::Overview,
@@ -759,6 +1012,7 @@ impl Render for RootView {
         let unlocked = active.is_some_and(|c| c.writes_unlocked);
         let prod = profile.is_some_and(|p| p.environment.is_prod());
         let log_open = self.bottom_shows(self.log_id(), cx);
+        let last_failure = profile.and_then(|p| self.state.read(cx).log().latest_failed(p.id));
         let jobs = self.running_jobs.map(|running| status_bar::JobsEntry {
             running,
             open: self.bottom_shows(self.jobs_id(), cx),
@@ -768,7 +1022,9 @@ impl Render for RootView {
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| t!("titlebar.no_connection").to_string()),
         );
+        let full_title = title.clone();
         let switcher = h_flex()
+            .flex_none()
             .gap_2()
             .items_center()
             .text_sm()
@@ -779,6 +1035,10 @@ impl Render for RootView {
                     .test_support()
                     .aria_label(title.clone())
                     .text_color(theme.muted_foreground)
+                    // UX rule 1: a long name must not push the badge next to it away.
+                    .max_w(px(TITLE_WIDTH))
+                    .truncate()
+                    .tooltip(move |window, cx| Tooltip::new(full_title.clone()).build(window, cx))
                     .child(title),
             )
             .when_some(profile, |el, p| {
@@ -793,11 +1053,11 @@ impl Render for RootView {
                     el.child(env_badge::lock("titlebar", unlocked, cx))
                 })
             });
+        let breadcrumb = self.breadcrumb(cx);
         let red = rgb(env_badge::PROD_RED);
         let state = self.state.read(cx);
-        let can_search = state
-            .selected
-            .and_then(|id| state.connection(id, cx))
+        let can_search = self
+            .active_connection(cx)
             .filter(|c| c.read(cx).connected.is_some())
             .map(|c| c.read(cx).profile.id);
         let supported = can_search
@@ -825,6 +1085,22 @@ impl Render for RootView {
                     this.log.update(cx, |log, cx| log.copy_as_curl(cx));
                 }))
             })
+            .on_action(cx.listener(|this, _: &NewWindow, window, cx| {
+                let state = this.state.clone();
+                cx.defer_in(window, move |_, window, cx| {
+                    if let Err(e) = crate::open_main_window(state, false, Vec::new(), cx) {
+                        let text = t!("window.open_failed", detail = e.to_string());
+                        window.push_notification(text.to_string(), cx);
+                    }
+                });
+            }))
+            .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
+            // Before the tab group's own handler, which ends the action without closing.
+            .capture_action(cx.listener(|this, _: &ClosePanel, window, cx| {
+                if this.close_lone_tab(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
                 this.open_palette(PaletteMode::All, window, cx);
             }))
@@ -837,6 +1113,12 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &ToggleRequestLog, window, cx| {
                 this.toggle_bottom(this.log_id(), window, cx);
             }))
+            // Registered only with a failure, so the palette offers it only then.
+            .when(last_failure.is_some(), |el| {
+                el.on_action(cx.listener(|this, _: &ShowLastFailure, window, cx| {
+                    this.show_last_failure(window, cx);
+                }))
+            })
             .on_action(cx.listener(|this, _: &ToggleJobs, window, cx| {
                 this.toggle_bottom(this.jobs_id(), window, cx);
             }))
@@ -909,17 +1191,42 @@ impl Render for RootView {
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(
-                TitleBar::new().child(switcher).child(
-                    Button::new("titlebar.settings")
-                        .ghost()
-                        .small()
-                        .mr_2()
-                        .icon(IconName::Settings)
-                        .accessibility_label(t!("settings.open").to_string())
-                        .tooltip_with_action(t!("settings.open").to_string(), &OpenSettings, None)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_settings(window, cx);
-                        })),
+                TitleBar::new().child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_3()
+                        .items_center()
+                        .child(switcher)
+                        .child(breadcrumb)
+                        .child(
+                            Button::new("titlebar.search")
+                                .outline()
+                                .small()
+                                .flex_none()
+                                .label(t!("titlebar.search").to_string())
+                                .children(Kbd::global_binding_for_action(&OpenPalette, window))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_palette(PaletteMode::All, window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("titlebar.settings")
+                                .ghost()
+                                .small()
+                                .flex_none()
+                                .mr_2()
+                                .icon(IconName::Settings)
+                                .accessibility_label(t!("settings.open").to_string())
+                                .tooltip_with_action(
+                                    t!("settings.open").to_string(),
+                                    &OpenSettings,
+                                    None,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_settings(window, cx);
+                                })),
+                        ),
                 ),
             )
             .when(!self.keymap_errors.is_empty(), |el| {
@@ -939,7 +1246,14 @@ impl Render for RootView {
                 )
             })
             .child(div().flex_1().min_h_0().child(self.dock.clone()))
-            .child(status_bar::render(active, log_open, jobs, window, cx))
+            .child(status_bar::render(
+                active,
+                log_open,
+                jobs,
+                last_failure,
+                window,
+                cx,
+            ))
             // Last, so they draw over the content without moving it; they have no listeners,
             // so clicks pass through.
             .when(prod, |el| {

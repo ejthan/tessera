@@ -115,6 +115,9 @@ gpui_kit::actions!(
         OpenLogs,
         QuickSwitch,
         ToggleJobs,
+        ShowLastFailure,
+        NewWindow,
+        CloseWindow,
         CancelJob,
         DismissJob,
         SaveReport,
@@ -606,6 +609,18 @@ const TOGGLE_JOBS: &str = "cmd-shift-j";
 #[cfg(not(target_os = "macos"))]
 const TOGGLE_JOBS: &str = "ctrl-shift-j";
 #[cfg(target_os = "macos")]
+const NEW_WINDOW: &str = "alt-cmd-n";
+#[cfg(not(target_os = "macos"))]
+const NEW_WINDOW: &str = "ctrl-alt-n";
+#[cfg(target_os = "macos")]
+const CLOSE_WINDOW: &str = "alt-cmd-w";
+#[cfg(not(target_os = "macos"))]
+const CLOSE_WINDOW: &str = "ctrl-alt-w";
+#[cfg(target_os = "macos")]
+const SHOW_LAST_FAILURE: &str = "alt-cmd-r";
+#[cfg(not(target_os = "macos"))]
+const SHOW_LAST_FAILURE: &str = "ctrl-alt-r";
+#[cfg(target_os = "macos")]
 const CANCEL_JOB: &str = "cmd-.";
 #[cfg(not(target_os = "macos"))]
 const CANCEL_JOB: &str = "ctrl-.";
@@ -747,6 +762,9 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     OpenExport,
     QuickSwitch,
     ToggleJobs,
+    ShowLastFailure,
+    NewWindow,
+    CloseWindow,
     CancelJob,
     DismissJob,
     SaveReport,
@@ -883,6 +901,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(QUICK_SWITCH, QuickSwitch, None),
         KeyBinding::new(TOGGLE_LOG, ToggleRequestLog, None),
         KeyBinding::new(TOGGLE_JOBS, ToggleJobs, None),
+        KeyBinding::new(SHOW_LAST_FAILURE, ShowLastFailure, None),
+        KeyBinding::new(NEW_WINDOW, NewWindow, None),
+        // Not ⇧⌘W: Remove search has it, and with one search left it would fall through to here.
+        KeyBinding::new(CLOSE_WINDOW, CloseWindow, None),
         // Global, so the selected log entry can be copied wherever focus is.
         KeyBinding::new(COPY_CURL, CopyAsCurl, None),
         // The dock's own actions, handled by the tab group that holds focus.

@@ -485,8 +485,10 @@ impl Render for AiTestPanel {
                         div().flex_1().min_w_0().child(
                             Input::new(&self.query_by)
                                 .small()
+                                // i18n-ok: Typesense parameter name
                                 .prefix(div().text_sm().child("query_by"))
                                 .id("ai.test.query_by")
+                                // i18n-ok: Typesense parameter name
                                 .aria_label("query_by"),
                         ),
                     ),

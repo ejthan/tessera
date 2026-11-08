@@ -925,11 +925,13 @@ impl ConsoleView {
                 .child(
                     Input::new(&row.key)
                         .id(SharedString::from(format!("console.query.{i}.key")))
+                        .aria_label(t!("console.query.key").to_string())
                         .small(),
                 )
                 .child(
                     Input::new(&row.value)
                         .id(SharedString::from(format!("console.query.{i}.value")))
+                        .aria_label(t!("console.query.value").to_string())
                         .small(),
                 )
         });

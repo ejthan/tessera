@@ -36,6 +36,10 @@ cargo run -p tessera-app
 
 Logs go to stderr and to `tessera.log.YYYY-MM-DD` in the `logs` folder of the local data directory: `~/Library/Application Support/org.tessera.Tessera/logs` on macOS, `~/.local/share/tessera/logs` on Linux, `%LOCALAPPDATA%\tessera\Tessera\data\logs` on Windows. A new file starts each day, and the last 7 stay. Keys and tokens are masked in both, and neither holds a request body. If the folder cannot be made, the app logs to stderr alone and says so.
 
+The contrast guarantee of `tests/ui_a11y.rs` covers the built-in light and dark themes. A theme of the registry keeps the colors its author set, so it may fall below WCAG AA.
+
+Synchronous UI work that takes longer than a 16 ms frame (NF4) logs a warning: one line with the span's `name` and its `ms`, from `log.drain`, `palette.rank`, `log.filter`, `jobs.progress` and `documents.page`. The default level `info` keeps these lines on in every build, with no rate limit, on stderr and in the log file. stderr is written on the UI thread, so a full pipe blocks the thread being measured. `RUST_LOG=tessera::nf4=warn` leaves only these lines and silences every other log. A debug frame can take that long by itself, so judge the numbers in a release build. A debug build also panics with `blocking call on the UI thread: …` when a config write, a keychain call or a backup archive runs on the UI thread; a release build does not check.
+
 `cargo run -p tessera-app --features frame-overlay` adds a frame-time overlay, cycled with ⌘⌥F / Ctrl+Alt+F in the documents view.
 
 ## Local Typesense
@@ -62,6 +66,10 @@ cargo xtask seed --url http://localhost:18108 [--key xyz] [--reset]
 Fills the server with `books` (10,000 documents, with the alias `books_current` and the synonym set `books_synonyms`), `authors` (500), `books_ref` (2,000, references `authors`), `places` (1,000, geopoints), `articles_vec` (1,000, 8-dimensional vectors) and `products` (200,000, with a nested `dimensions` object, about 10 s to load). The documents are generated from a fixed seed, so every run gives the same data. There is no default URL; without `--url` the command prints its usage and exits with 2. The key defaults to `xyz`. Documents are streamed in batches of 1,000. If one of these collections exists, the command stops and names it; `--reset` drops those collections, the alias and the sets first, and nothing else.
 
 It also adds the curation set `books_curation`, the stopword set `en_common`, the preset `books_fantasy`, the search-only key described `tessera-seed-search`, of which it prints only the id and the first characters, the `popular_queries` rule `books_popular` from `books` to `books_queries`, and the stemming dictionary `seed_plurals` with three words. `--reset` removes these too.
+
+## Checks
+
+`cargo xtask i18n` fails with `file:line: what` when `en.yml` and `de.yml` differ in keys or `%{…}` placeholders, when a literal `t!("key")` has no entry, or when a letter-bearing literal sits in a UI position in `tessera-app` or `tessera-widgets`. `// i18n-ok: <reason>` on that line or the line above lets one through, and the reason is required. A German value equal to the English one needs its key in `xtask/i18n-same.txt`.
 
 ## Tests
 
@@ -118,102 +126,9 @@ context = "Workbench"
 
 A control shows the chord that is bound now. A bad entry is skipped and named above the tabs, and the others apply. A file that does not parse, or has a field the format does not know, changes nothing: the default shortcuts stay, and the line above the tabs names the place. `escape` cannot be bound, because it closes every dialog. An unbound action stays reachable from its control and the palette.
 
-## Manual checks of operations and backup (M8)
+## Manual checks
 
-Nothing here has been done yet: the views are covered by UI tests with fakes and the engines by live tests. Start the dev server, and for a restore a second, throwaway one: `docker run --rm -d --name t302 -p 18208:8108 --tmpfs /data typesense/typesense:30.2 --data-dir /data --api-key=xyz --enable-cors=false`. Stop it afterwards.
-
-1. The Ops tab, ⌥⌘0 (Ctrl+Alt+0): the picker names each node with its role, a bad snapshot path says why, and each row shows its result with the node and the time.
-2. On the cluster (`docker compose -f dev/docker-compose.yml --profile cluster up -d ts1 ts2 ts3`, and afterwards `--profile cluster rm -sf ts1 ts2 ts3` and `docker volume rm dev_ts1-data dev_ts2-data dev_ts3-data`, never `down`): with the Overview tab closed, the leader's vote button is disabled, a vote on a follower says that the election started, and within 10 seconds the picker shows the new leader and the old one can vote again.
-3. The transport banner on an `http://` remote profile: ⌥⌘X (Ctrl+Alt+X) and the button open the profile.
-4. The Backup tab, ⌥⌘B (Ctrl+Alt+B): the checkboxes, All and the format radio in light and in dark, the warnings for a selection, and Start (⌘↩), which opens the save dialog. A name that exists is refused under the form.
-5. A backup of the seeded collections to a folder and to a `.tar.zst`: the row in Jobs shows step, collection and numbers, it goes on with the tab closed, and Stop leaves nothing at the target.
-6. ⌘2, Choose… (⌘O) with that archive into the second server: each stage shows, every row says New, the plan names what it warns of, and Start asks with counts. Afterwards the rows show their results and the collections hold the same counts.
-7. The same backup again into the same server: collections are blocked with the reason, sets read Same, and a changed stopword set reads Differs until Replace, which asks for the profile's name.
-8. A backup of a collection with an embedding key: the row stays blocked and names the two files to use. Follow that text by hand once: create the collection with its keys, then import the JSON Lines file.
-9. A read-only profile: a backup needs no unlock, and a restore unlocks first.
-
-10. Settings, ⌘, (Ctrl+,): Tab reaches each control at the smallest window, in light and in dark. The update check is off; with it on and a published release, a restart shows the result and, for a newer version, one toast. A firewall log shows `api.github.com` and nothing else.
-11. Open logs, ⌥⌘L (Ctrl+Alt+L), shows the log folder, and the folder is `0700` on macOS and Linux. Clear cache asks first and says how many went.
-12. Change the language with a table open: the column titles follow, and resized columns go back. Close and reopen a masked input to see it follow.
-13. Drag the sidebar and the bottom dock, open Jobs, quit and start: sizes and the tab come back, whether you quit at once or after the 500 ms save.
-14. Each empty state in light and in dark: Jobs, API stats, saved queries, the request log, and their links.
-
-15. Record the Linux release binary size from the CI job (NF5, below 41,943,040 bytes). At the close of M8 the macOS arm64 release binary is 28,868,288 bytes, stripped, built with `cargo build --release -p tessera-app`.
-16. Run every `live_*` test on 30.0 and 30.2 and the cluster test on the last commit of M8. They could not run at its close, because Docker stopped answering. The steps are under Tests, and the job `integration` in `.github/workflows/ci.yml` runs most of them.
-
-## Manual checks of keys, analytics and AI (M7)
-
-Nothing here has been done yet: the views are covered by UI tests with fakes and the client and core by live tests, and none of it has been looked at. Run against the dev server after `cargo run -p xtask -- seed --url http://localhost:18108 --key xyz --reset`. For the analytics steps the server needs its flags: recreate it once with `TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d`, the volume stays. Record the result in the PR description.
-
-1. The key dialog in light and in dark, ⌥⌘6 (Ctrl+Alt+6), then New: the action matrix scrolls, nothing is cut off at the smallest window, and the presets fill it.
-2. The reveal after a create: the value shows masked, Copy works, Esc does not close it, and only Done does.
-3. The date picker in the key dialog, which is a stacked dialog: it opens over the dialog, and Esc closes the picker and leaves the dialog.
-4. The scoped key panel, ⌘2: a key generates as you type from a parent with `documents:search` only, a pasted key decodes, and Test counts documents on a read-only connection.
-5. The analytics view, ⌥⌘7 (Ctrl+Alt+7), on a server with the flags: `books_popular` lists, a search on `books` reaches `books_queries` after Flush now, and a test event goes out.
-6. A stemming import, ⌥⌘8 (Ctrl+Alt+8): a good file, a file with a bad line that stops before anything is sent, and an import into `seed_plurals` that asks first.
-7. The AI tab, ⌥⌘9 (Ctrl+Alt+9): ⌘1 and ⌘2 switch, the eye shows the key field's text, and an edit starts with an empty key field.
-8. If a key is at hand, one real provider for each of a conversation model, an NL search model and an embedding field. Check that a provider's message shows in full and without the key.
-9. The embedding block in the schema form: Auto-embed on a `float[]` row, the completion of the model, a `ts/` model hiding the key and showing the note, the JSON tab showing `••••` for a typed key, and the dialog still reaching Create with two embedded fields at the smallest window.
-10. On macOS, every shortcut shown on a control in these views does what its control does.
-
-What the stub cannot prove, so only step 8 can (design §8.3): that real answers of OpenAI, Azure, Google, Cloudflare, vLLM and GCP parse, the `extraction_method` variants in `llm_response`, the request shapes of Google and GCP, which differ from OpenAI's, and the refresh of GCP tokens.
-
-## Manual checks of the relevance resources (M6)
-
-Nothing here has been done yet: the views are covered by UI tests with fakes and the client and core by live tests, and none of it has been looked at. Run against the dev server after `cargo run -p xtask -- seed --url http://localhost:18108 --key xyz --reset`. Record the result in the PR description.
-
-1. Each view, ⌥⌘1 to ⌥⌘5 (Ctrl+Alt+1 to 5): aliases, synonym sets, curation sets, stopwords and presets list the seeded `books_current`, `books_synonyms`, `books_curation`, `en_common` and `books_fantasy`. Create, edit and delete one of each.
-2. The curation dialog of `books_curation` in light and in dark: Form ⌘1, JSON ⌘2, include rows, hide rows, the document picker. Nothing is cut off at the smallest window, and the body scrolls.
-3. Drag an include to another position, then the same with ⌥↑ and ⌥↓. The positions follow the order.
-4. Open the date picker in the curation dialog, which is a stacked dialog: it opens over the dialog, its time field shows, and Esc closes the picker and leaves the dialog.
-5. The Test tab of `books_synonyms` and of `books_curation`: both sides run, and each says what it means.
-6. One reindex of `books` through `books_current`: on the Aliases tab select it and press ⇧⌘R. Check that nothing is sent before Start and that the Jobs tab opens without taking focus. After the copy, the compare shows 10,000 on both sides. Switch, check that `books_current` points to the new collection, Switch back, Switch again, then Delete `books`, typing the name. `--reset` does not know the new collection, so delete it by hand before the next seed.
-7. A stopped reindex: Start again, press ⌘. during the export, and check that the alias did not move, the temp directory under `$TMPDIR` named `tessera-reindex-*` is gone, and `Delete {new}` and `Start over` show.
-8. On macOS, every shortcut shown on a control in these views does what its control does.
-
-## Manual checks of import and export (M5)
-
-Nothing here has been done yet. The headless run above is NF3's number; this is the run through the window, and it stays open until someone records it in the last PR's description.
-
-1. `TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d`, then `cargo run --release -p xtask -- nf3 --url http://localhost:18108 --docs 1000000 --keep-file /tmp/nf3.jsonl`, which also leaves the file for the import below.
-2. `cargo run --release -p tessera-app -- --host localhost --port 18108 --api-key-stdin <<< xyz`. Import `/tmp/nf3.jsonl` into a new collection with Import → New collection….
-3. While it runs, in a terminal: `while :; do ps -o rss= -p $(pgrep -x tessera); sleep 1; done`. Pass: the peak stays below 300 MB.
-4. Start a second import of the same file, press Cancel in the Jobs panel, and note that the panel stopped within one batch (the job row says `stopped`, and no further batch arrives).
-5. Delete the new collection afterwards. Record the machine, both RSS series and the stop time.
-6. Export the collection as JSONL, JSON and CSV with a filter and with a selection, open each file, and check that a stopped export leaves an existing target untouched.
-7. Open the import dialog, the export dialog and the schema dialog at 960×600. Nothing may be cut off.
-8. Record the Linux release binary size from the CI job (NF5, below 41,943,040 bytes). A macOS release binary is 23,397,360 bytes, which says nothing about Linux.
-
-## Manual checks of the search milestone (M4)
-
-Nothing here has been done yet; record the results in PR D's description.
-
-- Open the Search tab, the Console, the palette, ⌘P and the keymap error line at 960×600 (the smallest window). Nothing may be cut off.
-- NF4: scroll a large response in Raw and in the request log's full view with the frame overlay on.
-- Press ⌘K / Ctrl+K in the documents table and run Delete documents: the confirmation names the rows.
-- Record the Linux release binary size from the CI job.
-
-## Manual checks of the document browser (M3)
-
-Nothing here runs in CI or from a script: it needs a person at the machine, because the numbers come from the frame overlay on screen. NF2 is **not measured** until someone records the results below in PR C's description.
-
-### NF2: 200k rows at 60 fps
-
-Hardware: an Apple M1 or comparable machine, a release build, no other heavy load.
-
-1. `TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d`, then `cargo xtask seed --url http://localhost:18108 --reset` (about 10 s for `products`).
-2. `cargo run --release -p tessera-app --features frame-overlay`, connect to `localhost:18108` with key `xyz`, open `products`.
-3. Press ⌥⌘F (Ctrl+Alt+F) twice to show the detailed overlay.
-4. With the default columns: wheel-scroll for 30 s, then drag the scrollbar from end to end for 30 s. Read the draw time p95 from the overlay. Repeat with all columns shown (Columns popover).
-5. In a terminal run `ps -o rss= -p <pid>` every 10 s during a 5-minute scroll. Pass: flat after the first pass over the data.
-6. Pass: p95 draw time at most 16.6 ms. Record p95 for both column sets, the RSS at the start and the end, and the machine in the PR description. If p95 is higher, profile before merging; the first suspects are the allocations in `render_td` and the number of visible columns.
-
-### Other checks to do on screen
-
-- `products`: scroll to the middle and the end, sort by `price`, filter `price:>100`, and check that the status line and the rows agree.
-- Tick rows with the mouse, Shift+click and Space; delete two, then delete by query with a filter that matches more than 1,000 documents and check that it asks for the collection name.
-- Update by query with a value of the wrong type shows the warning, not a success.
-- Copy a selection as JSONL, CSV and curl and paste each into a terminal or editor.
+The checks that need a person, another OS or a workflow run are in [`docs/qa-checklist.md`](qa-checklist.md).
 
 ## Measuring NF3
 
@@ -253,6 +168,35 @@ Measured on the finished M5 branch (`b036c25`), release builds, Apple M3 Max wit
 
 All three passed every check against the 300 MB limit. The app's baseline from three smoke starts of `target/release/tessera` was 93.0 MB (the first, cold start), then 64.1 and 64.0 MB; the table uses the 93.0. This is macOS: the nightly job measures Linux, and the numbers above do not stand for it. The collections `tessera_nf3` and `tessera_nf3_cancel` were gone afterwards.
 
+
+## Packaging
+
+`cargo xtask dist` builds the packages of the OS it runs on into `target/dist/`, with `SHA256SUMS` beside them. Nothing it does uploads or publishes.
+
+| OS | Packages | Tools |
+|---|---|---|
+| macOS | `.app`, `.dmg` | `cargo-packager` |
+| Linux | `.deb`, AppImage, `.rpm` | `cargo-packager`, `cargo-generate-rpm` |
+| Windows | `.msi`, `.zip` | `cargo-packager`, the system `tar` |
+
+Install the tools first. `dist` finds them on `PATH` or in `target/tools/bin`, never installs them itself, and prints the line it misses:
+
+```bash
+cargo install cargo-packager --locked --version 0.11.8 --root target/tools
+cargo install cargo-generate-rpm --locked --version 0.21.1 --root target/tools
+```
+
+```bash
+cargo xtask dist
+```
+
+The first run of `cargo-packager` downloads helpers into its own cache: the `create-dmg` script on macOS, WiX on Windows, and `linuxdeploy` with its plugins on Linux. The AppImage plugin comes from a moving tag and has no checksum.
+
+On macOS, `dist` sets `MACOSX_DEPLOYMENT_TARGET=13.0` and `CI=true`, which keeps the `.dmg` step from automating Finder. The app is signed ad-hoc, with the identity `-` in `crates/tessera-app/Cargo.toml`. `dist` stops when the binary reaches 41,943,040 bytes (NF5).
+
+`cargo xtask icons` draws the placeholder icon into `assets/icons/app/`. The files are committed, so packaging does not need it. `cargo xtask release-notes <version>` prints that version's section of `CHANGELOG.md`, and fails if it has none.
+
+Only macOS arm64 has been built this way so far. The Linux and Windows paths compile here and have not run.
 
 ## Smoke start
 

@@ -17,6 +17,7 @@ pub mod search;
 pub mod settings;
 pub mod state;
 pub mod transfer;
+pub mod ui_budget;
 pub mod views;
 
 use std::io::BufRead;
@@ -24,7 +25,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui_kit::component::TitleBar;
-use gpui_kit::{AppContext as _, Size, WindowOptions, px};
+use gpui_kit::{AnyWindowHandle, App, AppContext as _, Entity, Size, WindowOptions, px};
 use rust_i18n::t;
 use secrecy::SecretString;
 use tessera_core::cli::Launch;
@@ -64,6 +65,32 @@ pub fn read_stdin_key(launch: Launch, input: &mut dyn BufRead) -> Result<Launch,
         key_from_stdin: false,
         key_from_env: Some(SecretString::from(line)),
     })
+}
+
+/// Opens a window on `state`. The `primary` one, a single one per run, owns what happens once:
+/// the layout, the update check and the keymap errors.
+pub fn open_main_window(
+    state: Entity<state::AppState>,
+    primary: bool,
+    keymap_errors: Vec<String>,
+    cx: &mut App,
+) -> anyhow::Result<AnyWindowHandle> {
+    let options = WindowOptions {
+        titlebar: Some(TitleBar::title_bar_options()),
+        app_owns_titlebar_drag: true,
+        window_min_size: Some(MIN_WINDOW),
+        app_id: Some("tessera".into()),
+        ..Default::default()
+    };
+    let (window, _) = gpui_kit::open_window(options, cx, |window, cx| {
+        window.set_window_title(&t!("app.title"));
+        cx.new(|cx| {
+            let mut root = views::root::RootView::new(state, primary, window, cx);
+            root.set_keymap_errors(keymap_errors, cx);
+            root
+        })
+    })?;
+    Ok(window)
 }
 
 /// Loads the profiles, applies `launch` and runs the app until it quits. Fails before the
@@ -108,6 +135,9 @@ pub fn run(launch: Launch) -> Result<(), String> {
     let handle = runtime.handle().clone();
 
     gpui_kit::application().run(move |cx| {
+        // D106: on macOS too, or the app would stay with no window and no menu.
+        cx.set_quit_mode(gpui_kit::QuitMode::LastWindowClosed);
+        tessera_core::ui_thread::mark();
         cx.set_global(connection::ConnectorGlobal(connection::tokio_connector(
             handle.clone(),
         )));
@@ -146,12 +176,6 @@ pub fn run(launch: Launch) -> Result<(), String> {
             Ok(bindings) => actions::apply_keymap(&bindings, cx),
             Err(detail) => vec![t!("keymap.error.file", detail = detail).to_string()],
         };
-        let options = WindowOptions {
-            titlebar: Some(TitleBar::title_bar_options()),
-            app_owns_titlebar_drag: true,
-            window_min_size: Some(MIN_WINDOW),
-            ..Default::default()
-        };
         let state = cx.new(|cx| {
             state.spawn_log_drain(cx);
             state
@@ -159,15 +183,8 @@ pub fn run(launch: Launch) -> Result<(), String> {
         if let Some(id) = open {
             state.update(cx, |s, cx| s.connect(id, None, cx));
         }
-        let (window, _) = gpui_kit::open_window(options, cx, |window, cx| {
-            window.set_window_title(&t!("app.title"));
-            cx.new(|cx| {
-                let mut root = views::root::RootView::new(state, window, cx);
-                root.set_keymap_errors(keymap_errors, cx);
-                root
-            })
-        })
-        .expect("failed to open the main window");
+        let window = open_main_window(state, true, keymap_errors, cx)
+            .expect("failed to open the main window");
         window
             .update(cx, move |_, window, _| {
                 window.on_next_frame(move |_, cx| {

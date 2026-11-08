@@ -21,6 +21,7 @@ use uuid::Uuid;
 use super::env_badge;
 use crate::actions::action_label;
 use crate::state::AppState;
+use crate::ui_budget::span;
 
 /// Width of the dialog.
 const WIDTH: f32 = 560.;
@@ -84,7 +85,14 @@ struct CommandPalette {
 }
 
 /// Opens the palette on what the focused view offers now.
-pub fn open(mode: PaletteMode, state: Entity<AppState>, window: &mut Window, cx: &mut App) {
+/// Opens the palette of a window whose active tab is on connection `active`.
+pub fn open(
+    mode: PaletteMode,
+    state: Entity<AppState>,
+    active: Option<Uuid>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let previous_focus = window.focused(cx);
     // Before the dialog takes the focus, which would hide the focused view's actions.
     let stack = window.context_stack();
@@ -98,7 +106,7 @@ pub fn open(mode: PaletteMode, state: Entity<AppState>, window: &mut Window, cx:
             .collect(),
         PaletteMode::Collections => Vec::new(),
     };
-    let entries = entries(mode, actions, &state, cx);
+    let entries = entries(mode, actions, &state, active, cx);
     let view = cx.new(|cx| {
         let shown = (0..entries.len().min(PALETTE_LIMIT)).collect();
         CommandPalette {
@@ -124,6 +132,7 @@ fn entries(
     mode: PaletteMode,
     actions: Vec<(&'static str, Box<dyn Action>)>,
     state: &Entity<AppState>,
+    active: Option<Uuid>,
     cx: &App,
 ) -> Vec<PaletteEntry> {
     let state = state.read(cx);
@@ -165,11 +174,10 @@ fn entries(
     if mode == PaletteMode::Collections {
         return entries;
     }
-    let selected = state
-        .selected
+    let active = active
         .and_then(|id| state.connection(id, cx))
         .filter(|c| c.read(cx).connected.is_some());
-    if let Some(conn) = selected {
+    if let Some(conn) = active {
         let profile = &conn.read(cx).profile;
         let queries = state.saved.queries.iter();
         entries.extend(
@@ -206,6 +214,7 @@ fn entries(
 
 impl CommandPalette {
     fn query_changed(&mut self, query: &str, cx: &mut Context<Self>) {
+        let _budget = span("palette.rank");
         let all = self.entries.iter().enumerate().collect();
         let ranked = rank(query, all, |(_, e)| e.label.as_ref(), PALETTE_LIMIT);
         self.shown = ranked.into_iter().map(|(i, _)| i).collect();

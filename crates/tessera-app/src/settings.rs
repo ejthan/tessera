@@ -5,8 +5,8 @@
 
 use gpui_kit::component::table::{TableDelegate, TableState};
 use gpui_kit::component::theme::ThemeRegistry;
-use gpui_kit::component::{Size, Theme, ThemeMode};
-use gpui_kit::{App, Context, Global, Pixels, Window, px};
+use gpui_kit::component::{Size, Theme, ThemeColor, ThemeMode};
+use gpui_kit::{App, Context, Global, Hsla, Pixels, Window, px, rgb};
 use tessera_core::settings::{Density, Settings};
 
 /// The kit's font size, read before the first change.
@@ -79,12 +79,75 @@ fn apply_theme(name: &str, window: &mut Window, cx: &mut App) {
     }
 }
 
-/// Applies the theme, then the font size, which a theme file can set too.
+/// Raises the colors of the kit that miss WCAG AA, for text at 4.5:1 and for the focus ring
+/// at 3:1, in the built-in themes; a theme of the registry keeps what its author set.
+/// `ui_a11y` measures each pair.
+pub fn aa_colors(colors: &mut ThemeColor, dark: bool) {
+    let hex = |value: u32| Hsla::from(rgb(value));
+    if dark {
+        colors.danger_hover = hex(0xfca5a5);
+        colors.danger_active = hex(0xf56565);
+        colors.danger_foreground = hex(0x450a0a);
+        colors.success_hover = hex(0x86efac);
+        colors.success_active = hex(0x22c55e);
+        colors.success_foreground = hex(0x052e16);
+        colors.warning_hover = hex(0xfde047);
+        colors.warning_active = hex(0xeab308);
+        colors.warning_foreground = hex(0x422006);
+    } else {
+        colors.muted_foreground = hex(0x525252);
+        colors.danger = hex(0xb91c1c);
+        colors.danger_hover = hex(0x991b1b);
+        colors.danger_active = hex(0x7f1d1d);
+        colors.danger_foreground = hex(0xffffff);
+        colors.success = hex(0x15803d);
+        colors.success_hover = hex(0x166534);
+        colors.success_active = hex(0x14532d);
+        colors.success_foreground = hex(0xffffff);
+        colors.warning = hex(0xa16207);
+        colors.warning_hover = hex(0x854d0e);
+        colors.warning_active = hex(0x713f12);
+        colors.warning_foreground = hex(0xffffff);
+        colors.ring = hex(0x737373);
+    }
+    // Filled buttons: the kit's tint misses 4.5:1, so they take the solid pairs above.
+    colors.button_danger = colors.danger;
+    colors.button_danger_hover = colors.danger_hover;
+    colors.button_danger_active = colors.danger_active;
+    colors.button_danger_foreground = colors.danger_foreground;
+    colors.button_success = colors.success;
+    colors.button_success_hover = colors.success_hover;
+    colors.button_success_active = colors.success_active;
+    colors.button_success_foreground = colors.success_foreground;
+    colors.button_warning = colors.warning;
+    colors.button_warning_hover = colors.warning_hover;
+    colors.button_warning_active = colors.warning_active;
+    colors.button_warning_foreground = colors.warning_foreground;
+}
+
+/// Applies the theme, then the font size, which a theme file can set too, and the contrast
+/// fixes. They need an update of their own: loading a theme replaces the colors.
 fn apply_appearance(settings: &Settings, window: &mut Window, cx: &mut App) {
     apply_theme(&settings.theme, window, cx);
     let kit = cx.global::<KitFontSize>().0;
     let size = settings.font_size.map_or(kit, |n| px(n as f32));
-    Theme::update(cx, |theme| theme.font_size = size);
+    let built_in = built_in(&settings.theme, cx);
+    Theme::update(cx, |theme| {
+        theme.font_size = size;
+        if built_in {
+            let dark = theme.mode.is_dark();
+            aa_colors(&mut theme.colors, dark);
+        }
+    });
+}
+
+/// Whether `name` ends on one of the kit's two default themes.
+fn built_in(name: &str, cx: &App) -> bool {
+    matches!(name, "system" | "light" | "dark")
+        || ThemeRegistry::global(cx)
+            .themes()
+            .get(name)
+            .is_none_or(|config| config.is_default)
 }
 
 /// Whether `name` leaves the mode to the system: `system`, or a theme that was removed.
