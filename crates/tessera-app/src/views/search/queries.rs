@@ -23,18 +23,20 @@ use gpui_kit::{
     Subscription, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
 };
 use rust_i18n::t;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tessera_client::{MULTI_SEARCH_LIMIT, Preset};
 use tessera_core::search::HISTORY_SETTLE_MS;
 use tessera_core::search::history::{HistoryEntry, HistoryItem, search_entry, without_secrets};
-use tessera_core::search::params::{ParamError, SearchDraft, parse_params, to_search};
+use tessera_core::search::params::SearchDraft;
+use tessera_core::search::presets::{PresetError, preset_drafts, preset_value};
 use tessera_core::search::saved::{SavedQuery, savable};
 use tessera_widgets::confirm;
 use uuid::Uuid;
 
 use super::super::env_badge;
+use super::super::resources::titled;
 use super::{SearchWorkbench, param_error_text};
-use crate::actions::{DeleteSavedQuery, QUERY_LIST, WORKBENCH};
+use crate::actions::{DeleteSavedQuery, QUERY_LIST, SaveQuery, WORKBENCH};
 use crate::connection::error_text;
 use crate::search::SearchBackendGlobal;
 
@@ -157,53 +159,13 @@ pub(super) struct PendingHistory {
     answered: bool,
 }
 
-/// `value` of a preset as drafts and whether they are a union. Without a collection a search
-/// stays on `current`.
-fn preset_drafts(value: &Value, current: &str) -> Result<(Vec<SearchDraft>, bool), SharedString> {
-    fn draft(search: &Value, current: &str) -> Result<SearchDraft, SharedString> {
-        let Value::Object(search) = search else {
-            return Err(t!("search.preset.not_an_object").to_string().into());
-        };
-        let mut search = search.clone();
-        let collection = search.shift_remove("collection");
-        let collection = collection.as_ref().and_then(Value::as_str);
-        let params = parse_params(&Value::Object(search).to_string())
-            .map_err(|e| SharedString::from(param_error_text(&e)))?;
-        Ok(SearchDraft {
-            collection: collection.unwrap_or(current).to_string(),
-            params,
-        })
+/// What is wrong with a preset's value.
+pub(crate) fn preset_error_text(error: &PresetError) -> String {
+    match error {
+        PresetError::NotAnObject => t!("search.preset.not_an_object").to_string(),
+        PresetError::TooMany => t!("search.preset.too_many", n = MULTI_SEARCH_LIMIT).to_string(),
+        PresetError::Param(error) => param_error_text(error),
     }
-    match value.get("searches").and_then(Value::as_array) {
-        Some(searches) if searches.len() > MULTI_SEARCH_LIMIT => {
-            let text = t!("search.preset.too_many", n = MULTI_SEARCH_LIMIT);
-            Err(text.to_string().into())
-        }
-        Some(searches) if !searches.is_empty() => {
-            let drafts: Result<Vec<_>, _> = searches.iter().map(|s| draft(s, current)).collect();
-            let union = value.get("union").and_then(Value::as_bool);
-            Ok((drafts?, union.unwrap_or(false)))
-        }
-        _ => Ok((vec![draft(value, current)?], false)),
-    }
-}
-
-/// What a preset of `drafts` stores: one search without its collection, or all of them, with
-/// `union` when it is on.
-fn preset_value(drafts: &[SearchDraft], union: bool) -> Result<Value, ParamError> {
-    let mut searches = drafts
-        .iter()
-        .map(to_search)
-        .collect::<Result<Vec<_>, _>>()?;
-    if let [search] = &mut searches[..] {
-        search.shift_remove("collection");
-        return Ok(Value::Object(std::mem::take(search)));
-    }
-    let mut value = json!({ "searches": searches });
-    if union {
-        value["union"] = true.into();
-    }
-    Ok(value)
 }
 
 /// Tags typed as a list: split at commas, trimmed, empties dropped.
@@ -519,7 +481,7 @@ impl SearchWorkbench {
                 match preset_drafts(&preset.value, &self.draft().collection) {
                     Ok(loaded) => loaded,
                     Err(error) => {
-                        self.queries.pick_error = Some(error);
+                        self.queries.pick_error = Some(preset_error_text(&error).into());
                         return cx.notify();
                     }
                 }
@@ -586,7 +548,7 @@ impl SearchWorkbench {
     }
 
     pub(super) fn save_blocked(&self, cx: &App) -> bool {
-        self.run_blocked() || self.state.read(cx).saved_error.is_some()
+        self.run_blocked() || (self.preset.is_none() && self.state.read(cx).saved_error.is_some())
     }
 
     /// Opens the Save dialog.
@@ -702,6 +664,93 @@ impl SearchWorkbench {
             window,
             cx,
         );
+    }
+
+    /// Saves to the preset of preset mode, keys left out, asking first on prod.
+    pub(super) fn save_preset_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.preset.clone().filter(|_| !self.save_blocked(cx)) else {
+            return;
+        };
+        let value = match preset_value(&without_secrets(&self.drafts), self.union) {
+            Ok(value) => value,
+            Err(error) => {
+                self.queries.write_error = Some(param_error_text(&error).into());
+                return cx.notify();
+            }
+        };
+        let this = cx.entity().downgrade();
+        let profile = self.connection.read(cx).profile.clone();
+        let prod = profile.environment.is_prod();
+        self.connection.update(cx, |c, cx| {
+            c.ensure_writable(window, cx, move |window, cx| {
+                let send = {
+                    let name = name.clone();
+                    move |cx: &mut App| {
+                        this.update(cx, |this, cx| {
+                            this.send_preset(name.clone(), value.clone(), cx);
+                        })
+                        .ok();
+                    }
+                };
+                if !prod {
+                    return send(cx);
+                }
+                confirm::open(
+                    titled(&t!("presets.save_title", name = name), &profile),
+                    t!("presets.save_line", name = name).to_string(),
+                    t!("presets.save").to_string(),
+                    move |_, cx| send(cx),
+                    window,
+                    cx,
+                );
+            });
+        });
+    }
+
+    /// The band of preset mode.
+    pub(super) fn preset_band(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let name = self.preset.as_ref()?;
+        let text = SharedString::from(t!("presets.mode", name = name).to_string());
+        let locked = self.connection.read(cx).writes_locked();
+        Some(
+            h_flex()
+                .id("presets.band")
+                .test_support()
+                .aria_label(text.clone())
+                .flex_none()
+                .gap_3()
+                .px_2()
+                .py_1()
+                .items_center()
+                .text_sm()
+                .bg(cx.theme().accent)
+                .text_color(cx.theme().accent_foreground)
+                .child(div().flex_1().truncate().child(text))
+                .child(
+                    Button::new("presets.save")
+                        .primary()
+                        .small()
+                        .label(t!("presets.save").to_string())
+                        .when(locked, |b| {
+                            b.child(env_badge::lock("presets.save", false, cx))
+                        })
+                        .children(Kbd::binding_for_action(&SaveQuery, Some(WORKBENCH), window))
+                        .disabled(self.save_blocked(cx))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.save_preset_mode(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("presets.leave")
+                        .small()
+                        .label(t!("presets.leave").to_string())
+                        .on_click(cx.listener(|this, _, _, cx| this.set_preset(None, cx))),
+                ),
+        )
     }
 
     /// Detached: closing the tab must not abort a write.
@@ -962,50 +1011,5 @@ mod tests {
     fn tags_are_trimmed_and_empties_dropped() {
         assert_eq!(split_tags(" a, ,b ,"), ["a", "b"]);
         assert!(split_tags("  ").is_empty());
-    }
-
-    #[test]
-    fn a_preset_of_one_search_keeps_no_collection() {
-        let value = preset_value(&[SearchDraft::new("books")], false).unwrap();
-        assert_eq!(value, json!({"q": "*", "enable_analytics": false}));
-    }
-
-    #[test]
-    fn a_preset_of_several_lists_them() {
-        let drafts = [SearchDraft::new("a"), SearchDraft::new("b")];
-        let value = preset_value(&drafts, false).unwrap();
-        assert_eq!(value["searches"][1]["collection"], "b");
-        assert!(value.get("union").is_none());
-    }
-
-    #[test]
-    fn a_union_survives_a_preset_both_ways() {
-        let drafts = [SearchDraft::new("a"), SearchDraft::new("b")];
-        let value = preset_value(&drafts, true).unwrap();
-        assert_eq!(value["union"], true);
-        let (loaded, union) = preset_drafts(&value, "other").unwrap();
-        assert!(union);
-        assert_eq!(loaded.len(), 2);
-    }
-
-    #[test]
-    fn a_preset_over_the_limit_is_refused() {
-        let searches = vec![json!({"q": "a"}); MULTI_SEARCH_LIMIT + 1];
-        let error = preset_drafts(&json!({ "searches": searches }), "books").unwrap_err();
-        assert!(error.contains("50"), "{error}");
-        let searches = vec![json!({"q": "a"}); MULTI_SEARCH_LIMIT];
-        assert!(preset_drafts(&json!({ "searches": searches }), "books").is_ok());
-    }
-
-    #[test]
-    fn a_search_without_collection_stays_on_the_current_one() {
-        let (drafts, _) = preset_drafts(&json!({"searches": [{"q": "a"}]}), "books").unwrap();
-        assert_eq!(drafts[0].collection, "books");
-    }
-
-    #[test]
-    fn a_refused_parameter_changes_nothing() {
-        let value = json!({"searches": [{"q": "a"}, {"collection": "b", "x": [1]}]});
-        assert!(preset_drafts(&value, "books").is_err());
     }
 }

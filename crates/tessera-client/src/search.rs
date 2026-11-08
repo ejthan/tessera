@@ -5,9 +5,9 @@
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::collections::{addressable, collection_path};
-use crate::documents::{encode_query, segment};
-use crate::{Client, Error, Method};
+use crate::collections::collection_path;
+use crate::documents::encode_query;
+use crate::{Client, Error, Method, resource_path};
 
 /// An encoded query of this many bytes or more goes by `POST /multi_search`: the server
 /// answers 400 to a `GET` at exactly 4000 bytes and accepts 3999.
@@ -108,8 +108,7 @@ fn embedded(value: &Value, body: &str) -> Option<Error> {
 }
 
 fn preset_path(name: &str) -> Result<String, Error> {
-    addressable(name)?;
-    Ok(format!("presets/{}", segment(name)))
+    resource_path("presets", name)
 }
 
 impl Client {
@@ -203,6 +202,14 @@ impl Client {
         let path = preset_path(name)?;
         let body = json!({ "value": value });
         self.write(None, Method::PUT, &path, None, Some(&body), None)
+            .await
+            .map(drop)
+    }
+
+    /// `DELETE /presets/{name}`.
+    pub async fn delete_preset(&self, name: &str) -> Result<(), Error> {
+        let path = preset_path(name)?;
+        self.write(None, Method::DELETE, &path, None, None, None)
             .await
             .map(drop)
     }

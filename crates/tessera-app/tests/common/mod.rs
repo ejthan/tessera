@@ -24,6 +24,7 @@ use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
 use tessera_app::documents::{DocumentsBackend, DocumentsBackendGlobal, PageResult};
 use tessera_app::jobs::{self, JobId, JobsGlobal};
 use tessera_app::poller::{CollectionsFetcherGlobal, NodeSample, PollFetcherGlobal, SampleFuture};
+use tessera_app::relevance::{RelevanceBackend, RelevanceBackendGlobal};
 use tessera_app::runtime::Tokio;
 use tessera_app::search::{MultiAnswer, SearchAnswer, SearchBackend, SearchBackendGlobal};
 use tessera_app::state::AppState;
@@ -32,7 +33,7 @@ use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::root::RootView;
 use tessera_client::{
     Alias, Client, ClientOptions, Collection, CollectionSummary, Debug, DocumentQuery, Error,
-    Health, KeyAccess, Metrics, NodeClient, Origin, SchemaChange, Stats,
+    Health, KeyAccess, Metrics, NodeClient, Origin, SchemaChange, Stats, StopwordSet,
 };
 use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
@@ -192,6 +193,11 @@ fn install_poll_fakes(cx: &mut gpui_kit::App) {
     }
     if !cx.has_global::<TransferBackendGlobal>() {
         cx.set_global(TransferBackendGlobal(Arc::new(FakeTransferBackend(
+            Arc::default(),
+        ))));
+    }
+    if !cx.has_global::<RelevanceBackendGlobal>() {
+        cx.set_global(RelevanceBackendGlobal(Arc::new(FakeRelevanceBackend(
             Arc::default(),
         ))));
     }
@@ -1240,6 +1246,138 @@ pub fn install_search_fake(cx: &mut TestAppContext) -> Arc<FakeSearch> {
     });
     let installed = FakeSearchBackend(fake.clone());
     cx.update(|cx| cx.set_global(SearchBackendGlobal(Arc::new(installed))));
+    fake
+}
+
+/// A relevance backend that records each call as text.
+#[derive(Default)]
+pub struct FakeRelevance {
+    /// Every call, in order, as `method arg…`.
+    pub calls: Mutex<Vec<String>>,
+    /// Writes fail with this status and Typesense message.
+    pub fail: Mutex<Option<(u16, String)>>,
+    /// `save_alias` answers with this target instead of the one sent.
+    pub stored_target: Mutex<Option<String>>,
+    /// The stopword sets on the server.
+    pub stopwords: Mutex<Vec<StopwordSet>>,
+    /// `save_stopwords` stores these words instead of the ones sent.
+    pub stored_words: Mutex<Option<Vec<String>>>,
+}
+
+impl FakeRelevance {
+    fn record(&self, call: String) {
+        self.calls.lock().unwrap().push(call);
+    }
+
+    fn outcome(&self) -> Result<(), Error> {
+        match self.fail.lock().unwrap().clone() {
+            Some(e) => Err(http_error(e)),
+            None => Ok(()),
+        }
+    }
+}
+
+pub struct FakeRelevanceBackend(pub Arc<FakeRelevance>);
+
+impl RelevanceBackend for FakeRelevanceBackend {
+    fn stopwords(
+        &self,
+        _: Client,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<StopwordSet>, Error>> {
+        let answer = self.0.stopwords.lock().unwrap().clone();
+        Box::pin(async move { Ok(answer) })
+    }
+
+    fn save_stopwords(
+        &self,
+        _: Client,
+        id: String,
+        words: Vec<String>,
+        locale: Option<String>,
+    ) -> tessera_app::collections::BoxFuture<Result<StopwordSet, Error>> {
+        self.0.record(format!("save_stopwords {id}"));
+        let stored = self.0.stored_words.lock().unwrap().clone();
+        let set = StopwordSet {
+            id,
+            stopwords: stored.unwrap_or(words),
+            locale,
+        };
+        let answer = self.0.outcome().map(|()| {
+            let mut sets = self.0.stopwords.lock().unwrap();
+            sets.retain(|s| s.id != set.id);
+            sets.push(set.clone());
+            set
+        });
+        Box::pin(async move { answer })
+    }
+
+    fn delete_stopwords(
+        &self,
+        _: Client,
+        id: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0.record(format!("delete_stopwords {id}"));
+        let answer = self.0.outcome();
+        if answer.is_ok() {
+            self.0.stopwords.lock().unwrap().retain(|s| s.id != id);
+        }
+        Box::pin(async move { answer })
+    }
+
+    fn save_alias(
+        &self,
+        _: Client,
+        name: String,
+        collection: String,
+    ) -> tessera_app::collections::BoxFuture<Result<Alias, Error>> {
+        self.0.record(format!("save_alias {name} {collection}"));
+        let stored = self.0.stored_target.lock().unwrap().clone();
+        let answer = self.0.outcome().map(|()| Alias {
+            name,
+            collection_name: stored.unwrap_or(collection),
+        });
+        Box::pin(async move { answer })
+    }
+
+    fn alias(
+        &self,
+        _: Client,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<Alias, Error>> {
+        self.0.record(format!("alias {name}"));
+        let answer = self.0.outcome().map(|()| Alias {
+            name,
+            collection_name: String::new(),
+        });
+        Box::pin(async move { answer })
+    }
+
+    fn delete_alias(
+        &self,
+        _: Client,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0.record(format!("delete_alias {name}"));
+        let answer = self.0.outcome();
+        Box::pin(async move { answer })
+    }
+
+    fn delete_preset(
+        &self,
+        _: Client,
+        name: String,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        self.0.record(format!("delete_preset {name}"));
+        let answer = self.0.outcome();
+        Box::pin(async move { answer })
+    }
+}
+
+/// Installs a relevance backend and returns the handle to inspect it.
+pub fn fake_relevance(cx: &mut TestAppContext) -> Arc<FakeRelevance> {
+    let fake = Arc::new(FakeRelevance::default());
+    let installed = FakeRelevanceBackend(fake.clone());
+    cx.update(|cx| cx.set_global(RelevanceBackendGlobal(Arc::new(installed))));
     fake
 }
 

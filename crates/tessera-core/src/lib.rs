@@ -13,6 +13,7 @@ pub mod openapi;
 pub mod profile;
 pub mod raw;
 pub mod redact;
+pub mod relevance;
 pub mod schema;
 pub mod search;
 pub mod secrets;

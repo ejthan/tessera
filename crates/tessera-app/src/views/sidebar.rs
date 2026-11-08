@@ -25,10 +25,11 @@ use super::env_badge;
 use super::import_dialog::ImportDialog;
 use crate::actions::{
     ConnectSelected, DeleteConnection, DisconnectSelected, EditConnection, ExportProfiles,
-    ImportProfiles, NewConnection, OpenConsoleTab, OpenLink, OpenSearchTab, SIDEBAR_ENTRY,
+    ImportProfiles, NewConnection, OpenAliases, OpenConsoleTab, OpenCurations, OpenLink,
+    OpenPresetsTab, OpenSearchTab, OpenStopwords, OpenSynonyms, SIDEBAR_ENTRY,
     SIDEBAR_ENTRY_BUTTON, SIDEBAR_LINK, ToggleReopenLast,
 };
-use crate::state::AppState;
+use crate::state::{AppState, ResourceKind};
 use tessera_widgets::confirm;
 
 /// File name the export save dialog suggests.
@@ -47,6 +48,8 @@ pub struct Sidebar {
     search_focus: HashMap<Uuid, FocusHandle>,
     /// Focus handles of the "Console" rows.
     console_focus: HashMap<Uuid, FocusHandle>,
+    /// Focus handles of the rows of the relevance resources.
+    resource_focus: HashMap<(Uuid, ResourceKind), FocusHandle>,
     /// Why the last header action (export, reopen toggle, delete) failed, shown under the header.
     header_error: Option<SharedString>,
     export_task: Option<Task<()>>,
@@ -62,6 +65,8 @@ struct Entry {
     selected: bool,
     connecting: bool,
     connected: bool,
+    /// The server has the resources of its version.
+    supported: bool,
     unlocked: bool,
     error: Option<SharedString>,
     missing_key: bool,
@@ -79,6 +84,7 @@ impl Sidebar {
             favorite_focus: HashMap::new(),
             search_focus: HashMap::new(),
             console_focus: HashMap::new(),
+            resource_focus: HashMap::new(),
             header_error: None,
             export_task: None,
             _subscription: subscription,
@@ -167,6 +173,9 @@ impl Sidebar {
                     selected: state.selected == Some(profile.id),
                     connecting: conn.is_some_and(|c| c.connecting),
                     connected: conn.is_some_and(|c| c.connected.is_some()),
+                    supported: conn
+                        .and_then(|c| c.connected.as_ref())
+                        .is_some_and(|c| c.info.capabilities.supported),
                     unlocked: conn.is_some_and(|c| c.writes_unlocked),
                     error: conn.and_then(|c| c.error.clone()),
                     missing_key: conn.is_some_and(|c| c.missing_key),
@@ -517,7 +526,7 @@ impl Sidebar {
                     .or_insert_with(|| cx.focus_handle().tab_stop(true))
                     .clone();
                 let open = Rc::new(move |cx: &mut gpui_kit::App| {
-                    state.update(cx, |s, cx| s.open_search(id, None, cx))
+                    state.update(cx, |s, cx| s.open_search(id, None, None, cx))
                 });
                 el.child(Self::link_row(
                     format!("sidebar.{id}.search"),
@@ -555,10 +564,47 @@ impl Sidebar {
                     cx,
                 ))
             });
+        let resources = ResourceKind::ALL
+            .into_iter()
+            .filter(|kind| entry.connected && kind.shown(entry.supported));
+        let entry_el = resources.fold(entry_el, |el, kind| {
+            let state = self.state.clone();
+            let focus = self
+                .resource_focus
+                .entry((id, kind))
+                .or_insert_with(|| cx.focus_handle().tab_stop(true))
+                .clone();
+            let open = Rc::new(move |cx: &mut gpui_kit::App| {
+                state.update(cx, |s, cx| s.open_resource(id, kind, cx))
+            });
+            el.child(Self::link_row(
+                format!("sidebar.{id}.{}", kind.key()),
+                (
+                    SharedString::from(t!(kind.title_key()).to_string()),
+                    resource_shortcut(kind, window),
+                ),
+                &focus,
+                false,
+                entry.selected,
+                open,
+                cx,
+            ))
+        });
         v_flex()
             .child(entry_el)
             .children(add_key)
             .into_any_element()
+    }
+}
+
+/// The shortcut of a resource's row.
+fn resource_shortcut(kind: ResourceKind, window: &Window) -> Option<Kbd> {
+    match kind {
+        ResourceKind::Aliases => Kbd::global_binding_for_action(&OpenAliases, window),
+        ResourceKind::Synonyms => Kbd::global_binding_for_action(&OpenSynonyms, window),
+        ResourceKind::Curations => Kbd::global_binding_for_action(&OpenCurations, window),
+        ResourceKind::Stopwords => Kbd::global_binding_for_action(&OpenStopwords, window),
+        ResourceKind::Presets => Kbd::global_binding_for_action(&OpenPresetsTab, window),
     }
 }
 
@@ -575,6 +621,8 @@ impl Render for Sidebar {
             .retain(|id, _| entries.iter().any(|e| e.profile.id == *id && e.connected));
         self.console_focus
             .retain(|id, _| entries.iter().any(|e| e.profile.id == *id && e.connected));
+        self.resource_focus
+            .retain(|(id, _), _| entries.iter().any(|e| e.profile.id == *id && e.connected));
         self.favorite_focus.retain(|(id, name), _| {
             entries.iter().any(|e| {
                 e.profile.id == *id && e.connected && e.profile.favorite_collections.contains(name)

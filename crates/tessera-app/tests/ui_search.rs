@@ -89,7 +89,7 @@ impl Fixture {
     fn open_tab(&self, cx: &mut TestAppContext) {
         cx.update(|cx| {
             self.state
-                .update(cx, |s, cx| s.open_search(self.id, None, cx))
+                .update(cx, |s, cx| s.open_search(self.id, None, None, cx))
         });
     }
 
@@ -598,7 +598,7 @@ async fn load_replaces_the_drafts(cx: &mut TestAppContext) {
     let id = f.id;
     cx.update(|cx| {
         f.state.update(cx, |s, cx| {
-            s.open_search(id, Some((vec![draft], false)), cx)
+            s.open_search(id, Some((vec![draft], false)), None, cx)
         })
     });
     f.settle(cx);
@@ -930,7 +930,7 @@ fn open_query_by(f: &Fixture, cx: &mut TestAppContext, collection: &str, field: 
     let id = f.id;
     cx.update(|cx| {
         f.state.update(cx, |s, cx| {
-            s.open_search(id, Some((vec![draft], false)), cx)
+            s.open_search(id, Some((vec![draft], false)), None, cx)
         })
     });
     f.settle(cx);
