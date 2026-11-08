@@ -318,15 +318,18 @@ impl Render for AliasesView {
                         window,
                         cx,
                     ))
-                    .child(row_button(
-                        "aliases.delete".into(),
-                        t!("aliases.delete").to_string(),
-                        &DeleteResource,
-                        (none, locked),
-                        &self.focus_handle,
-                        window,
-                        cx,
-                    ))
+                    .child(
+                        row_button(
+                            "aliases.delete".into(),
+                            t!("aliases.delete").to_string(),
+                            &DeleteResource,
+                            (none, locked),
+                            &self.focus_handle,
+                            window,
+                            cx,
+                        )
+                        .danger(),
+                    )
                     .child(row_button(
                         "aliases.reindex".into(),
                         t!("aliases.reindex").to_string(),

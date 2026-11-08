@@ -68,6 +68,14 @@ jobs:
           - 8108:8108
         # Lets the server reach the stub of a test on the runner.
         options: --add-host=host.docker.internal:host-gateway
+      # live_operations snapshots and compacts, and refuses port 8108.
+      typesense-ops:
+        image: typesense/typesense:${{ matrix.typesense }}
+        env:
+          TYPESENSE_DATA_DIR: /tmp
+          TYPESENSE_API_KEY: xyz
+        ports:
+          - 18208:8108
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2.9.3
@@ -89,6 +97,10 @@ jobs:
         env:
           TESSERA_IT_URL: http://localhost:8108
           TESSERA_IT_STUB_HOST: host.docker.internal
+      - run: cargo test -p tessera-client --test live_operations --locked -- --ignored
+        env:
+          TESSERA_IT_URL: http://localhost:18208
+          TESSERA_IT_KEY: xyz
       - run: cargo test -p tessera-core --test live_scoped --test live_actions --locked -- --ignored
         env:
           TESSERA_IT_URL: http://localhost:8108

@@ -2,6 +2,7 @@
 
 //! The presets of a connection. Editing one happens in the search workbench.
 
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::{
     Action, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
@@ -330,15 +331,18 @@ impl Render for PresetsView {
                         window,
                         cx,
                     ))
-                    .child(row_button(
-                        "presets.delete".into(),
-                        t!("presets.delete").to_string(),
-                        &DeleteResource,
-                        (no_row, locked),
-                        &self.focus_handle,
-                        window,
-                        cx,
-                    )),
+                    .child(
+                        row_button(
+                            "presets.delete".into(),
+                            t!("presets.delete").to_string(),
+                            &DeleteResource,
+                            (no_row, locked),
+                            &self.focus_handle,
+                            window,
+                            cx,
+                        )
+                        .danger(),
+                    ),
             )
     }
 }

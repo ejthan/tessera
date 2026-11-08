@@ -11,6 +11,7 @@ mod export;
 mod keys;
 mod models;
 mod models_ai;
+mod operations;
 mod raw;
 mod search;
 mod send;

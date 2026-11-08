@@ -25,5 +25,6 @@ pub mod search;
 pub mod sidebar;
 pub mod stats_table;
 pub mod status_bar;
+pub mod transport;
 pub mod unlock;
 pub mod welcome;

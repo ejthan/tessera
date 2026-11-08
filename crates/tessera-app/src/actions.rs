@@ -133,6 +133,11 @@ gpui_kit::actions!(
         OpenAnalytics,
         OpenStemming,
         OpenAi,
+        OpenOperations,
+        RunSnapshot,
+        RunCompact,
+        RunClearCache,
+        RunVote,
         FlushAnalytics,
         SendTestEvent,
         OpenTopInSearch,
@@ -461,7 +466,7 @@ const OPEN_CONSOLE: &str = "cmd-shift-y";
 #[cfg(not(target_os = "macos"))]
 const OPEN_CONSOLE: &str = "ctrl-shift-y";
 #[cfg(target_os = "macos")]
-const OPEN_RESOURCES: [&str; 9] = [
+const OPEN_RESOURCES: [&str; 10] = [
     "alt-cmd-1",
     "alt-cmd-2",
     "alt-cmd-3",
@@ -471,9 +476,10 @@ const OPEN_RESOURCES: [&str; 9] = [
     "alt-cmd-7",
     "alt-cmd-8",
     "alt-cmd-9",
+    "alt-cmd-0",
 ];
 #[cfg(not(target_os = "macos"))]
-const OPEN_RESOURCES: [&str; 9] = [
+const OPEN_RESOURCES: [&str; 10] = [
     "ctrl-alt-1",
     "ctrl-alt-2",
     "ctrl-alt-3",
@@ -483,6 +489,7 @@ const OPEN_RESOURCES: [&str; 9] = [
     "ctrl-alt-7",
     "ctrl-alt-8",
     "ctrl-alt-9",
+    "ctrl-alt-0",
 ];
 #[cfg(target_os = "macos")]
 const OPEN_TOP: &str = "cmd-alt-g";
@@ -659,6 +666,11 @@ const ACTION_LABELS: &[(&str, &str)] = action_labels![
     OpenAnalytics,
     OpenStemming,
     OpenAi,
+    OpenOperations,
+    RunSnapshot,
+    RunCompact,
+    RunClearCache,
+    RunVote,
     FlushAnalytics,
     SendTestEvent,
     OpenTopInSearch,
@@ -937,6 +949,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(OPEN_RESOURCES[6], OpenAnalytics, None),
         KeyBinding::new(OPEN_RESOURCES[7], OpenStemming, None),
         KeyBinding::new(OPEN_RESOURCES[8], OpenAi, None),
+        KeyBinding::new(OPEN_RESOURCES[9], OpenOperations, None),
         KeyBinding::new(SAVE, SaveResource, Some(STEMMING_DIALOG)),
         KeyBinding::new(SAVE, SaveResource, Some(STEMMING_INPUT)),
         KeyBinding::new(OPEN_SAVED, PickImportFile, Some(STEMMING_DIALOG)),
@@ -989,6 +1002,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SHOW_JSON, ShowSchema, Some(RESOURCES)),
         KeyBinding::new(SHOW_HITS, ShowAttachment, Some(RESOURCES)),
         KeyBinding::new(SHOW_RAW, ShowTest, Some(RESOURCES)),
+        KeyBinding::new(SHOW_FORM, RunSnapshot, Some(RESOURCES)),
+        KeyBinding::new(SHOW_JSON, RunCompact, Some(RESOURCES)),
+        KeyBinding::new(SHOW_HITS, RunClearCache, Some(RESOURCES)),
+        KeyBinding::new(SHOW_RAW, RunVote, Some(RESOURCES)),
         KeyBinding::new(SAVE, RunTest, Some(TEST_PANEL)),
         KeyBinding::new(ADD_QUERY_ROW, NewConversation, Some(TEST_PANEL)),
         KeyBinding::new(SAVE, RunTest, Some(TEST_PANEL_INPUT)),

@@ -162,6 +162,27 @@ async fn ai_search_never_repeats_a_turn_after_a_dropped_connection() {
 }
 
 #[tokio::test]
+async fn ai_search_keeps_no_body_in_the_log_and_its_error_in_full() {
+    let server = MockServer::start().await;
+    let echo = r#"{"message":"provider said: bad key sk-echoed"}"#;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(echo))
+        .mount(&server)
+        .await;
+    let (client, events) = logged(&server.uri());
+    let params = [("q".to_string(), "hi".to_string())];
+    let error = client.ai_search("c", &params).await.unwrap_err();
+    assert!(
+        error.to_string().contains("sk-echoed"),
+        "the panel shows it"
+    );
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].response_body.is_none());
+    assert_eq!(events[0].status, Some(400));
+}
+
+#[tokio::test]
 async fn ai_search_goes_to_the_active_node() {
     let (first, second) = (MockServer::start().await, MockServer::start().await);
     for (server, calls) in [(&first, 0), (&second, 1)] {

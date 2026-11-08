@@ -9,7 +9,8 @@ use gpui_kit::Global;
 use secrecy::SecretString;
 use serde_json::{Map, Value};
 use tessera_client::{
-    ApiKey, Client, CreatedKey, Error, ModelKind, NewKey, StemmingDictionary, StemmingWord,
+    ApiKey, Client, CreatedKey, Error, ModelKind, NewKey, SchemaChange, StemmingDictionary,
+    StemmingWord,
 };
 use tessera_core::stemming::{
     BadLine, ImportCheck, STEMMING_FILE_LIMIT, check_import, parse_dictionary, to_jsonl,
@@ -65,6 +66,35 @@ pub trait AdminBackend: Send + Sync {
 
     /// Deletes rule `name`.
     fn delete_rule(&self, client: Client, name: String) -> BoxFuture<Result<(), Error>>;
+
+    /// `POST /operations/snapshot` on node `node`.
+    fn snapshot(&self, client: Client, node: usize, path: String)
+    -> BoxFuture<Result<bool, Error>>;
+
+    /// `POST /operations/vote` on node `node`. `false` is the node's refusal.
+    fn vote(&self, client: Client, node: usize) -> BoxFuture<Result<bool, Error>>;
+
+    /// `POST /operations/db/compact` on node `node`.
+    fn compact(&self, client: Client, node: usize) -> BoxFuture<Result<bool, Error>>;
+
+    /// `POST /operations/cache/clear` on node `node`.
+    fn clear_cache(&self, client: Client, node: usize) -> BoxFuture<Result<bool, Error>>;
+
+    /// `POST /config` with the one key on node `node`.
+    fn set_config(
+        &self,
+        client: Client,
+        node: usize,
+        key: String,
+        value: Value,
+    ) -> BoxFuture<Result<bool, Error>>;
+
+    /// The schema changes running on node `node`.
+    fn schema_changes(
+        &self,
+        client: Client,
+        node: usize,
+    ) -> BoxFuture<Result<Vec<SchemaChange>, Error>>;
 
     /// Sends an analytics event.
     fn send_event(&self, client: Client, event: Value) -> BoxFuture<Result<(), Error>>;
@@ -244,6 +274,51 @@ impl AdminBackend for TokioBackend {
 
     fn delete_rule(&self, client: Client, name: String) -> BoxFuture<Result<(), Error>> {
         self.run(async move { client.delete_analytics_rule(&name).await })
+    }
+
+    fn snapshot(
+        &self,
+        client: Client,
+        node: usize,
+        path: String,
+    ) -> BoxFuture<Result<bool, Error>> {
+        self.run(async move { client.node(node).snapshot(&path).await.map(|()| true) })
+    }
+
+    fn vote(&self, client: Client, node: usize) -> BoxFuture<Result<bool, Error>> {
+        self.run(async move { client.node(node).vote().await })
+    }
+
+    fn compact(&self, client: Client, node: usize) -> BoxFuture<Result<bool, Error>> {
+        self.run(async move { client.node(node).compact_db().await.map(|()| true) })
+    }
+
+    fn clear_cache(&self, client: Client, node: usize) -> BoxFuture<Result<bool, Error>> {
+        self.run(async move { client.node(node).clear_cache().await.map(|()| true) })
+    }
+
+    fn set_config(
+        &self,
+        client: Client,
+        node: usize,
+        key: String,
+        value: Value,
+    ) -> BoxFuture<Result<bool, Error>> {
+        self.run(async move {
+            client
+                .node(node)
+                .set_config(&key, &value)
+                .await
+                .map(|()| true)
+        })
+    }
+
+    fn schema_changes(
+        &self,
+        client: Client,
+        node: usize,
+    ) -> BoxFuture<Result<Vec<SchemaChange>, Error>> {
+        self.run(async move { client.node(node).schema_changes().await })
     }
 
     fn send_event(&self, client: Client, event: Value) -> BoxFuture<Result<(), Error>> {

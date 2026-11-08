@@ -1130,15 +1130,20 @@ impl Render for AnalyticsView {
                     .clone()
                     .map(|e| notice("analytics.error", e, danger)),
             )
-            .child(div().flex_none().p_2().child(row_button(
-                "analytics.delete".into(),
-                t!("analytics.delete").to_string(),
-                &DeleteResource,
-                (none, locked),
-                &self.focus_handle,
-                window,
-                cx,
-            )));
+            .child(
+                div().flex_none().p_2().child(
+                    row_button(
+                        "analytics.delete".into(),
+                        t!("analytics.delete").to_string(),
+                        &DeleteResource,
+                        (none, locked),
+                        &self.focus_handle,
+                        window,
+                        cx,
+                    )
+                    .danger(),
+                ),
+            );
         div()
             .key_context(ANALYTICS)
             .track_focus(&self.focus_handle)

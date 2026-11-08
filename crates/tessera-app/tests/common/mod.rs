@@ -1683,6 +1683,10 @@ pub type ScopedSearch = (String, String, Vec<(String, String)>);
 pub struct FakeAdmin {
     /// Every call, in order, as `method arg…`.
     pub calls: Mutex<Vec<String>>,
+    /// `vote` answers `false`.
+    pub vote_refused: Mutex<bool>,
+    /// What `schema_changes` answers.
+    pub schema_changes: Mutex<Vec<SchemaChange>>,
     /// The keys on the server.
     pub keys: Mutex<Vec<ApiKey>>,
     /// `keys` fails with this status and Typesense message.
@@ -1711,6 +1715,8 @@ pub struct FakeAdmin {
     pub dictionaries: Mutex<Vec<tessera_client::StemmingDictionary>>,
     /// `dictionaries` fails with this status and Typesense message.
     pub fail_dictionaries: Mutex<Option<(u16, String)>>,
+    /// `import_dictionary` waits for this before it answers.
+    pub import_hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// `import_dictionary` fails with this.
     pub fail_import: Mutex<Option<Error>>,
     /// What `read_dictionary_file` answers.
@@ -1736,6 +1742,19 @@ pub struct FakeAdmin {
 }
 
 pub struct FakeAdminBackend(pub Arc<FakeAdmin>);
+
+impl FakeAdminBackend {
+    /// Records `call`, and answers `answer` or the failure of `fail`.
+    fn operation(
+        &self,
+        call: String,
+        answer: bool,
+    ) -> tessera_app::collections::BoxFuture<Result<bool, Error>> {
+        self.0.calls.lock().unwrap().push(call);
+        let failed = self.0.fail.lock().unwrap().clone().map(http_error);
+        Box::pin(async move { failed.map_or(Ok(answer), Err) })
+    }
+}
 
 impl AdminBackend for FakeAdminBackend {
     fn keys(&self, _: Client) -> tessera_app::collections::BoxFuture<Result<Vec<ApiKey>, Error>> {
@@ -1886,6 +1905,66 @@ impl AdminBackend for FakeAdminBackend {
         Box::pin(async move { failed.map_or(Ok(()), Err) })
     }
 
+    fn snapshot(
+        &self,
+        _: Client,
+        node: usize,
+        path: String,
+    ) -> tessera_app::collections::BoxFuture<Result<bool, Error>> {
+        self.operation(format!("snapshot {node} {path}"), true)
+    }
+
+    fn vote(
+        &self,
+        _: Client,
+        node: usize,
+    ) -> tessera_app::collections::BoxFuture<Result<bool, Error>> {
+        let answer = !*self.0.vote_refused.lock().unwrap();
+        self.operation(format!("vote {node}"), answer)
+    }
+
+    fn compact(
+        &self,
+        _: Client,
+        node: usize,
+    ) -> tessera_app::collections::BoxFuture<Result<bool, Error>> {
+        self.operation(format!("compact {node}"), true)
+    }
+
+    fn clear_cache(
+        &self,
+        _: Client,
+        node: usize,
+    ) -> tessera_app::collections::BoxFuture<Result<bool, Error>> {
+        self.operation(format!("clear_cache {node}"), true)
+    }
+
+    fn set_config(
+        &self,
+        _: Client,
+        node: usize,
+        key: String,
+        value: Value,
+    ) -> tessera_app::collections::BoxFuture<Result<bool, Error>> {
+        self.operation(format!("set_config {node} {key} {value}"), true)
+    }
+
+    fn schema_changes(
+        &self,
+        client: Client,
+        node: usize,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<SchemaChange>, Error>> {
+        let origin = if client.origin() == tessera_client::Origin::Polling {
+            "polling"
+        } else {
+            "user"
+        };
+        let call = format!("schema_changes {node} {origin}");
+        self.0.calls.lock().unwrap().push(call);
+        let answer = self.0.schema_changes.lock().unwrap().clone();
+        Box::pin(async move { Ok(answer) })
+    }
+
     fn flush(&self, _: Client) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
         self.0.calls.lock().unwrap().push("flush".into());
         Box::pin(async move { Ok(()) })
@@ -1951,8 +2030,14 @@ impl AdminBackend for FakeAdminBackend {
             .lock()
             .unwrap()
             .push(format!("import {id} {}", words.len()));
+        let hold = self.0.import_hold.lock().unwrap().take();
         if let Some(e) = self.0.fail_import.lock().unwrap().take() {
-            return Box::pin(async move { Err(e) });
+            return Box::pin(async move {
+                if let Some(hold) = hold {
+                    hold.await.ok();
+                }
+                Err(e)
+            });
         }
         let mut all = self.0.dictionaries.lock().unwrap();
         if !all.iter().any(|d| d.id == id) {

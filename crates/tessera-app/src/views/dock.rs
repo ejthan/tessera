@@ -28,7 +28,7 @@ use super::resources::reindex::{ReindexState, ReindexView};
 use super::schema_view::{SchemaFailed, SchemaLoaded, SchemaView};
 use super::search::SearchWorkbench;
 use super::sidebar::Sidebar;
-use super::{env_badge, unlock, welcome};
+use super::{env_badge, transport, unlock, welcome};
 use crate::actions::{
     COLLECTION, COLLECTIONS, CONSOLE, CloneCollection, DeleteCollection, EditSchema,
     ExportDocuments, FocusSearch, ImportDocuments, LockAgain, NewCollection, OVERVIEW,
@@ -114,6 +114,7 @@ impl Render for SidebarPanel {
 /// A center tab with the overview of one connection.
 pub struct OverviewPanel {
     connection: Entity<ConnectionState>,
+    state: Entity<AppState>,
     overview: Entity<Overview>,
     focus_handle: FocusHandle,
     _poller: Entity<Poller>,
@@ -124,10 +125,12 @@ impl OverviewPanel {
     /// The overview of `connection`, redrawn whenever it changes. Polls while it is open.
     pub fn new(
         connection: Entity<ConnectionState>,
+        state: Entity<AppState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            state,
             _poller: Poller::start(connection.clone(), window, cx),
             _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
             overview: cx.new(|cx| Overview::new(connection.clone(), window, cx)),
@@ -196,6 +199,7 @@ impl Render for OverviewPanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
+            .children(transport::banner(&self.connection, &self.state, cx))
             .children(unlock::banner(&self.connection, OVERVIEW, window, cx))
             .child(self.overview.clone())
     }
@@ -204,6 +208,7 @@ impl Render for OverviewPanel {
 /// A center tab with the collections of one connection.
 pub struct CollectionsPanel {
     connection: Entity<ConnectionState>,
+    state: Entity<AppState>,
     list: Entity<CollectionsList>,
     focus_handle: FocusHandle,
     _subscription: Subscription,
@@ -218,6 +223,7 @@ impl CollectionsPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            state: state.clone(),
             _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
             list: cx.new(|cx| CollectionsList::new(connection.clone(), state, window, cx)),
             connection,
@@ -306,6 +312,7 @@ impl Render for CollectionsPanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
+            .children(transport::banner(&self.connection, &self.state, cx))
             .children(unlock::banner(&self.connection, COLLECTIONS, window, cx))
             .child(self.list.clone())
     }
@@ -324,6 +331,7 @@ pub enum CollectionView {
 /// A center tab with the documents and the schema of one collection.
 pub struct CollectionPanel {
     connection: Entity<ConnectionState>,
+    state: Entity<AppState>,
     name: String,
     view: CollectionView,
     documents: Entity<DocumentsView>,
@@ -344,9 +352,10 @@ impl CollectionPanel {
         let documents = cx.new(|cx| {
             DocumentsView::new(state.clone(), connection.clone(), name.clone(), window, cx)
         });
-        let schema =
-            cx.new(|cx| SchemaView::new(state, connection.clone(), name.clone(), window, cx));
+        let schema = cx
+            .new(|cx| SchemaView::new(state.clone(), connection.clone(), name.clone(), window, cx));
         Self {
+            state: state.clone(),
             _subscriptions: [
                 cx.observe(&connection, |_, _, cx| cx.notify()),
                 cx.subscribe_in(&schema, window, |this, _, SchemaLoaded(c), window, cx| {
@@ -523,6 +532,7 @@ impl Render for CollectionPanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
+            .children(transport::banner(&self.connection, &self.state, cx))
             .children(unlock::banner(&self.connection, COLLECTION, window, cx))
             .child(
                 TabBar::new("collection.views")
@@ -564,6 +574,7 @@ impl Render for CollectionPanel {
 /// A center tab searching one connection.
 pub struct SearchPanel {
     connection: Entity<ConnectionState>,
+    state: Entity<AppState>,
     workbench: Entity<SearchWorkbench>,
     focus_handle: FocusHandle,
     _subscription: Subscription,
@@ -578,6 +589,7 @@ impl SearchPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            state: state.clone(),
             _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
             workbench: cx.new(|cx| SearchWorkbench::new(state, connection.clone(), window, cx)),
             connection,
@@ -647,6 +659,7 @@ impl Render for SearchPanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
+            .children(transport::banner(&self.connection, &self.state, cx))
             .children(unlock::banner(&self.connection, WORKBENCH, window, cx))
             .child(div().flex_1().min_h_0().child(self.workbench.clone()))
     }
@@ -655,6 +668,7 @@ impl Render for SearchPanel {
 /// A center tab sending raw requests to one connection.
 pub struct ConsolePanel {
     connection: Entity<ConnectionState>,
+    state: Entity<AppState>,
     view: Entity<ConsoleView>,
     focus_handle: FocusHandle,
     _subscription: Subscription,
@@ -669,6 +683,7 @@ impl ConsolePanel {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            state: state.clone(),
             _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
             view: cx.new(|cx| ConsoleView::new(state, connection.clone(), window, cx)),
             connection,
@@ -738,6 +753,7 @@ impl Render for ConsolePanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
+            .children(transport::banner(&self.connection, &self.state, cx))
             .children(unlock::banner(&self.connection, CONSOLE, window, cx))
             .child(div().flex_1().min_h_0().child(self.view.clone()))
     }
@@ -746,6 +762,7 @@ impl Render for ConsolePanel {
 /// A center tab with one kind of relevance resource of one connection.
 pub struct ResourcePanel {
     connection: Entity<ConnectionState>,
+    state: Entity<AppState>,
     kind: ResourceKind,
     view: ResourceView,
     focus_handle: FocusHandle,
@@ -762,6 +779,7 @@ impl ResourcePanel {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            state: state.clone(),
             _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
             view: ResourceView::new(kind, connection.clone(), state, window, cx),
             connection,
@@ -837,6 +855,7 @@ impl Render for ResourcePanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
+            .children(transport::banner(&self.connection, &self.state, cx))
             .children(unlock::banner(&self.connection, RESOURCES, window, cx))
             .child(div().flex_1().min_h_0().child(self.view.view()))
     }
@@ -846,6 +865,7 @@ impl Render for ResourcePanel {
 /// nothing and opening it again continues.
 pub struct ReindexPanel {
     connection: Entity<ConnectionState>,
+    state: Entity<AppState>,
     alias: String,
     view: Entity<ReindexView>,
     focus_handle: FocusHandle,
@@ -870,8 +890,9 @@ impl ReindexPanel {
             reindex
         });
         let conn = connection.clone();
-        let view = cx.new(|cx| ReindexView::new(state, conn, reindex, window, cx));
+        let view = cx.new(|cx| ReindexView::new(state.clone(), conn, reindex, window, cx));
         Self {
+            state: state.clone(),
             _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
             connection,
             alias,
@@ -947,6 +968,7 @@ impl Render for ReindexPanel {
             .size_full()
             .border_t_2()
             .border_color(edge)
+            .children(transport::banner(&self.connection, &self.state, cx))
             .children(unlock::banner(&self.connection, REINDEX, window, cx))
             .child(div().flex_1().min_h_0().child(self.view.clone()))
     }

@@ -2,6 +2,7 @@
 
 //! The stemming dictionaries of a connection: their words, Import and Delete.
 
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex};
 use gpui_kit::{
     Action, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
@@ -325,15 +326,20 @@ impl Render for StemmingView {
                     .clone()
                     .map(|e| notice("stemming.error", e, danger)),
             )
-            .child(div().flex_none().p_2().child(row_button(
-                "stemming.delete".into(),
-                t!("stemming.delete").to_string(),
-                &DeleteResource,
-                (none, locked),
-                &self.focus_handle,
-                window,
-                cx,
-            )));
+            .child(
+                div().flex_none().p_2().child(
+                    row_button(
+                        "stemming.delete".into(),
+                        t!("stemming.delete").to_string(),
+                        &DeleteResource,
+                        (none, locked),
+                        &self.focus_handle,
+                        window,
+                        cx,
+                    )
+                    .danger(),
+                ),
+            );
         div()
             .track_focus(&self.focus_handle)
             .size_full()

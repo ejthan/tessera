@@ -14,6 +14,7 @@ pub(crate) mod item_save;
 pub mod key_dialog;
 pub mod keys;
 pub mod name_dialog;
+pub mod operations;
 pub mod presets;
 pub mod reindex;
 pub mod scoped_keys;
@@ -48,6 +49,7 @@ use self::ai::AiView;
 use self::aliases::AliasesView;
 use self::analytics::AnalyticsView;
 use self::keys::KeysView;
+use self::operations::OperationsView;
 use self::presets::PresetsView;
 use self::sets::SetsView;
 use self::stemming::StemmingView;
@@ -75,6 +77,8 @@ pub enum ResourceView {
     Stemming(Entity<StemmingView>),
     /// See [`AiView`].
     Ai(Entity<AiView>),
+    /// See [`OperationsView`].
+    Operations(Entity<OperationsView>),
 }
 
 impl ResourceView {
@@ -112,6 +116,9 @@ impl ResourceView {
                 Self::Stemming(cx.new(|cx| StemmingView::new(connection, window, cx)))
             }
             ResourceKind::Ai => Self::Ai(cx.new(|cx| AiView::new(connection, window, cx))),
+            ResourceKind::Operations => {
+                Self::Operations(cx.new(|cx| OperationsView::new(connection, window, cx)))
+            }
         }
     }
 
@@ -126,6 +133,7 @@ impl ResourceView {
             Self::Analytics(view) => view.clone().into(),
             Self::Stemming(view) => view.clone().into(),
             Self::Ai(view) => view.clone().into(),
+            Self::Operations(view) => view.clone().into(),
         }
     }
 
@@ -140,6 +148,7 @@ impl ResourceView {
             Self::Analytics(view) => view.focus_handle(cx),
             Self::Stemming(view) => view.focus_handle(cx),
             Self::Ai(view) => view.focus_handle(cx),
+            Self::Operations(view) => view.focus_handle(cx),
         }
     }
 
@@ -154,6 +163,7 @@ impl ResourceView {
             Self::Analytics(view) => view.read(cx).gates(cx),
             Self::Stemming(view) => view.read(cx).gates(cx),
             Self::Ai(view) => view.read(cx).gates(cx),
+            Self::Operations(view) => view.read(cx).gates(cx),
         }
     }
 }

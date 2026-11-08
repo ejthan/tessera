@@ -299,6 +299,20 @@ async fn chat_needs_unlock_on_a_read_only_profile(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn an_unreadable_chat_answer_keeps_both_errors(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![gpt()]).await;
+    f.answers(json!("not a result"));
+    f.ready(cx, "ai.conversation.row.gpt");
+    f.click(cx, "ai.test.run");
+    let text = f.label(cx, "ai.test.error");
+    assert!(text.contains("holds no conversation"), "{text}");
+    assert!(
+        text.len() > "The answer holds no conversation.".len(),
+        "{text}"
+    );
+}
+
+#[gpui_kit::test]
 async fn chat_shows_answer_turns_and_sources(cx: &mut TestAppContext) {
     let f = Fixture::new(cx, vec![gpt()]).await;
     f.answers(chat(

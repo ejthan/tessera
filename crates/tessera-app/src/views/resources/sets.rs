@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::tab::TabBar;
@@ -907,15 +908,18 @@ impl Render for SetsView {
                     .flex_wrap()
                     .gap_2()
                     .p_2()
-                    .child(row_button(
-                        format!("{prefix}.delete"),
-                        t!("sets.delete").to_string(),
-                        &DeleteResource,
-                        (no_row || self.pending.is_some(), locked),
-                        &self.focus_handle,
-                        window,
-                        cx,
-                    ))
+                    .child(
+                        row_button(
+                            format!("{prefix}.delete"),
+                            t!("sets.delete").to_string(),
+                            &DeleteResource,
+                            (no_row || self.pending.is_some(), locked),
+                            &self.focus_handle,
+                            window,
+                            cx,
+                        )
+                        .danger(),
+                    )
                     .when(synonyms, |el| {
                         el.child(row_button(
                             "synonyms.import".into(),

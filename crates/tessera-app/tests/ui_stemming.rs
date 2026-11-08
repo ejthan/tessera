@@ -452,3 +452,22 @@ async fn bad_name_keeps_import_disabled(cx: &mut TestAppContext) {
     f.fill(cx, "stemming.dialog.id", "fine");
     assert!(cx.read(|cx| dialog.read(cx).can_import(cx)));
 }
+
+#[gpui_kit::test]
+async fn escape_waits_for_an_import_so_its_failure_is_seen(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx, vec![]).await;
+    let (release, hold) = tokio::sync::oneshot::channel();
+    *f.admin.import_hold.lock().unwrap() = Some(hold);
+    *f.admin.fail_import.lock().unwrap() = Some(tessera_client::Error::Timeout);
+    f.prepare(cx, "fresh");
+    f.click(cx, "stemming.dialog.import");
+    cx.update_window(f.handle.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+    assert!(
+        f.has(cx, "stemming.dialog.id"),
+        "the form stays while it runs"
+    );
+    release.send(()).unwrap();
+    f.settle(cx);
+    assert!(f.has(cx, "stemming.dialog.error"));
+}

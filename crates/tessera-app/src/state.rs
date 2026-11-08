@@ -132,11 +132,13 @@ pub enum ResourceKind {
     Stemming,
     /// Conversation and NL search models.
     Ai,
+    /// Snapshot, vote, compact, cache, runtime config and running schema changes.
+    Operations,
 }
 
 impl ResourceKind {
     /// Every kind, in sidebar order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Aliases,
         Self::Synonyms,
         Self::Curations,
@@ -146,6 +148,7 @@ impl ResourceKind {
         Self::Analytics,
         Self::Stemming,
         Self::Ai,
+        Self::Operations,
     ];
 
     /// The part of the ids of its row and tab.
@@ -160,6 +163,7 @@ impl ResourceKind {
             Self::Analytics => "analytics",
             Self::Stemming => "stemming",
             Self::Ai => "ai",
+            Self::Operations => "operations",
         }
     }
 

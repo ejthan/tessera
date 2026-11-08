@@ -129,7 +129,8 @@ impl StemmingDialog {
                 cx,
             ))
             .w(px(WIDTH))
-            .on_cancel(move |_, _, cx| !cancel.read(cx).checking)
+            // A failing import reports here, so the form stays until it ends.
+            .on_cancel(move |_, _, cx| !cancel.read(cx).busy)
             // The dialog's Enter binding wins over the focused button's own key handling.
             .on_ok(move |_, window, cx| {
                 enter.update(cx, |this, cx| {

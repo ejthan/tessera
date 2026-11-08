@@ -1021,7 +1021,8 @@ impl DocumentsView {
             BulkMode::Update => Kbd::binding_for_action(&UpdateByQuery, Some(DOCUMENTS), window),
         };
         Button::new(id)
-            .ghost()
+            .when(mode == BulkMode::Delete, |b| b.danger())
+            .when(mode != BulkMode::Delete, |b| b.ghost())
             .small()
             .disabled(!idle)
             .label(label.to_string())
@@ -1100,7 +1101,7 @@ impl DocumentsView {
             )
             .child(
                 Button::new("documents.delete")
-                    .ghost()
+                    .danger()
                     .small()
                     .disabled(!can_delete)
                     .label(t!("documents.delete.action").to_string())

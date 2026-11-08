@@ -5,7 +5,7 @@
 //! Start it with
 //! `docker compose -f dev/docker-compose.yml --profile cluster up -d ts1 ts2 ts3`, then run
 //! `cargo test -p tessera-client --test cluster -- --ignored --test-threads=1`. Single-threaded,
-//! because two tests stop and start the shared containers. `TESSERA_CLUSTER_URLS` (comma
+//! because two tests stop and start the shared containers and one moves the leader. `TESSERA_CLUSTER_URLS` (comma
 //! separated, one URL per node in the order ts1, ts2, ts3) overrides the default
 //! `http://localhost:18111,http://localhost:18112,http://localhost:18113`; the key is `xyz`.
 //! With the override set, the two stop/start tests skip: they stop the local compose ts3,
@@ -128,6 +128,39 @@ async fn cluster_has_one_leader_two_followers() {
     let leaders = states.iter().filter(|s| **s == RaftState::Leader).count();
     let followers = states.iter().filter(|s| **s == RaftState::Follower).count();
     assert_eq!((leaders, followers), (1, 2), "{states:?}");
+}
+
+/// The index of the node that leads, if any does.
+async fn leader(client: &Client) -> Option<usize> {
+    for i in 0..client.nodes().len() {
+        if matches!(client.node(i).debug().await, Ok(d) if d.state == RaftState::Leader) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+#[tokio::test]
+#[ignore = "needs the 3-node cluster, see dev/docker-compose.yml"]
+async fn vote_on_a_follower_moves_the_leader_and_back() {
+    let client = client();
+    wait_until_ready(&client).await;
+    let first = leader(&client).await.expect("a leader");
+    let follower = (first + 1) % client.nodes().len();
+
+    assert!(!client.node(first).vote().await.expect("vote on the leader"));
+    assert!(client.node(follower).vote().await.expect("vote"));
+    wait_for("the follower to lead", Duration::from_secs(30), || async {
+        leader(&client).await == Some(follower)
+    })
+    .await;
+
+    assert!(client.node(first).vote().await.expect("vote back"));
+    wait_for("the first leader back", Duration::from_secs(30), || async {
+        leader(&client).await == Some(first)
+    })
+    .await;
+    wait_until_ready(&client).await;
 }
 
 #[tokio::test]

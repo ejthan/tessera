@@ -346,7 +346,13 @@ impl AiTestPanel {
                     self.conversation_id = Some(answer.conversation_id);
                     self.turns = answer.turns;
                 }
-                None => self.error = Some(t!("ai.no_answer").to_string().into()),
+                None => {
+                    let no_answer = t!("ai.no_answer").to_string();
+                    self.error = Some(match self.error.take() {
+                        Some(parse) => format!("{no_answer} {parse}").into(),
+                        None => no_answer.into(),
+                    });
+                }
             },
             ModelKind::NlSearch => match nl_outcome(text) {
                 NlOutcome::Parsed(parsed) => {
