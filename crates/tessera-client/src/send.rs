@@ -10,6 +10,7 @@ use secrecy::ExposeSecret;
 use serde_json::Value;
 
 use crate::event::{Body, RequestEvent, next_id};
+use crate::export::{STREAM_STALL, StreamLog};
 use crate::{Client, Error};
 
 impl Client {
@@ -47,37 +48,8 @@ impl Client {
         body: Option<(String, &'static str)>,
         timeout: Option<Duration>,
     ) -> Result<(u16, Vec<(String, String)>, String), Error> {
-        if self.is_read_only()
-            && !crate::READ_METHODS.contains(&method)
-            && !(self.read_post && method == Method::POST)
-        {
-            return Err(Error::ReadOnly { method });
-        }
-        let base = &self.nodes[node];
-        let mut url = base
-            .join(path)
-            .map_err(|_| Error::InvalidUrl(base.to_string()))?;
-        url.set_query(query);
-        let key = self.key.expose_secret();
-        // Checked before sending: reqwest would report a bad value as a network error, which
-        // fails over. Sensitive, so HTTP/2 never indexes it and `Debug` never prints it.
-        let mut key_header = HeaderValue::from_str(key).map_err(|_| Error::InvalidKey)?;
-        key_header.set_sensitive(true);
-        let mut request_headers = Vec::new();
-        // Event copies of the body are only made when someone listens.
-        let request_body = self
-            .hook
-            .as_ref()
-            .and_then(|_| body.as_ref().map(|(text, _)| Body::new(text)));
-        let mut request = self
-            .http
-            .request(method.clone(), url.clone())
-            .header("X-TYPESENSE-API-KEY", key_header)
-            .timeout(timeout.unwrap_or(self.timeout));
-        if let Some((body, content_type)) = body {
-            request_headers.push(("content-type".to_string(), content_type.to_string()));
-            request = request.header("content-type", content_type).body(body);
-        }
+        let Prepared { request, event } = self.prepare(node, &method, path, query, body)?;
+        let request = request.timeout(timeout.unwrap_or(self.timeout));
         let id = next_id();
         let started_at = SystemTime::now();
         let start = Instant::now();
@@ -101,35 +73,130 @@ impl Client {
         .await;
         let duration = start.elapsed();
         tracing::debug!(
-            method = %method,
-            path = %url.path(),
+            method = %event.method,
+            path = %event.path,
             status = ?status,
             ms = duration.as_millis() as u64,
             "typesense request"
         );
         if let Some(hook) = &self.hook {
             let text = result.as_ref().ok().map(|(_, _, text)| text);
-            hook(&RequestEvent {
-                id,
-                started_at,
-                node: base.clone(),
-                method,
-                path: url.path().to_string(),
-                query: url.query().map(str::to_string),
-                request_headers,
-                key_prefix: key_prefix(key),
-                request_body,
-                response_body: text
-                    .filter(|_| self.keep_response_body)
-                    .map(|t| Body::new(t)),
-                status,
-                duration,
-                size: text.map(|t| t.len() as u64),
-                origin: self.origin,
-                error: result.as_ref().err().map(ToString::to_string),
-            });
+            let mut event = event;
+            event.id = id;
+            event.started_at = started_at;
+            event.response_body = text
+                .filter(|_| self.keep_response_body)
+                .map(|t| Body::new(t));
+            event.status = status;
+            event.duration = duration;
+            event.size = text.map(|t| t.len() as u64);
+            event.error = result.as_ref().err().map(ToString::to_string);
+            hook(&event);
         }
         result
+    }
+}
+
+impl Client {
+    /// Sends a `GET` whose answer is read as a stream. No reqwest timeout, which would be a
+    /// total deadline over the body (`RequestBuilder::timeout`); the wait for the answer to
+    /// start is cut by [`STREAM_STALL`] instead, and `next_line` cuts the gaps. The returned
+    /// log reports one event when it is dropped.
+    pub(crate) async fn send_stream(
+        &self,
+        node: usize,
+        path: &str,
+        query: Option<&str>,
+    ) -> Result<(reqwest::Response, StreamLog), Error> {
+        let Prepared { request, event } = self.prepare(node, &Method::GET, path, query, None)?;
+        let mut log = StreamLog::new(self.hook.clone(), event);
+        let sent = tokio::time::timeout(STREAM_STALL, request.send()).await;
+        let response = match sent {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
+                let e = Error::from_reqwest(e);
+                log.end(Some(e.to_string()));
+                return Err(e);
+            }
+            Err(_) => {
+                log.end(Some(Error::Timeout.to_string()));
+                return Err(Error::Timeout);
+            }
+        };
+        log.event.status = Some(response.status().as_u16());
+        Ok((response, log))
+    }
+}
+
+/// A request ready to send and the event that will report it, with the answer still empty.
+pub(crate) struct Prepared {
+    /// Without a timeout: `send_with` sets one, a stream sets none.
+    pub(crate) request: reqwest::RequestBuilder,
+    pub(crate) event: RequestEvent,
+}
+
+impl Client {
+    /// The checks and the request every send shares: the read-only guard, the URL, the key
+    /// header, and an event with everything known before the answer.
+    pub(crate) fn prepare(
+        &self,
+        node: usize,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        body: Option<(String, &'static str)>,
+    ) -> Result<Prepared, Error> {
+        if self.is_read_only()
+            && !crate::READ_METHODS.contains(method)
+            && !(self.read_post && *method == Method::POST)
+        {
+            return Err(Error::ReadOnly {
+                method: method.clone(),
+            });
+        }
+        let base = &self.nodes[node];
+        let mut url = base
+            .join(path)
+            .map_err(|_| Error::InvalidUrl(base.to_string()))?;
+        url.set_query(query);
+        let key = self.key.expose_secret();
+        // Checked before sending: reqwest would report a bad value as a network error, which
+        // fails over. Sensitive, so HTTP/2 never indexes it and `Debug` never prints it.
+        let mut key_header = HeaderValue::from_str(key).map_err(|_| Error::InvalidKey)?;
+        key_header.set_sensitive(true);
+        let mut request_headers = Vec::new();
+        // Event copies of the body are only made when someone listens.
+        let request_body = self
+            .hook
+            .as_ref()
+            .filter(|_| self.keep_request_body)
+            .and_then(|_| body.as_ref().map(|(text, _)| Body::new(text)));
+        let mut request = self
+            .http
+            .request(method.clone(), url.clone())
+            .header("X-TYPESENSE-API-KEY", key_header);
+        if let Some((body, content_type)) = body {
+            request_headers.push(("content-type".to_string(), content_type.to_string()));
+            request = request.header("content-type", content_type).body(body);
+        }
+        let event = RequestEvent {
+            id: 0,
+            started_at: SystemTime::now(),
+            node: base.clone(),
+            method: method.clone(),
+            path: url.path().to_string(),
+            query: url.query().map(str::to_string),
+            request_headers,
+            key_prefix: key_prefix(key),
+            request_body,
+            response_body: None,
+            status: None,
+            duration: Duration::ZERO,
+            size: None,
+            origin: self.origin,
+            error: None,
+        };
+        Ok(Prepared { request, event })
     }
 }
 

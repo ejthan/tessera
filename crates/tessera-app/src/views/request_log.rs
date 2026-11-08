@@ -307,15 +307,28 @@ impl RequestLogPanel {
         let Some(id) = self.selected else {
             return;
         };
-        let command = self.state.read(cx).log().get(id).map(curl::command);
+        let command = self
+            .state
+            .read(cx)
+            .log()
+            .get(id)
+            .filter(|entry| !request_detail::is_import_batch(&entry.event))
+            .map(curl::command);
         if let Some(command) = command {
             cx.write_to_clipboard(ClipboardItem::new_string(command));
         }
     }
 
-    /// Whether an entry is selected, so Copy as curl has something to copy.
-    pub fn has_selection(&self) -> bool {
-        self.selected.is_some()
+    /// Whether the selected entry can be copied as curl: an import batch cannot, its body is
+    /// not kept.
+    pub fn has_selection(&self, cx: &App) -> bool {
+        self.selected.is_some_and(|id| {
+            let state = self.state.read(cx);
+            state
+                .log()
+                .get(id)
+                .is_some_and(|entry| !request_detail::is_import_batch(&entry.event))
+        })
     }
 
     /// The first cut body of the selected entry whose whole text is still kept.
@@ -631,6 +644,13 @@ impl RequestLogPanel {
     }
 
     fn render_filters(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let import_selected = self.selected.is_some_and(|id| {
+            self.state
+                .read(cx)
+                .log()
+                .get(id)
+                .is_some_and(|entry| request_detail::is_import_batch(&entry.event))
+        });
         let kind = self.kind();
         let kinds = ButtonGroup::new("log.filter").outline().xsmall().children(
             [
@@ -746,7 +766,10 @@ impl RequestLogPanel {
                 Button::new("log.copy_curl")
                     .ghost()
                     .xsmall()
-                    .disabled(self.selected.is_none())
+                    .disabled(self.selected.is_none() || import_selected)
+                    .when(import_selected, |b| {
+                        b.tooltip(t!("log.detail.no_curl_import").to_string())
+                    })
                     .label(t!("log.copy_curl").to_string())
                     .children(Kbd::global_binding_for_action(&CopyAsCurl, window))
                     .on_click(cx.listener(|this, _, _, cx| this.copy_as_curl(cx))),

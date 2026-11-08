@@ -332,6 +332,39 @@ async fn detail_says_when_the_body_was_not_kept(cx: &mut TestAppContext) {
     .await;
 }
 
+#[gpui_kit::test]
+async fn import_entry_says_bodies_were_not_kept(cx: &mut TestAppContext) {
+    let (handle, state, _rt) = open_log(cx);
+    send(
+        cx,
+        &state,
+        vec![entry(event(
+            6,
+            Method::POST,
+            "/collections/c/documents/import",
+            Some(200),
+            Origin::User,
+        ))],
+    );
+    wait_for_element(cx, handle, row(6), true).await;
+    cx.update_window(handle.into(), |_, window, cx| window.click(row(6), cx))
+        .unwrap();
+    wait_for_label(
+        cx,
+        handle,
+        "log.detail".into(),
+        "Bodies of import batches are not kept",
+    )
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("log.copy_curl").disabled(), Some(true));
+        window.press(COPY_CURL, cx);
+    })
+    .unwrap();
+    assert!(cx.read_from_clipboard().and_then(|c| c.text()).is_none());
+}
+
 /// An entry whose response was cut at 16 bytes, with `full` as its whole text.
 fn cut_entry(id: u64, full: Option<&str>) -> LogEntry {
     let mut e = event(id, Method::GET, "/keys", Some(200), Origin::User);

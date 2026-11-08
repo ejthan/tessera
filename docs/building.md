@@ -143,6 +143,32 @@ Hardware: an Apple M1 or comparable machine, a release build, no other heavy loa
 - Update by query with a value of the wrong type shows the warning, not a success.
 - Copy a selection as JSONL, CSV and curl and paste each into a terminal or editor.
 
+## Measuring NF3
+
+NF3 says an import of 1 million documents stays below 300 MB of RSS. `cargo xtask nf3` measures it without a display: it writes 1,000,000 documents of about 1 KB to a temporary file, imports them through the real `run_import` on a 2-worker runtime with a request log of 5,000 and 500 entries, samples `ps -o rss=` every 200 ms, then imports 200,000 documents into a second collection and stops half way. It refuses to run when `tessera_nf3` or `tessera_nf3_cancel` exists, and drops both at the end, also on a failure. It has no default URL; never point it at a server you do not own. `--keep-file <path>` writes the documents there and leaves them; a file that exists is refused, not overwritten.
+
+```bash
+TYPESENSE_PORT=18108 docker compose -f dev/docker-compose.yml up -d
+cargo run --release -p xtask -- nf3 --url http://localhost:18108 --docs 1000000
+cargo run --release -p xtask -- nf3 --url http://localhost:18108 --docs 1000000 --format json
+cargo run --release -p xtask -- nf3 --url http://localhost:18108 --docs 1000000 --format csv
+```
+
+The number that counts adds the app. `engine_rss_mb` is the peak minus the baseline of the process, so what the import adds; `--app-baseline-mb` adds the RSS of the app with its window, and `total_rss_mb` is the sum. It prints one line of JSON and exits 1 when the total reaches `--limit-mb` (300) or a check fails: all documents imported, none failed or unconfirmed, `num_documents` right, no import started after the stop, and the run returned only after the batch in flight answered.
+
+The baseline comes from the smoke start of a release build, `cargo build --release -p tessera-app` first:
+
+```bash
+# macOS: "maximum resident set size" in bytes, divide by 1,048,576
+TESSERA_SMOKE=1 /usr/bin/time -l target/release/tessera
+# Linux: "Maximum resident set size" in KiB, divide by 1,024
+TESSERA_SMOKE=1 xvfb-run -a /usr/bin/time -v target/release/tessera
+```
+
+That baseline holds the window, fonts and theme, but no connection, sidebar content or jobs panel, so the total is a lower bound of the running app. The stop in the cancel run lands half a round trip after a progress update, inside a batch in flight. A stop in the moment between two batches can see one more `POST` start about 100 µs later: it passed the check of `stop` before the stop came, and is awaited and counted like any batch in flight.
+
+The nightly workflow runs this as the job `nf3`, on Linux.
+
 ## Smoke start
 
 ```bash

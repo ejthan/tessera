@@ -7,7 +7,7 @@ use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::{App, IntoElement, ParentElement as _, SharedString, Styled as _, div, prelude::*};
 use rust_i18n::t;
-use tessera_client::Body;
+use tessera_client::{Body, Method, RequestEvent};
 use tessera_core::log::{BodyPart, LogEntry};
 use tessera_core::redact;
 
@@ -76,7 +76,14 @@ impl Detail {
                 sections.push((heading, body_text(body)));
             }
         }
-        if e.response_body.is_none() && e.size.is_some() {
+        if is_import_batch(e) {
+            for heading in [
+                t!("log.detail.request_body"),
+                t!("log.detail.response_body"),
+            ] {
+                sections.push((heading, t!("log.detail.import_body_not_kept").to_string()));
+            }
+        } else if e.response_body.is_none() && e.size.is_some() {
             sections.push((
                 t!("log.detail.response_body"),
                 t!("log.detail.body_not_kept").to_string(),
@@ -97,6 +104,11 @@ impl Detail {
             label: label.into(),
         }
     }
+}
+
+/// Whether `e` is an import batch, whose bodies the client does not report.
+pub fn is_import_batch(e: &RequestEvent) -> bool {
+    e.method == Method::POST && e.request_body.is_none() && e.path.ends_with("/documents/import")
 }
 
 /// A body, masked and pretty-printed, headed by "showing 1.0 MB of 3.4 MB" when cut.

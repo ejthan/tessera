@@ -43,6 +43,15 @@ pub enum Error {
     /// address another resource.
     #[error("the id {0} cannot be part of a URL")]
     UnaddressableId(String),
+    /// A line of an export is longer than the client holds.
+    #[error("a line of the answer exceeds {limit} bytes")]
+    LineTooLong {
+        /// The longest line the client holds, in bytes.
+        limit: usize,
+    },
+    /// The answer broke off while it was read.
+    #[error("the answer broke off: {0}")]
+    Stream(String),
     /// TLS failed: an untrusted or invalid certificate, a failed handshake, or an
     /// unusable CA file.
     #[error("TLS error: {0}")]

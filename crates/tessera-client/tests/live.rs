@@ -9,7 +9,10 @@
 use std::time::Duration;
 
 use secrecy::SecretString;
-use tessera_client::{Client, ClientOptions, DocumentQuery, Error, KeyAccess, RaftState};
+use tessera_client::{
+    Client, ClientOptions, DirtyValues, DocumentQuery, Error, ExportQuery, ImportAction,
+    ImportParams, KeyAccess, RaftState,
+};
 
 fn url() -> String {
     std::env::var("TESSERA_IT_URL").unwrap_or_else(|_| "http://localhost:18108".into())
@@ -834,4 +837,173 @@ async fn live_search_multi_search_and_presets() {
     assert_eq!(got.unwrap()["value"]["q"], "harbor");
     assert!(listed.unwrap().iter().any(|p| p.name == preset));
     assert!(removed.is_object());
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_import_answers_per_line() {
+    use serde_json::json;
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_import";
+    let alias = "tessera_it_import_alias";
+    let _ = client.delete_collection(name).await;
+    client
+        .create_collection(&json!({"name":name,"fields":[
+            {"name":"t","type":"string"},{"name":"n","type":"int32","optional":true}
+        ]}))
+        .await
+        .unwrap();
+    let params = |action, dirty_values| ImportParams {
+        action,
+        batch_size: 100,
+        dirty_values,
+    };
+    let body = [
+        r#"{"id":"1","t":"a"}"#,
+        r#"{"id":"2","t":"b","n":"x"}"#,
+        "not json",
+        r#"{"id":"1","t":"dup"}"#,
+    ]
+    .join("\n");
+    let lines = client
+        .import_batch(
+            name,
+            &params(ImportAction::Create, DirtyValues::default()),
+            &body,
+        )
+        .await;
+    let coerced = client
+        .import_batch(
+            name,
+            &params(ImportAction::Create, DirtyValues::CoerceOrReject),
+            r#"{"id":"3","t":"c","n":"12"}"#,
+        )
+        .await;
+    let rejected = client
+        .import_batch(
+            name,
+            &params(ImportAction::Create, DirtyValues::Reject),
+            r#"{"id":"4","t":"d","n":"12"}"#,
+        )
+        .await;
+    let emplace = client
+        .import_batch(
+            name,
+            &params(ImportAction::Emplace, DirtyValues::default()),
+            r#"{"id":"1","n":5}"#,
+        )
+        .await;
+    admin(
+        reqwest::Method::PUT,
+        &format!("aliases/{alias}"),
+        Some(&json!({"collection_name":name}).to_string()),
+    )
+    .await;
+    let through_alias = client
+        .import_batch(
+            alias,
+            &params(ImportAction::Create, DirtyValues::default()),
+            r#"{"id":"5","t":"e"}"#,
+        )
+        .await;
+    let count = client.count_documents(name, None).await;
+    let _ = admin_request(reqwest::Method::DELETE, &format!("aliases/{alias}"))
+        .send()
+        .await;
+    let _ = client.delete_collection(name).await;
+    let lines = lines.unwrap();
+    let shape: Vec<_> = lines.iter().map(|l| (l.success, l.code)).collect();
+    assert_eq!(
+        shape,
+        [
+            (true, None),
+            (false, Some(400)),
+            (false, Some(400)),
+            (false, Some(409))
+        ],
+        "{lines:?}"
+    );
+    assert!(coerced.unwrap()[0].success);
+    assert!(!rejected.unwrap()[0].success);
+    assert!(emplace.unwrap()[0].success);
+    assert!(through_alias.unwrap()[0].success);
+    // 1, 3 and 5 are stored.
+    assert_eq!(count.unwrap(), 3);
+}
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_export_stream() {
+    let client = client();
+    let (name, set) = ("tessera_it_export", "tessera_it_export_set");
+    let _ = client.delete_collection(name).await;
+    admin(
+        reqwest::Method::PUT,
+        &format!("/curation_sets/{set}"),
+        Some(r#"{"items":[{"id":"r","rule":{"query":"*","match":"exact"},"filter_by":"n:<3"}]}"#),
+    )
+    .await;
+    client
+        .create_collection(&serde_json::json!({
+            "name": name,
+            "fields": [{"name": "n", "type": "int32"}],
+            "curation_sets": [set],
+        }))
+        .await
+        .unwrap();
+    let docs: Vec<String> = (1..=12)
+        .map(|i| serde_json::json!({"id": i.to_string(), "n": i}).to_string())
+        .collect();
+    let imported = admin_request(
+        reqwest::Method::POST,
+        &format!("/collections/{name}/documents/import?action=create"),
+    )
+    .body(docs.join("\n"))
+    .send()
+    .await
+    .expect("import");
+    assert!(imported.status().is_success());
+    let read = |query: ExportQuery| {
+        let client = client.clone();
+        async move {
+            let mut stream = client.export_stream(name, &query).await?;
+            let mut lines = Vec::new();
+            while let Some(line) = stream.next_line().await? {
+                lines.push(line);
+            }
+            Ok::<_, Error>(lines)
+        }
+    };
+    let filtered = read(ExportQuery {
+        filter_by: Some("n:>5".into()),
+        ..ExportQuery::default()
+    })
+    .await;
+    let counted = client.count_documents(name, Some("n:>5")).await;
+    let all = read(ExportQuery::default()).await;
+    // Why the dialog offers only names from the schema: an unknown name is no error.
+    let nope = read(ExportQuery {
+        include_fields: Some("nope".into()),
+        ..ExportQuery::default()
+    })
+    .await;
+    let bad = read(ExportQuery {
+        filter_by: Some("nope:=1".into()),
+        ..ExportQuery::default()
+    })
+    .await;
+    let _ = client.delete_collection(name).await;
+    admin(
+        reqwest::Method::DELETE,
+        &format!("/curation_sets/{set}"),
+        None,
+    )
+    .await;
+    assert_eq!(filtered.unwrap().len() as u64, counted.unwrap());
+    assert_eq!(all.unwrap().len(), 12);
+    let nope = nope.unwrap();
+    assert_eq!(nope.len(), 12);
+    assert!(nope.iter().all(|l| l == "{}"), "{nope:?}");
+    assert!(matches!(bad, Err(Error::Http { status: 400, .. })));
 }

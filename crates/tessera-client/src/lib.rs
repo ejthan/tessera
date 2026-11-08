@@ -6,6 +6,7 @@ mod collections;
 mod documents;
 mod error;
 mod event;
+mod export;
 mod models;
 mod raw;
 mod search;
@@ -18,9 +19,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 pub use collections::{Alias, Collection, Field, SchemaChange, collection_path};
-pub use documents::{DocumentQuery, SearchPage, document_path, encode_query};
+pub use documents::{
+    DirtyValues, DocumentQuery, ImportAction, ImportLine, ImportParams, SearchPage, document_path,
+    encode_query,
+};
 pub use error::Error;
 pub use event::{BODY_LIMIT, Body, FULL_BODY_MAX, Origin, RequestEvent, RequestHook};
+pub use export::{ExportQuery, ExportStream, MAX_LINE, STREAM_STALL};
 pub use models::{CollectionSummary, Debug, Health, KeyAccess, Metrics, RaftState, Stats};
 pub use raw::{RawBody, RawRequest, RawResponse};
 pub use reqwest::Method;
@@ -91,6 +96,7 @@ pub struct Client {
     hook: Option<RequestHook>,
     origin: Origin,
     keep_response_body: bool,
+    keep_request_body: bool,
     /// Set only by `as_read_post`: a `POST` that reads, allowed when read-only.
     read_post: bool,
 }
@@ -178,6 +184,7 @@ impl Client {
             hook: None,
             origin: Origin::User,
             keep_response_body: true,
+            keep_request_body: true,
             read_post: false,
         })
     }

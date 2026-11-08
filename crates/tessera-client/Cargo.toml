@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+futures.workspace = true
 percent-encoding.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
@@ -15,6 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 url.workspace = true
 
