@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// Everything but the unreserved characters, so a name stays one path segment.
-const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+pub(crate) const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'_')
     .remove(b'.')

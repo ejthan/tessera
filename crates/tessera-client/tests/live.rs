@@ -359,3 +359,66 @@ async fn live_collection_lifecycle() {
     deleted.unwrap();
     assert!(matches!(gone, Err(Error::Http { status: 404, .. })));
 }
+
+#[tokio::test]
+#[ignore = "needs Typesense, see dev/docker-compose.yml"]
+async fn live_document_reads() {
+    use serde_json::json;
+    use tessera_client::DocumentQuery;
+    let client = client();
+    wait_until_ready(&client).await;
+    let name = "tessera_it_documents";
+    let _ = client.delete_collection(name).await;
+    client
+        .create_collection(&json!({"name":name,"fields":[
+            {"name":"n","type":"int32"},{"name":"genre","type":"string","facet":true}
+        ]}))
+        .await
+        .unwrap();
+    let jsonl = [
+        r#"{"id":"a","n":1,"genre":"crime"}"#,
+        r#"{"id":"b","n":2,"genre":"crime"}"#,
+        r#"{"id":"c","n":3,"genre":"drama"}"#,
+    ]
+    .join("\n");
+    let url = format!(
+        "{}/collections/{name}/documents/import?action=create",
+        url().trim_end_matches('/')
+    );
+    let imported = reqwest::Client::new()
+        .post(url)
+        .header("X-TYPESENSE-API-KEY", admin_key())
+        .body(jsonl)
+        .send()
+        .await
+        .unwrap();
+    assert!(imported.status().is_success());
+    let query = DocumentQuery {
+        page: 2,
+        per_page: 2,
+        filter_by: None,
+        sort_by: Some("n:asc".into()),
+        exclude_fields: None,
+    };
+    let page = client.search_documents(name, &query).await;
+    let all = client.count_documents(name, None).await;
+    let crime = client.count_documents(name, Some("genre:=crime")).await;
+    let facets = client.facet_values(name, "genre", "cr", 10).await;
+    let doc = client.document(name, "b").await;
+    let export = client.export_documents(name, "genre:=crime").await;
+    let bad = client.count_documents(name, Some("nope:=1")).await;
+    let _ = client.delete_collection(name).await;
+    let page = page.unwrap();
+    assert_eq!((page.found, page.out_of, page.page), (3, 3, 2));
+    assert_eq!(page.documents.len(), 1);
+    assert_eq!(page.documents[0]["id"], "c");
+    assert_eq!(all.unwrap(), 3);
+    assert_eq!(crime.unwrap(), 2);
+    assert_eq!(facets.unwrap(), ["crime"]);
+    assert_eq!(doc.unwrap()["n"], 2);
+    assert_eq!(export.unwrap().lines().count(), 2);
+    match bad {
+        Err(e @ Error::Http { status: 400, .. }) => assert!(e.typesense_message().is_some()),
+        other => panic!("bad filter: {other:?}"),
+    }
+}

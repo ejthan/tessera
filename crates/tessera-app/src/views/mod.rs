@@ -6,6 +6,7 @@ pub mod collection_danger;
 pub mod collections_list;
 pub mod connect_dialog;
 pub mod dock;
+pub mod documents;
 pub mod env_badge;
 pub mod import_dialog;
 pub mod metric_chart;

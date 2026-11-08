@@ -14,6 +14,7 @@ use rust_i18n::t;
 use secrecy::{ExposeSecret as _, SecretString};
 use tessera_client::{RequestEvent, RequestHook};
 use tessera_core::cli::Launch;
+use tessera_core::documents::views::{self, CollectionView, ViewsFile};
 use tessera_core::import;
 use tessera_core::log::{LogEntry, RequestLog};
 use tessera_core::profile::Profile;
@@ -76,6 +77,14 @@ pub struct AppState {
     save_task: Option<Task<()>>,
     /// Waits for `save_task` on quit; registered with the first save.
     on_quit: Option<Subscription>,
+    /// Column preferences of the document tables, by profile and collection.
+    pub document_views: ViewsFile,
+    /// Where `document_views.json` lives; `None` means preferences are not persisted.
+    pub views_path: Option<PathBuf>,
+    /// The last write of `document_views.json`; each write awaits the previous one.
+    views_save_task: Option<Task<()>>,
+    /// Waits for `views_save_task` on quit; registered with the first write.
+    views_on_quit: Option<Subscription>,
     log: RequestLog,
     log_tx: UnboundedSender<LogEntry>,
     /// Taken by [`AppState::spawn_log_drain`].
@@ -115,7 +124,63 @@ impl AppState {
             load_error,
             save_task: None,
             on_quit: None,
+            document_views: ViewsFile::default(),
+            views_path: None,
+            views_save_task: None,
+            views_on_quit: None,
         }
+    }
+
+    /// The saved column preferences of `collection`, or the default.
+    pub fn document_view(&self, profile: Uuid, collection: &str) -> CollectionView {
+        self.document_views.view(profile, collection)
+    }
+
+    /// Stores the column preferences and writes the file in the background. A temporary
+    /// connection keeps them in memory only. The task reports the save; callers must show
+    /// an error inline (the preferences stay set in memory).
+    pub fn set_document_view(
+        &mut self,
+        profile: Uuid,
+        collection: &str,
+        view: CollectionView,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), String>> {
+        self.document_views.set_view(profile, collection, view);
+        let temporary = self
+            .temporary
+            .as_ref()
+            .is_some_and(|(p, _)| p.id == profile);
+        let Some(path) = self.views_path.clone().filter(|_| !temporary) else {
+            return Task::ready(Ok(()));
+        };
+        let file = self.document_views.clone();
+        let previous = self.views_save_task.take();
+        let (done, result) = tokio::sync::oneshot::channel();
+        // Owned by the state, not the caller: closing a tab must not cancel the write. On the
+        // background executor so the quit handler can wait for it.
+        self.views_save_task = Some(cx.background_spawn(async move {
+            if let Some(previous) = previous {
+                previous.await;
+            }
+            done.send(views::save(&path, &file).map_err(|e| e.to_string()))
+                .ok();
+        }));
+        if self.views_on_quit.is_none() {
+            self.views_on_quit = Some(cx.on_app_quit(|s, _| {
+                let pending = s.views_save_task.take();
+                async move {
+                    if let Some(pending) = pending {
+                        pending.await;
+                    }
+                }
+            }));
+        }
+        cx.background_spawn(async move {
+            result
+                .await
+                .unwrap_or_else(|_| Err("the save was dropped".into()))
+        })
     }
 
     /// The request log of all connections.
@@ -1194,5 +1259,79 @@ mod tests {
         let state = new_state(cx, Ok(file), Some(path), Arc::new(MemoryStore::default()));
         let save = state.update(cx, |s, cx| s.toggle_favorite(id, "books", cx));
         assert!(save.await.is_err());
+    }
+
+    #[gpui_kit::test]
+    async fn document_view_is_saved_for_a_saved_profile(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("document_views.json");
+        let state = new_state(
+            cx,
+            Ok(ConnectionsFile::default()),
+            None,
+            Arc::new(MemoryStore::default()),
+        );
+        let id = Uuid::new_v4();
+        let mut view = CollectionView::default();
+        view.hidden.push("price".into());
+        state.update(cx, |s, _| s.views_path = Some(path.clone()));
+        let save = state.update(cx, |s, cx| {
+            s.set_document_view(id, "books", view.clone(), cx)
+        });
+        save.await.unwrap();
+        assert_eq!(views::load(&path).view(id, "books"), view);
+        state.read_with(cx, |s, _| {
+            assert_eq!(s.document_view(id, "books"), view);
+            assert_eq!(s.document_view(id, "other"), CollectionView::default());
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn quick_document_view_saves_land_in_order(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("document_views.json");
+        let state = new_state(
+            cx,
+            Ok(ConnectionsFile::default()),
+            None,
+            Arc::new(MemoryStore::default()),
+        );
+        let id = Uuid::new_v4();
+        state.update(cx, |s, _| s.views_path = Some(path.clone()));
+        let mut saves = Vec::new();
+        for n in 0..20 {
+            let mut view = CollectionView::default();
+            view.widths.insert("title".into(), 100. + n as f32);
+            // The caller drops the task, as a closed tab does.
+            saves.push(state.update(cx, |s, cx| s.set_document_view(id, "books", view, cx)));
+        }
+        let last = saves.pop().unwrap();
+        drop(saves);
+        last.await.unwrap();
+        assert_eq!(views::load(&path).view(id, "books").widths["title"], 119.);
+    }
+
+    #[gpui_kit::test]
+    fn temporary_connection_writes_no_file(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("document_views.json");
+        let state = new_state(
+            cx,
+            Ok(ConnectionsFile::default()),
+            None,
+            Arc::new(MemoryStore::default()),
+        );
+        let profile = Profile::new("tmp", vec![node()]);
+        let id = profile.id;
+        let mut view = CollectionView::default();
+        view.hidden.push("price".into());
+        state.update(cx, |s, cx| {
+            s.views_path = Some(path.clone());
+            s.temporary = Some((profile, SecretString::from("k")));
+            s.set_document_view(id, "books", view.clone(), cx).detach();
+        });
+        cx.run_until_parked();
+        assert!(!path.exists(), "nothing written");
+        state.read_with(cx, |s, _| assert_eq!(s.document_view(id, "books"), view));
     }
 }

@@ -532,6 +532,8 @@ async fn shortcuts_open_switch_and_add(cx: &mut TestAppContext) {
         f.state
             .update(cx, |s, cx| s.open_collection(id, "books".into(), cx))
     });
+    cx.run_until_parked();
+    f.act(cx, show_schema);
     wait_for_element(cx, f.handle, "schema.clone".into(), true).await;
     f.act(cx, |window, cx| window.click("schema.clone", cx));
     f.query(cx, |w| {
@@ -548,6 +550,8 @@ async fn schema_view_clone_sends_unmasked_values(cx: &mut TestAppContext) {
         f.state
             .update(cx, |s, cx| s.open_collection(id, "books".into(), cx))
     });
+    cx.run_until_parked();
+    f.act(cx, show_schema);
     wait_for_element(cx, f.handle, "schema.clone".into(), true).await;
     f.act(cx, |window, cx| window.click("schema.clone", cx));
     f.act(cx, |window, cx| window.click("schema.submit", cx));
@@ -742,6 +746,8 @@ async fn apply_sends_patch_body(cx: &mut TestAppContext) {
         f.state
             .update(cx, |s, cx| s.open_collection(id, "books".into(), cx))
     });
+    cx.run_until_parked();
+    f.act(cx, show_schema);
     wait_for_element(cx, f.handle, "schema.edit".into(), true).await;
     f.query(cx, |w| {
         let edit = w.find("schema.edit");

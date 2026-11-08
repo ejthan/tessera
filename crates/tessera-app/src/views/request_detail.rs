@@ -66,6 +66,12 @@ impl Detail {
                 sections.push((heading, body_text(body)));
             }
         }
+        if e.response_body.is_none() && e.size.is_some() {
+            sections.push((
+                t!("log.detail.response_body"),
+                t!("log.detail.body_not_kept").to_string(),
+            ));
+        }
         let label = sections
             .iter()
             .map(|(h, text)| format!("{h}\n{text}"))

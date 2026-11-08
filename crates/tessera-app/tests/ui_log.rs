@@ -294,6 +294,33 @@ async fn detail_shows_redacted_body(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn detail_says_when_the_body_was_not_kept(cx: &mut TestAppContext) {
+    let (handle, state, _rt) = open_log(cx);
+    // `event` has no response body but a size, like a document page.
+    send(
+        cx,
+        &state,
+        vec![entry(event(
+            5,
+            Method::GET,
+            "/collections/c/documents/search",
+            Some(200),
+            Origin::User,
+        ))],
+    );
+    wait_for_element(cx, handle, row(5), true).await;
+    cx.update_window(handle.into(), |_, window, cx| window.click(row(5), cx))
+        .unwrap();
+    wait_for_label(
+        cx,
+        handle,
+        "log.detail".into(),
+        "Response body not kept for document pages",
+    )
+    .await;
+}
+
+#[gpui_kit::test]
 async fn copy_as_curl_uses_placeholder(cx: &mut TestAppContext) {
     let (handle, state, _rt) = open_log(cx);
     let mut e = event(4, Method::POST, "/keys", Some(201), Origin::User);

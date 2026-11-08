@@ -319,7 +319,7 @@ Each module lists acceptance criteria (AC).
 - **Copy:** cell, row as JSON, selection as JSONL or CSV, "Copy as curl".
 - **Go to ID:** quick fetch via `GET …/documents/{id}`.
 
-**AC:** 200,000 documents scroll without stutter (measured with GPUI Kit's FPS HUD, ≥ 60 fps on an M1 or comparable hardware). Memory stays bounded through LRU page caching (default: 20 pages).
+**AC:** 200,000 documents scroll without stutter (measured with GPUI's debug frame overlay, D29, ≥ 60 fps on an M1 or comparable hardware). Memory stays bounded through LRU page caching (default: 20 pages).
 
 ### 7.5 Search workbench (P0)
 
@@ -443,7 +443,7 @@ List, detail view and import (JSONL with `word`/`root`) via `POST /stemming/dict
 ### 7.19 Request log (P0)
 
 - Bottom dock panel listing every request: time, connection, method, path, status, duration, size.
-- Detail view with request and response bodies (truncated above 1 MB, full view on demand from M4 on).
+- Detail view with request and response bodies (truncated above 1 MB, full view on demand from M4 on). Document page responses keep no body (D24).
 - **Redaction:** the `X-TYPESENSE-API-KEY` header always shows as `abcd••••`. Known secret fields in bodies (`api_key`, `value` on keys) are masked.
 - Filter by status, method and connection. "Copy as curl" uses the placeholder `$TYPESENSE_API_KEY` instead of the real key.
 
@@ -546,7 +546,7 @@ Mockups: [Tessera UX canvas](https://claude.ai/artifact/DucJnCzM4SMUhUo5UvVk1d).
 | ID | Requirement | Measurement |
 |---|---|---|
 | NF1 | Cold start to interactive window < 1 s (release build, M1) | timestamp logging |
-| NF2 | Scrolling a DataTable with 200k rows ≥ 60 fps | GPUI Kit FPS HUD |
+| NF2 | Scrolling a DataTable with 200k rows ≥ 60 fps | GPUI debug frame overlay (D29) |
 | NF3 | Import of 1 million documents with RSS < 300 MB | integration test + measurement |
 | NF4 | App code never blocks the UI for more than 16 ms | tracing spans, debug assertion |
 | NF5 | Binary size < 40 MB (stripped, per platform) | CI artifact check |
@@ -567,6 +567,7 @@ Location via `directories::ProjectDirs::from("org", "tessera", "Tessera")`:
 | `config/keymap.toml` | key bindings | TOML |
 | `data/history.jsonl` | search and raw console history | JSONL, rotated |
 | `data/saved_queries.json` | saved queries | JSON |
+| `data/document_views.json` | column choice, pins and widths per profile and collection (D25) | JSON |
 | `data/layout/*.json` | dock layouts | JSON (GPUI Kit format) |
 | `logs/tessera.log*` | logs | text, rotated (7 days) |
 
@@ -641,7 +642,7 @@ Each milestone ends with green CI, an updated CHANGELOG and a short demo (GIF in
 | **M0 Foundation** | Workspace with `tessera-client`, `tessera-core`, `tessera-app`; CI (lint, test, integration, build, smoke start); license and governance files; GPUI Kit window with root, theme, dock skeleton, sidebar, status bar; tokio bridge (§5.4); `tessera-client` with `health` and `debug`; welcome screen and connect dialog; `dev/docker-compose.yml`. Details: `docs/superpowers/specs/2026-11-04-m0-foundation-design.md` | App starts on macOS, Linux and Windows. "Connect" against localhost shows the version |
 | **M1 Connections and overview** | §7.1 complete (keychain, profiles, tags, read-only, import from bfritscher config), §7.2 (metrics, stats, cluster view), §7.19 request log. Details: `docs/superpowers/specs/2026-11-04-m1-connections-design.md` | AC from §7.1 and §7.2 met |
 | **M2 Collections** | §7.3 without the JOIN graph and schema inference (M5, D19): list, schema view, create (form and JSON), clone, PATCH with diff, delete, truncate, read-only unlock (D10). Creates `tessera-widgets`; `xtask seed` with small data sets. Details: `docs/superpowers/specs/2026-11-05-m2-collections-design.md` | Integration tests for all collection endpoints green |
-| **M3 Document browser** | §7.4: DataTable, infinite scroll, filter with autocompletion, inspector with JSON editor, CRUD, multi-select, delete by query with preview. `xtask seed` gains the 200k `products` set | NF2 met (200k rows) |
+| **M3 Document browser** | §7.4: DataTable, infinite scroll, filter with autocompletion, inspector with JSON editor, CRUD, multi-select, delete by query with preview. `xtask seed` gains the 200k `products` set. Details: `docs/superpowers/specs/2026-11-05-m3-documents-design.md` | NF2 met (200k rows) |
 | **M4 Search and raw console** | §7.5 (without P2 parts), multi-search, history, saved queries, code export. §7.17 raw console. §7.20 command palette | Exported curl reproduces the response |
 | **M5 Import/export** | §7.6, §7.7 including schema inference, error report, cancel. Jobs panel | NF3 met |
 | **M6 Relevance resources** | §7.8 aliases including the reindex assistant, §7.9 synonym sets, §7.10 curation sets, §7.11 stopwords, §7.12 presets | CRUD and test panels work against 30.0 and 30.2 |
@@ -699,6 +700,15 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D19 | Schema inference from a file: M2 or M5? | M5, with import, which shares the file readers |
 | D20 | Clone shortcut | ⌘⇧D / Ctrl+Shift+D in the collection views; ⌥⌘D is taken by macOS |
 | D21 | Truncate/delete dialog when the fresh reload of the collection and aliases fails | Opens with the cached data and says it may be out of date |
+| D22 | Inspector: right dock panel or inside the tab? | A resizable split inside the documents view, like the request log's detail: the document, its unsaved edits and its schema belong to one tab |
+| D23 | What does a collection tab show? | Two views, Documents (default) and Schema, ⌘1 / ⌘2 |
+| D24 | Request log vs. page cache memory | Document page responses are logged without their body; status, size and timing stay. Otherwise the log would hold the scrolled documents, up to 565 MB |
+| D25 | Where column preferences live | `data/document_views.json`, per profile and collection, not in `Profile`, which is exported as configuration |
+| D26 | Multi-select size and URL length | At most 1,000 selected rows. Id filters are batched at 7,500 encoded bytes. Ids with a backtick cannot be quoted in `filter_by` and go one by one |
+| D27 | Does schema validation block saving? | No. Marks are advisory and the server decides. Only a parse error, a changed `id` or an empty diff stop a save |
+| D28 | Which confirmation for document deletes and bulk updates? | Medium dialog; type the collection name above 1,000 documents or on prod, for single and multi delete, delete by query and update by query |
+| D29 | NF2 names a GPUI Kit FPS HUD that does not exist | Measured with GPUI's debug frame overlay behind a `frame-overlay` cargo feature, by hand, p95 draw time ≤ 16.6 ms |
+| D30 | `filter_by` over 4,000 bytes in the browser | Not supported in M3: the server's message shows inline. `POST /multi_search` is a read, but the read-only guard refuses POST and failover skips it. M4 needs it and should allow that one path in the guard |
 
 ---
 

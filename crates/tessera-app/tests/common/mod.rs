@@ -10,6 +10,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use gpui_kit::component::dock::DockPlacement;
 use gpui_kit::test::{TestAppContextExt as _, TestWindowExt as _};
 use gpui_kit::{
     AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowHandle,
@@ -18,14 +19,17 @@ use gpui_kit::{
 use secrecy::ExposeSecret as _;
 use tessera_app::collections::{CollectionsBackend, CollectionsBackendGlobal};
 use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
+use tessera_app::documents::{DocumentsBackend, DocumentsBackendGlobal, PageResult};
 use tessera_app::poller::{CollectionsFetcherGlobal, NodeSample, PollFetcherGlobal, SampleFuture};
 use tessera_app::runtime::Tokio;
 use tessera_app::state::AppState;
+use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::root::RootView;
 use tessera_client::{
-    Alias, Client, ClientOptions, Collection, CollectionSummary, Debug, Error, Health, KeyAccess,
-    Metrics, NodeClient, Origin, SchemaChange, Stats,
+    Alias, Client, ClientOptions, Collection, CollectionSummary, Debug, DocumentQuery, Error,
+    Health, KeyAccess, Metrics, NodeClient, Origin, SchemaChange, Stats,
 };
+use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
 use tessera_core::secrets::{MemoryStore, SecretStore};
 use tessera_core::store::{ConnectionsFile, StoreError};
@@ -161,6 +165,11 @@ fn install_poll_fakes(cx: &mut gpui_kit::App) {
     }
     if !cx.has_global::<CollectionsBackendGlobal>() {
         cx.set_global(CollectionsBackendGlobal(Arc::new(FakeBackend(
+            Arc::default(),
+        ))));
+    }
+    if !cx.has_global::<DocumentsBackendGlobal>() {
+        cx.set_global(DocumentsBackendGlobal(Arc::new(FakeDocsBackend(
             Arc::default(),
         ))));
     }
@@ -385,6 +394,154 @@ pub fn fake_backend(
     backend
 }
 
+/// A documents backend that synthesises rows for any page, and records what it was asked.
+#[derive(Default)]
+pub struct FakeDocs {
+    /// Documents matching any query.
+    pub found: Mutex<u64>,
+    /// Every query asked, in order.
+    pub pages: Mutex<Vec<DocumentQuery>>,
+    /// Answers fail with this status and Typesense message.
+    pub fail: Mutex<Option<(u16, String)>>,
+    /// When set, the next answer waits until the sender fires or is dropped.
+    pub hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Every document also carries this key, as a key outside the schema does.
+    pub extra_key: Mutex<Option<String>>,
+    /// The value of `extra_key`; `null` means "x".
+    pub extra_value: Mutex<serde_json::Value>,
+    /// What `facet_values` answers; `fail` makes it fail too.
+    pub facets: Mutex<Vec<String>>,
+    /// Collection, field and prefix of every `facet_values` call.
+    pub facet_calls: Mutex<Vec<(String, String, String)>>,
+    /// `document` fails with this status and Typesense message.
+    pub document_fail: Mutex<Option<(u16, String)>>,
+    /// Ids asked of `document`, in order.
+    pub document_calls: Mutex<Vec<String>>,
+}
+
+impl FakeDocs {
+    /// Holds the next answer until the returned sender fires or is dropped.
+    pub fn hold_next(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.hold.lock().unwrap() = Some(rx);
+        tx
+    }
+
+    /// Page numbers asked, in order.
+    pub fn page_numbers(&self) -> Vec<u32> {
+        self.pages.lock().unwrap().iter().map(|q| q.page).collect()
+    }
+
+    /// The `sort_by` of the last query.
+    pub fn last_sort(&self) -> Option<String> {
+        self.pages.lock().unwrap().last()?.sort_by.clone()
+    }
+
+    /// The answer to `query`: a descending sort numbers the rows from the end.
+    pub fn answer(&self, query: &DocumentQuery) -> PageResult {
+        let found = *self.found.lock().unwrap();
+        let extra = self.extra_key.lock().unwrap().clone();
+        let value = self.extra_value.lock().unwrap().clone();
+        let start = u64::from(query.page - 1) * u64::from(query.per_page);
+        let end = (start + u64::from(query.per_page)).min(found);
+        let descending = query.sort_by.as_ref().is_some_and(|s| s.ends_with(":desc"));
+        let excluded = |key: &String| query.exclude_fields.as_ref() == Some(key);
+        let docs = (start..end)
+            .map(|row| {
+                let n = if descending { found - 1 - row } else { row };
+                let mut doc = serde_json::json!({
+                    "id": n.to_string(), "title": format!("t{n}"), "price": n,
+                });
+                if let Some(key) = extra.as_ref().filter(|k| !excluded(k)) {
+                    doc[key] = if value.is_null() {
+                        "x".into()
+                    } else {
+                        value.clone()
+                    };
+                }
+                doc.as_object().unwrap().clone()
+            })
+            .collect();
+        PageResult {
+            found,
+            out_of: found,
+            search_time_ms: 3,
+            page: DocumentPage::from_documents(docs),
+        }
+    }
+}
+
+/// The installed backend; the test keeps the [`FakeDocs`] handle.
+pub struct FakeDocsBackend(pub Arc<FakeDocs>);
+
+impl DocumentsBackend for FakeDocsBackend {
+    fn page(
+        &self,
+        _: Client,
+        _: String,
+        query: DocumentQuery,
+    ) -> tessera_app::collections::BoxFuture<Result<PageResult, Error>> {
+        self.0.pages.lock().unwrap().push(query.clone());
+        let hold = self.0.hold.lock().unwrap().take();
+        let answer = match self.0.fail.lock().unwrap().clone() {
+            Some(e) => Err(http_error(e)),
+            None => Ok(self.0.answer(&query)),
+        };
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
+    }
+
+    fn facet_values(
+        &self,
+        _: Client,
+        collection: String,
+        field: String,
+        prefix: String,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<String>, Error>> {
+        let calls = &self.0.facet_calls;
+        calls.lock().unwrap().push((collection, field, prefix));
+        let answer = match self.0.fail.lock().unwrap().clone() {
+            Some(e) => Err(http_error(e)),
+            None => Ok(self.0.facets.lock().unwrap().clone()),
+        };
+        Box::pin(async move { answer })
+    }
+
+    fn document(
+        &self,
+        _: Client,
+        _: String,
+        id: String,
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
+        let answer = match self.0.document_fail.lock().unwrap().clone() {
+            Some(e) => Err(http_error(e)),
+            None => Ok(serde_json::json!({
+                "id": id, "title": format!("t{id}"), "embedding": [0.25, 0.5],
+            })),
+        };
+        self.0.document_calls.lock().unwrap().push(id);
+        let hold = self.0.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
+    }
+}
+
+/// Installs a documents backend with no documents; the test sets what it answers.
+pub fn fake_documents(cx: &mut TestAppContext) -> Arc<FakeDocs> {
+    let docs = Arc::new(FakeDocs::default());
+    let installed = FakeDocsBackend(docs.clone());
+    cx.update(|cx| cx.set_global(DocumentsBackendGlobal(Arc::new(installed))));
+    docs
+}
+
 /// Installs a node fetcher that answers with `answer` and records every node URL it polls.
 pub fn fake_poll(
     cx: &mut TestAppContext,
@@ -460,6 +617,18 @@ pub const CLOSE_TAB: &str = key("cmd-w", "ctrl-w");
 pub const COPY_CURL: &str = key("cmd-shift-c", "ctrl-shift-c");
 pub const REFRESH: &str = key("cmd-r", "ctrl-r");
 pub const LOCK_AGAIN: &str = key("cmd-shift-l", "ctrl-shift-l");
+pub const SHOW_DOCUMENTS: &str = key("cmd-1", "ctrl-1");
+pub const SHOW_SCHEMA: &str = key("cmd-2", "ctrl-2");
+pub const SORT: &str = key("cmd-shift-s", "ctrl-shift-s");
+pub const FIND: &str = key("cmd-f", "ctrl-f");
+pub const CLEAR_FILTER: &str = key("cmd-shift-f", "ctrl-shift-f");
+pub const PIN: &str = key("cmd-shift-p", "ctrl-shift-p");
+pub const NARROWER: &str = key("cmd-shift-left", "ctrl-shift-left");
+pub const WIDER: &str = key("cmd-shift-right", "ctrl-shift-right");
+pub const INSPECTOR: &str = key("cmd-i", "ctrl-i");
+pub const GO_TO: &str = key("cmd-g", "ctrl-g");
+pub const COPY_CELL: &str = key("cmd-c", "ctrl-c");
+pub const COPY_ROW: &str = key("cmd-alt-c", "ctrl-alt-c");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 pub fn fake_connector(
@@ -489,6 +658,31 @@ pub fn recording_connector(cx: &mut TestAppContext, info: Connected) -> Arc<Mute
         })));
     });
     seen
+}
+
+/// The open tab of collection `name`.
+pub fn collection_panel(
+    cx: &mut TestAppContext,
+    handle: WindowHandle<Root>,
+    name: &str,
+) -> Entity<CollectionPanel> {
+    handle
+        .update(cx, |root, _, cx| {
+            let view = root.view().clone().downcast::<RootView>().unwrap();
+            let area = view.read(cx).dock().read(cx);
+            area.layout(DockPlacement::Center)
+                .unwrap()
+                .panels()
+                .filter_map(|id| area.panel(id)?.view().downcast::<CollectionPanel>().ok())
+                .find(|panel| panel.read(cx).name() == name)
+                .unwrap()
+        })
+        .unwrap()
+}
+
+/// Switches the focused collection tab to its schema.
+pub fn show_schema(window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
+    window.press(SHOW_SCHEMA, cx);
 }
 
 pub async fn open_dialog(cx: &mut TestAppContext, handle: WindowHandle<Root>) {

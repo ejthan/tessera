@@ -10,6 +10,9 @@ publish.workspace = true
 name = "tessera"
 path = "src/main.rs"
 
+[features]
+frame-overlay = ["gpui-kit/profiler"]
+
 [dependencies]
 anyhow.workspace = true
 gpui-kit.workspace = true

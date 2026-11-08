@@ -370,6 +370,7 @@ async fn open_schema(cx: &mut TestAppContext, collections: Vec<Collection>) -> F
         true,
     )
     .await;
+    act(cx, f.handle, show_schema);
     wait_for_element(cx, f.handle, "schema.field.title".into(), true).await;
     act(cx, f.handle, |_, _| {});
     f
@@ -654,6 +655,7 @@ async fn delete_closes_the_collection_tab_and_updates_list(cx: &mut TestAppConte
     let tab = format!("tab.{}.collection.books", f.profile.id);
     wait_for_element(cx, f.handle, tab.clone(), true).await;
     cx.run_until_parked();
+    act(cx, f.handle, show_schema);
     act(cx, f.handle, |window, cx| window.press(DELETE, cx));
     f.confirm(cx, "books").await;
     wait_for_element(cx, f.handle, tab, false).await;
@@ -757,6 +759,7 @@ async fn alias_failure_shows_in_the_schema_header(cx: &mut TestAppContext) {
     let (id, state) = (f.profile.id, f.state.clone());
     cx.update(|cx| state.update(cx, |s, cx| s.open_collection(id, "books".into(), cx)));
     wait_for_element(cx, f.handle, format!("tab.{id}.collection.books"), true).await;
+    act(cx, f.handle, show_schema);
     wait_for_label(cx, f.handle, "schema.documents".into(), "10,000").await;
     act(cx, f.handle, |window, _| {
         let aliases = label(window, "schema.aliases");
@@ -857,6 +860,8 @@ async fn write_buttons_show_the_lock_until_unlocked(cx: &mut TestAppContext) {
     assert!(!f.shown(cx, "collections.reload.readonly"));
     let (id, state) = (f.profile.id, f.state.clone());
     cx.update(|cx| state.update(cx, |s, cx| s.open_collection(id, "books".into(), cx)));
+    wait_for_element(cx, f.handle, format!("tab.{id}.collection.books"), true).await;
+    act(cx, f.handle, show_schema);
     wait_for_label(cx, f.handle, "schema.documents".into(), "10,000").await;
     for button in ["edit", "clone", "truncate", "delete"] {
         assert!(

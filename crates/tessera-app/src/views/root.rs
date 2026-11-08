@@ -434,8 +434,12 @@ impl Render for RootView {
                 })
             });
         let red = rgb(env_badge::PROD_RED);
-        v_flex()
-            .relative()
+        let root = v_flex();
+        #[cfg(feature = "frame-overlay")]
+        let root = root.on_action(|_: &crate::actions::ToggleFrameOverlay, window, _| {
+            window.cycle_debug_frame_overlay_mode();
+        });
+        root.relative()
             .size_full()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
