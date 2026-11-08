@@ -197,3 +197,99 @@ async fn quiet_client_logs_size_but_no_body() {
     assert_eq!(events[1].size, Some(SEARCH.len() as u64));
     assert_eq!(events[1].status, Some(200));
 }
+
+#[tokio::test]
+async fn document_writes_send_method_path_query_and_body() {
+    let server = MockServer::start().await;
+    let doc = serde_json::json!({"id":"a b","n":1});
+    Mock::given(method("POST"))
+        .and(path("/collections/c/documents"))
+        .and(wiremock::matchers::body_json(&doc))
+        .respond_with(ResponseTemplate::new(201).set_body_string(r#"{"id":"a b","n":1}"#))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/collections/c/documents"))
+        .and(query_param("action", "upsert"))
+        .respond_with(ResponseTemplate::new(201).set_body_string(r#"{"id":"u"}"#))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/collections/c/documents/a%20b"))
+        .and(wiremock::matchers::body_json(
+            serde_json::json!({"a":{"b":null}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"id":"a b"}"#))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/collections/c/documents/a%20b"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"id":"a b"}"#))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = client(&server.uri());
+    assert_eq!(c.create_document("c", &doc).await.unwrap()["id"], "a b");
+    // Plain create must not carry the upsert action.
+    let first = &server.received_requests().await.unwrap()[0];
+    assert_eq!(first.url.query(), None);
+    assert_eq!(
+        c.upsert_document("c", &serde_json::json!({"id":"u"}))
+            .await
+            .unwrap()["id"],
+        "u"
+    );
+    c.patch_document("c", "a b", &serde_json::json!({"a":{"b":null}}))
+        .await
+        .unwrap();
+    c.delete_document("c", "a b").await.unwrap();
+}
+
+#[tokio::test]
+async fn document_write_errors_surface_the_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(409).set_body_string(r#"{"message":"exists"}"#))
+        .mount(&server)
+        .await;
+    let err = client(&server.uri())
+        .create_document("c", &serde_json::json!({"id":"a"}))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Http { status: 409, .. }));
+}
+
+#[tokio::test]
+async fn read_only_client_refuses_document_writes() {
+    let server = MockServer::start().await;
+    let locked = Client::new(
+        &[&server.uri()],
+        SecretString::from("k"),
+        ClientOptions {
+            read_only: true,
+            ..ClientOptions::default()
+        },
+    )
+    .unwrap();
+    let v = serde_json::json!({"id":"a"});
+    assert!(matches!(
+        locked.create_document("c", &v).await,
+        Err(Error::ReadOnly { .. })
+    ));
+    assert!(matches!(
+        locked.upsert_document("c", &v).await,
+        Err(Error::ReadOnly { .. })
+    ));
+    assert!(matches!(
+        locked.patch_document("c", "a", &v).await,
+        Err(Error::ReadOnly { .. })
+    ));
+    assert!(matches!(
+        locked.delete_document("c", "a").await,
+        Err(Error::ReadOnly { .. })
+    ));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

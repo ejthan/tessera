@@ -170,6 +170,63 @@ impl Fixture {
         cx.update(|cx| inspector.read(cx).current_id().map(str::to_string))
     }
 
+    /// Replaces the editor's text and lets the check after typing run.
+    fn edit(&self, cx: &mut TestAppContext, text: &str) {
+        let inspector = self.inspector(cx);
+        let editor = cx.update(|cx| inspector.read(cx).editor().clone());
+        self.act(cx, |window, cx| {
+            editor.update(cx, |e, cx| {
+                e.set_text(text, window, cx);
+                e.focus(window, cx);
+            });
+        });
+        cx.executor().advance_clock(Duration::from_millis(200));
+        self.settle(cx);
+    }
+
+    /// Opens the inspector on row 3, whose document is `{"id": "3", "title": "t3", …}`.
+    fn open_document(&self, cx: &mut TestAppContext) {
+        self.select_row(cx, 3);
+        self.act(cx, |window, cx| window.press("enter", cx));
+        self.settle(cx);
+        let inspector = self.inspector(cx);
+        let editor = cx.update(|cx| inspector.read(cx).editor().clone());
+        self.act(cx, |window, cx| {
+            editor.update(cx, |e, cx| e.focus(window, cx))
+        });
+    }
+
+    /// Opens row 3, renames it to "new" and asks for the review.
+    fn review_renamed(&self, cx: &mut TestAppContext) {
+        self.open_document(cx);
+        self.edit(cx, RENAMED);
+        self.act(cx, |window, cx| window.press(SAVE, cx));
+        self.settle(cx);
+    }
+
+    fn writes(&self) -> Vec<(String, String, serde_json::Value)> {
+        self.docs.writes.lock().unwrap().clone()
+    }
+
+    fn dirty(&self, cx: &mut TestAppContext) -> bool {
+        let inspector = self.inspector(cx);
+        cx.update(|cx| inspector.read(cx).is_dirty(cx))
+    }
+
+    fn has(&self, cx: &mut TestAppContext, id: &'static str) -> bool {
+        self.act(cx, |window, _| window.try_find(id).is_some())
+    }
+
+    fn text_of(&self, cx: &mut TestAppContext, id: &'static str) -> String {
+        self.act(cx, |window, _| label(window, id))
+    }
+
+    fn review_disabled(&self, cx: &mut TestAppContext) -> bool {
+        self.act(cx, |window, _| {
+            window.find("inspector.review").disabled() == Some(true)
+        })
+    }
+
     /// Selects a cell of `row` and leaves the keyboard on the table.
     fn select_row(&self, cx: &mut TestAppContext, row: usize) {
         let table = self.table(cx);
@@ -247,6 +304,9 @@ impl Fixture {
     }
 }
 
+/// Row 3's document with another title.
+const RENAMED: &str = r#"{"id": "3", "title": "new", "embedding": [0.25, 0.5]}"#;
+
 /// Opens `collection` with `found` documents and waits for the first page.
 async fn open_found(cx: &mut TestAppContext, collection: Collection, found: u64) -> Fixture {
     let docs = fake_documents(cx);
@@ -255,9 +315,19 @@ async fn open_found(cx: &mut TestAppContext, collection: Collection, found: u64)
 }
 
 async fn open_tab(cx: &mut TestAppContext, collection: Collection, docs: Arc<FakeDocs>) -> Fixture {
+    open_profile(cx, collection, docs, false).await
+}
+
+async fn open_profile(
+    cx: &mut TestAppContext,
+    collection: Collection,
+    docs: Arc<FakeDocs>,
+    read_only: bool,
+) -> Fixture {
     let name = collection.name.clone();
     let backend = fake_backend(cx, Some((vec![collection], vec![])));
-    let profile = tessera_core::profile::Profile::new("test", vec![node()]);
+    let mut profile = tessera_core::profile::Profile::new("test", vec![node()]);
+    profile.read_only = read_only;
     let profile_id = profile.id;
     let (handle, state, rt) = {
         fake_connector(cx, |_| Ok(server("30.2", true)));
@@ -1374,4 +1444,537 @@ async fn empty_collection_links_the_docs_and_the_seed_hint(cx: &mut TestAppConte
         assert!(window.try_find("documents.docs").is_some());
         assert!(label(window, "documents.empty").contains("cargo xtask seed"));
     });
+}
+
+#[gpui_kit::test]
+async fn edit_then_review_shows_the_diff_and_patch_body(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.review_renamed(cx);
+    assert!(
+        f.text_of(cx, "review.target")
+            .contains("/products/documents/3")
+    );
+    let change = f.text_of(cx, "review.diff.title");
+    assert!(change.contains("t3") && change.contains("new"), "{change}");
+    let body: serde_json::Value = serde_json::from_str(&f.text_of(cx, "review.body")).unwrap();
+    assert_eq!(body, json!({"title": "new"}));
+    assert!(!f.has(cx, "review.consequence"));
+}
+
+#[gpui_kit::test]
+async fn apply_sends_the_merge_patch(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.review_renamed(cx);
+    f.act(cx, |window, cx| window.press("tab", cx));
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    let writes = f.writes();
+    assert_eq!(
+        writes,
+        [("patch".into(), "3".into(), json!({"title": "new"}))]
+    );
+    wait_for_element(cx, f.handle, "review.apply".into(), false).await;
+    assert!(f.inspector_text(cx).contains("\"new\""));
+    assert!(!f.dirty(cx), "the response is the new base");
+}
+
+#[gpui_kit::test]
+async fn saving_reloads_the_rows_without_a_count_change(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.review_renamed(cx);
+    let pages = f.docs.pages.lock().unwrap().len();
+    f.click(cx, "review.apply");
+    f.settle(cx);
+    assert!(f.docs.pages.lock().unwrap().len() > pages);
+}
+
+#[gpui_kit::test]
+async fn upsert_sends_the_whole_document(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.act(cx, |window, cx| window.press(SAVE_MODE, cx));
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(f.has(cx, "review.consequence"));
+    f.click(cx, "review.apply");
+    f.settle(cx);
+    let (kind, id, body) = f.writes().pop().unwrap();
+    assert_eq!((kind.as_str(), id.as_str()), ("upsert", "3"));
+    assert_eq!(
+        body,
+        serde_json::from_str::<serde_json::Value>(RENAMED).unwrap()
+    );
+}
+
+#[gpui_kit::test]
+async fn save_mode_buttons_change_only_the_mode(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.click(cx, "inspector.save_mode.upsert");
+    assert!(f.dirty(cx));
+    f.click(cx, "inspector.save_mode.patch");
+    f.click(cx, "inspector.review");
+    f.settle(cx);
+    assert!(!f.has(cx, "review.consequence"));
+}
+
+#[gpui_kit::test]
+async fn review_focus_starts_on_back(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.review_renamed(cx);
+    f.act(cx, |window, cx| window.press("enter", cx));
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "review.back".into(), false).await;
+    assert!(f.writes().is_empty());
+}
+
+#[gpui_kit::test]
+async fn enter_on_the_focused_apply_button_applies(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.review_renamed(cx);
+    f.act(cx, |window, cx| window.press("tab", cx));
+    f.act(cx, |window, cx| window.press("enter", cx));
+    f.settle(cx);
+    assert_eq!(f.writes().len(), 1);
+}
+
+#[gpui_kit::test]
+async fn escape_returns_without_sending(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.review_renamed(cx);
+    f.act(cx, |window, cx| window.press("escape", cx));
+    wait_for_element(cx, f.handle, "review.back".into(), false).await;
+    assert!(f.writes().is_empty());
+    assert!(f.dirty(cx), "the edit is still there");
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(
+        f.has(cx, "review.back"),
+        "the keyboard is back in the editor"
+    );
+}
+
+#[gpui_kit::test]
+async fn server_error_stays_in_the_review(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.write_fail.lock().unwrap() = Some((400, "bad field".into()));
+    f.review_renamed(cx);
+    f.click(cx, "review.apply");
+    f.settle(cx);
+    assert!(f.text_of(cx, "review.error").contains("bad field"));
+    assert!(f.has(cx, "review.apply"));
+    assert!(f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn apply_disables_itself_and_escape_waits_while_running(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.review_renamed(cx);
+    let hold = f.docs.hold_next();
+    f.click(cx, "review.apply");
+    f.act(cx, |window, cx| window.press("escape", cx));
+    f.act(cx, |window, _| {
+        assert_eq!(window.find("review.apply").disabled(), Some(true));
+    });
+    f.click(cx, "review.apply");
+    assert_eq!(f.writes().len(), 1, "one click, one write");
+    hold.send(()).unwrap();
+    wait_for_element(cx, f.handle, "review.apply".into(), false).await;
+}
+
+#[gpui_kit::test]
+async fn unchanged_document_disables_review(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    assert!(f.review_disabled(cx));
+    assert!(f.has(cx, "inspector.review.reason"));
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(!f.has(cx, "review.back"));
+}
+
+#[gpui_kit::test]
+async fn changed_id_disables_review(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(
+        cx,
+        r#"{"id": "4", "title": "t3", "embedding": [0.25, 0.5]}"#,
+    );
+    assert!(f.review_disabled(cx));
+    assert!(
+        f.text_of(cx, "inspector.review.reason")
+            .contains("New document")
+    );
+}
+
+#[gpui_kit::test]
+async fn parse_error_disables_review(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, "{");
+    assert!(f.review_disabled(cx));
+    assert!(f.dirty(cx));
+    f.edit(cx, "[1]");
+    assert!(f.review_disabled(cx));
+    assert!(f.has(cx, "inspector.review.reason"));
+}
+
+#[gpui_kit::test]
+async fn review_right_after_typing_sees_the_last_text(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    let inspector = f.inspector(cx);
+    let editor = cx.update(|cx| inspector.read(cx).editor().clone());
+    f.act(cx, |window, cx| {
+        editor.update(cx, |e, cx| e.set_text(RENAMED, window, cx));
+        window.press(SAVE, cx);
+    });
+    f.settle(cx);
+    assert!(f.has(cx, "review.back"), "no wait for the debounce");
+}
+
+#[gpui_kit::test]
+async fn stale_document_warns_and_diffs_against_fresh(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    *f.docs.stored.lock().unwrap() =
+        Some(json!({"id": "3", "title": "theirs", "embedding": [0.25, 0.5]}));
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(f.has(cx, "review.stale"));
+    assert!(f.text_of(cx, "review.diff.title").contains("theirs"));
+}
+
+#[gpui_kit::test]
+async fn review_of_a_deleted_document_shows_the_error_inline(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    *f.docs.document_fail.lock().unwrap() = Some((404, "gone".into()));
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(f.text_of(cx, "inspector.save_error").contains("gone"));
+    assert!(!f.has(cx, "review.back"));
+}
+
+#[gpui_kit::test]
+async fn locked_profile_opens_unlock_and_sends_nothing(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 10;
+    let f = open_profile(cx, plain_schema(), docs, true).await;
+    f.open_document(cx);
+    assert!(f.has(cx, "inspector.review.readonly"));
+    f.edit(cx, RENAMED);
+    let fetched = f.docs.document_calls.lock().unwrap().len();
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(f.has(cx, "danger.input"));
+    assert_eq!(f.docs.document_calls.lock().unwrap().len(), fetched);
+    assert!(f.writes().is_empty());
+    f.click(cx, "danger.input");
+    f.act(cx, |window, cx| window.input("test", cx));
+    f.click(cx, "danger.ok");
+    f.settle(cx);
+    wait_for_element(cx, f.handle, "review.back".into(), true).await;
+    assert!(f.writes().is_empty());
+}
+
+#[gpui_kit::test]
+async fn read_only_profile_keeps_the_editor_editable(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 10;
+    let f = open_profile(cx, plain_schema(), docs, true).await;
+    f.open_document(cx);
+    f.act(cx, |window, cx| window.input("x", cx));
+    assert!(f.inspector_text(cx).contains('x'));
+}
+
+#[gpui_kit::test]
+async fn wrong_type_is_marked_but_does_not_block(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(
+        cx,
+        r#"{"id": "3", "title": 5, "price": 1.0, "embedding": [0.25, 0.5]}"#,
+    );
+    let issues = f.text_of(cx, "inspector.issues");
+    assert!(issues.contains("title"), "{issues}");
+    assert!(!f.review_disabled(cx));
+    let inspector = f.inspector(cx);
+    let marks = cx.update(|cx| inspector.read(cx).editor().read(cx).mark_count(cx));
+    assert!(marks >= 1);
+}
+
+#[gpui_kit::test]
+async fn dirty_inspector_does_not_follow(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    assert!(f.has(cx, "inspector.dirty"));
+    f.select_row(cx, 5);
+    f.follow(cx);
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("3"));
+    assert!(f.inspector_text(cx).contains("\"new\""));
+}
+
+#[gpui_kit::test]
+async fn closing_dirty_asks(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.act(cx, |window, cx| window.press(INSPECTOR, cx));
+    f.settle(cx);
+    f.act(cx, |window, cx| window.press("enter", cx));
+    wait_for_element(cx, f.handle, "confirm.ok".into(), false).await;
+    // The kit gives the focus back once the dialog's exit has played.
+    cx.executor().advance_clock(Duration::from_secs(1));
+    f.settle(cx);
+    assert!(f.has(cx, "documents.inspector"), "focus was on Cancel");
+    assert!(f.dirty(cx));
+
+    f.act(cx, |window, cx| window.press(INSPECTOR, cx));
+    f.settle(cx);
+    f.click(cx, "confirm.ok");
+    wait_for_element(cx, f.handle, "confirm.ok".into(), false).await;
+    f.settle(cx);
+    assert!(!f.has(cx, "documents.inspector"));
+    assert!(!f.dirty(cx));
+    f.act(cx, |window, cx| window.press(INSPECTOR, cx));
+    f.settle(cx);
+    assert!(f.has(cx, "documents.inspector"), "the keyboard still works");
+}
+
+#[gpui_kit::test]
+async fn go_to_while_dirty_asks_first(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    f.go_to(cx, "7");
+    f.settle(cx);
+    assert!(f.has(cx, "confirm.ok"));
+    assert!(f.inspector_text(cx).contains("\"new\""));
+    f.click(cx, "confirm.ok");
+    f.settle(cx);
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("7"));
+}
+
+#[gpui_kit::test]
+async fn revert_restores(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    let original = f.inspector_text(cx);
+    f.edit(cx, RENAMED);
+    f.act(cx, |window, cx| window.press(REVERT, cx));
+    f.settle(cx);
+    assert_eq!(f.inspector_text(cx), original);
+    assert!(!f.has(cx, "inspector.dirty"));
+    assert!(!f.has(cx, "inspector.revert"), "nothing left to revert");
+}
+
+#[gpui_kit::test]
+async fn new_document_uses_the_template(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.act(cx, |window, cx| window.press(NEW_DOCUMENT, cx));
+    f.settle(cx);
+    let text = f.inspector_text(cx);
+    let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(doc, json!({"title": "", "price": 0.0}));
+    assert!(!f.has(cx, "inspector.save_mode.patch"));
+    assert!(!f.review_disabled(cx), "the template can be saved as it is");
+    assert_eq!(f.text_of(cx, "documents.inspector.heading"), "New document");
+}
+
+#[gpui_kit::test]
+async fn new_document_button_opens_the_draft(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.click(cx, "documents.new");
+    f.settle(cx);
+    assert!(f.inspector_text(cx).contains("title"));
+}
+
+#[gpui_kit::test]
+async fn create_409_keeps_the_draft_inline(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    *f.docs.write_fail.lock().unwrap() = Some((409, "already exists".into()));
+    f.act(cx, |window, cx| window.press(NEW_DOCUMENT, cx));
+    f.settle(cx);
+    f.edit(cx, r#"{"id": "1", "title": "x", "price": 1.0}"#);
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(
+        f.text_of(cx, "inspector.save_error")
+            .contains("already exists")
+    );
+    assert!(f.inspector_text(cx).contains("\"x\""));
+    assert!(f.has(cx, "inspector.review"));
+    f.act(cx, |window, _| {
+        assert_eq!(label(window, "documents.inspector.heading"), "New document");
+    });
+}
+
+#[gpui_kit::test]
+async fn create_reloads_the_count(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.act(cx, |window, cx| window.press(NEW_DOCUMENT, cx));
+    f.settle(cx);
+    f.edit(cx, r#"{"title": "x", "price": 1.0}"#);
+    f.click(cx, "inspector.review");
+    f.settle(cx);
+    assert_eq!(f.writes()[0].0, "create");
+    assert!(!f.has(cx, "review.back"), "no review for a create");
+    assert!(f.text_of(cx, "documents.status").starts_with("11 of"));
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("new"));
+    assert!(
+        f.has(cx, "inspector.save_mode.patch"),
+        "now an existing document"
+    );
+    assert!(!f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn create_on_a_locked_profile_asks_first(cx: &mut TestAppContext) {
+    let docs = fake_documents(cx);
+    *docs.found.lock().unwrap() = 10;
+    let f = open_profile(cx, plain_schema(), docs, true).await;
+    f.act(cx, |window, cx| window.press(NEW_DOCUMENT, cx));
+    f.settle(cx);
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(f.has(cx, "danger.input"));
+    assert!(f.writes().is_empty());
+}
+
+#[gpui_kit::test]
+async fn vector_survives_a_patch_edit(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.review_renamed(cx);
+    f.click(cx, "review.apply");
+    f.settle(cx);
+    let (_, _, body) = f.writes().pop().unwrap();
+    assert!(body.get("embedding").is_none(), "{body}");
+}
+
+#[gpui_kit::test]
+async fn second_press_of_the_review_chord_does_not_apply(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.review_renamed(cx);
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(f.writes().is_empty());
+    assert!(f.has(cx, "review.back"));
+}
+
+#[gpui_kit::test]
+async fn go_to_a_missing_id_keeps_the_draft_without_asking(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    *f.docs.document_fail.lock().unwrap() = Some((404, "no such id".into()));
+    f.go_to(cx, "7");
+    assert!(!f.has(cx, "confirm.ok"));
+    assert!(f.text_of(cx, "documents.goto.error").contains("no such id"));
+    assert!(f.inspector_text(cx).contains("\"new\""));
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("3"));
+}
+
+#[gpui_kit::test]
+async fn back_from_a_stale_review_keeps_the_fresh_document_as_base(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    *f.docs.stored.lock().unwrap() =
+        Some(json!({"id": "3", "title": "theirs", "embedding": [0.25, 0.5]}));
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    f.act(cx, |window, cx| window.press("escape", cx));
+    wait_for_element(cx, f.handle, "review.back".into(), false).await;
+    cx.executor().advance_clock(Duration::from_secs(1));
+    f.settle(cx);
+    f.act(cx, |window, cx| window.press(REVERT, cx));
+    f.settle(cx);
+    assert!(f.inspector_text(cx).contains("theirs"));
+    assert!(!f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn draft_equal_to_the_fresh_document_opens_no_review(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    *f.docs.stored.lock().unwrap() = Some(serde_json::from_str(RENAMED).unwrap());
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    assert!(!f.has(cx, "review.back"));
+    assert!(f.text_of(cx, "inspector.save_error").contains("already"));
+    assert!(!f.dirty(cx));
+}
+
+#[gpui_kit::test]
+async fn nothing_drops_a_create_in_flight(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.act(cx, |window, cx| window.press(NEW_DOCUMENT, cx));
+    f.settle(cx);
+    f.edit(cx, r#"{"title": "x", "price": 1.0}"#);
+    let hold = f.docs.hold_next();
+    f.act(cx, |window, cx| window.press(SAVE, cx));
+    f.settle(cx);
+    f.act(cx, |window, cx| window.press(REVERT, cx));
+    f.act(cx, |window, cx| window.press(INSPECTOR, cx));
+    f.act(cx, |window, cx| window.press(CLOSE_TAB, cx));
+    f.settle(cx);
+    assert!(!f.has(cx, "confirm.ok"), "no discard while it runs");
+    hold.send(()).unwrap();
+    f.settle(cx);
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("new"));
+    assert!(f.text_of(cx, "documents.status").starts_with("11 of"));
+}
+
+#[gpui_kit::test]
+async fn revert_during_a_load_leaves_it_running(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    let hold = f.docs.hold_next();
+    f.select_row(cx, 5);
+    f.follow(cx);
+    let inspector = f.inspector(cx);
+    f.act(cx, |window, cx| {
+        inspector.update(cx, |i, cx| i.revert(window, cx));
+    });
+    hold.send(()).unwrap();
+    f.settle(cx);
+    assert_eq!(f.inspector_id(cx).as_deref(), Some("5"));
+    assert!(f.inspector_text(cx).contains("t5"));
+}
+
+#[gpui_kit::test]
+async fn close_tab_while_dirty_asks(cx: &mut TestAppContext) {
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    f.edit(cx, RENAMED);
+    let id = f.profile_id(cx);
+    let tab = format!("tab.{id}.collection.products");
+    f.act(cx, |window, cx| window.press(CLOSE_TAB, cx));
+    f.settle(cx);
+    assert!(f.has(cx, "confirm.ok"));
+    assert!(f.dirty(cx));
+    f.click(cx, "confirm.ok");
+    wait_for_element(cx, f.handle, tab, false).await;
+}
+
+#[gpui_kit::test]
+async fn unsaved_changes_veto_the_kits_close(cx: &mut TestAppContext) {
+    use gpui_kit::component::dock::BasePanel as _;
+    let f = open_found(cx, plain_schema(), 10).await;
+    f.open_document(cx);
+    let panel = f.panel(cx);
+    cx.update(|cx| assert!(panel.read(cx).closable(cx)));
+    f.edit(cx, RENAMED);
+    cx.update(|cx| assert!(!panel.read(cx).closable(cx)));
+    f.act(cx, |window, cx| window.press(REVERT, cx));
+    f.settle(cx);
+    cx.update(|cx| assert!(panel.read(cx).closable(cx)));
 }

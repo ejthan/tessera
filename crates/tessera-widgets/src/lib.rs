@@ -10,7 +10,7 @@ pub mod json_editor;
 
 pub use field_type_select::{FieldTypeChanged, FieldTypeSelect, field_type_description};
 pub use filter_input::{FacetFetch, FilterField, FilterInput, FilterInputEvent};
-pub use json_editor::{JsonEditor, JsonEditorEvent, JsonError};
+pub use json_editor::{JsonEditor, JsonEditorEvent, JsonError, JsonMark, MarkSeverity};
 
 // `t!()` only works in the crate that declares the translations.
 rust_i18n::i18n!("../../assets/locales", fallback = "en");

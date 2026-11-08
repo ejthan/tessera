@@ -3,6 +3,7 @@
 //! A JSON code editor that parses its text on every edit and shows the first error inline.
 
 use gpui_kit::TestSupportExt as _;
+use gpui_kit::component::highlighter::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, Position};
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::{
@@ -20,6 +21,32 @@ pub struct JsonError {
     pub column: usize,
     /// The parser's message, without position.
     pub message: String,
+}
+
+/// How serious a [`JsonMark`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkSeverity {
+    /// Drawn as an error.
+    Error,
+    /// Drawn as a warning.
+    Warning,
+    /// Drawn as a note.
+    Info,
+}
+
+/// An underlined stretch of one line, with its message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JsonMark {
+    /// 0-based line.
+    pub line: u32,
+    /// 0-based column of the first marked character.
+    pub start: u32,
+    /// 0-based column just past the last marked character.
+    pub end: u32,
+    /// What is wrong there.
+    pub message: String,
+    /// How serious it is.
+    pub severity: MarkSeverity,
 }
 
 /// Emitted by [`JsonEditor`].
@@ -81,6 +108,37 @@ impl JsonEditor {
     /// The parse error of the current text, if any. An empty text is an error too.
     pub fn error(&self) -> Option<&JsonError> {
         self.error.as_ref()
+    }
+
+    /// Stops or allows typing.
+    pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {
+        self.read_only = read_only;
+        cx.notify();
+    }
+
+    /// Replaces the marks. Any text change clears them, so they always fit the text.
+    pub fn set_marks(&mut self, mut marks: Vec<JsonMark>, cx: &mut Context<Self>) {
+        // The set keeps entries in the order they arrive and seeks through them by offset.
+        marks.sort_by_key(|m| (m.line, m.start));
+        self.state.update(cx, |state, cx| {
+            if let Some(set) = state.diagnostics_mut() {
+                set.clear();
+                set.extend(marks.into_iter().map(|m| {
+                    let range = Position::new(m.line, m.start)..Position::new(m.line, m.end);
+                    Diagnostic::new(range, m.message).with_severity(match m.severity {
+                        MarkSeverity::Error => DiagnosticSeverity::Error,
+                        MarkSeverity::Warning => DiagnosticSeverity::Warning,
+                        MarkSeverity::Info => DiagnosticSeverity::Info,
+                    })
+                }));
+            }
+            cx.notify();
+        });
+    }
+
+    /// How many marks the text carries.
+    pub fn mark_count(&self, cx: &App) -> usize {
+        self.state.read(cx).diagnostics().map_or(0, |set| set.len())
     }
 
     /// Puts the keyboard focus in the editor.

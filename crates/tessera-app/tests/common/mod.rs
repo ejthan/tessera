@@ -417,6 +417,12 @@ pub struct FakeDocs {
     pub document_fail: Mutex<Option<(u16, String)>>,
     /// Ids asked of `document`, in order.
     pub document_calls: Mutex<Vec<String>>,
+    /// When set, `document` answers this instead of its synthesised document.
+    pub stored: Mutex<Option<serde_json::Value>>,
+    /// Every write: "create", "upsert" or "patch", the id (empty for create) and the body.
+    pub writes: Mutex<Vec<(String, String, serde_json::Value)>>,
+    /// Writes fail with this status and Typesense message.
+    pub write_fail: Mutex<Option<(u16, String)>>,
 }
 
 impl FakeDocs {
@@ -425,6 +431,28 @@ impl FakeDocs {
         let (tx, rx) = tokio::sync::oneshot::channel();
         *self.hold.lock().unwrap() = Some(rx);
         tx
+    }
+
+    /// Records a write and answers with `document`, or with the failure the test set.
+    fn write(
+        &self,
+        kind: &str,
+        id: String,
+        body: serde_json::Value,
+        document: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
+        self.writes.lock().unwrap().push((kind.into(), id, body));
+        let answer = match self.write_fail.lock().unwrap().clone() {
+            Some(e) => Err(http_error(e)),
+            None => Ok(document),
+        };
+        let hold = self.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            answer
+        })
     }
 
     /// Page numbers asked, in order.
@@ -519,8 +547,10 @@ impl DocumentsBackend for FakeDocsBackend {
     ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
         let answer = match self.0.document_fail.lock().unwrap().clone() {
             Some(e) => Err(http_error(e)),
-            None => Ok(serde_json::json!({
-                "id": id, "title": format!("t{id}"), "embedding": [0.25, 0.5],
+            None => Ok(self.0.stored.lock().unwrap().clone().unwrap_or_else(|| {
+                serde_json::json!({
+                    "id": id, "title": format!("t{id}"), "embedding": [0.25, 0.5],
+                })
             })),
         };
         self.0.document_calls.lock().unwrap().push(id);
@@ -531,6 +561,48 @@ impl DocumentsBackend for FakeDocsBackend {
             }
             answer
         })
+    }
+
+    fn create(
+        &self,
+        _: Client,
+        _: String,
+        document: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
+        let mut stored = document.clone();
+        stored["id"] = "new".into();
+        if self.0.write_fail.lock().unwrap().is_none() {
+            *self.0.found.lock().unwrap() += 1;
+        }
+        self.0.write("create", String::new(), document, stored)
+    }
+
+    fn upsert(
+        &self,
+        _: Client,
+        _: String,
+        document: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
+        let id = document["id"].as_str().unwrap_or_default().to_string();
+        self.0.write("upsert", id, document.clone(), document)
+    }
+
+    fn patch(
+        &self,
+        _: Client,
+        _: String,
+        id: String,
+        patch: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<serde_json::Value, Error>> {
+        let mut stored = self.0.stored.lock().unwrap().clone().unwrap_or_else(|| {
+            serde_json::json!({
+                "id": id, "title": format!("t{id}"), "embedding": [0.25, 0.5],
+            })
+        });
+        for (key, value) in patch.as_object().unwrap() {
+            stored[key] = value.clone();
+        }
+        self.0.write("patch", id, patch, stored)
     }
 }
 
@@ -629,6 +701,9 @@ pub const INSPECTOR: &str = key("cmd-i", "ctrl-i");
 pub const GO_TO: &str = key("cmd-g", "ctrl-g");
 pub const COPY_CELL: &str = key("cmd-c", "ctrl-c");
 pub const COPY_ROW: &str = key("cmd-alt-c", "ctrl-alt-c");
+pub const NEW_DOCUMENT: &str = key("cmd-shift-n", "ctrl-shift-n");
+pub const SAVE_MODE: &str = key("cmd-shift-m", "ctrl-shift-m");
+pub const REVERT: &str = key("cmd-shift-r", "ctrl-shift-r");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 pub fn fake_connector(

@@ -9,7 +9,7 @@ use gpui_kit::{
     AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowHandle,
     WindowOptions, base::Root, px, size,
 };
-use tessera_widgets::JsonEditor;
+use tessera_widgets::{JsonEditor, JsonMark, MarkSeverity};
 
 fn open(
     cx: &mut TestAppContext,
@@ -109,6 +109,48 @@ async fn empty_text_is_a_parse_error(cx: &mut TestAppContext) {
         window.render_frame(cx);
         assert_eq!(editor.read(cx).error().map(|e| e.line), Some(1));
         assert!(window.try_find("json.error").is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn marks_reach_the_diagnostics(cx: &mut TestAppContext) {
+    let (handle, editor) = open(cx, "{\n  \"a\": 1\n}", false);
+    let mark = |severity| JsonMark {
+        line: 1,
+        start: 2,
+        end: 5,
+        message: "m".into(),
+        severity,
+    };
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        editor.update(cx, |e, cx| {
+            e.set_marks(
+                vec![mark(MarkSeverity::Error), mark(MarkSeverity::Info)],
+                cx,
+            );
+            assert_eq!(e.mark_count(cx), 2);
+            e.set_marks(vec![mark(MarkSeverity::Warning)], cx);
+            assert_eq!(e.mark_count(cx), 1, "new marks replace the old");
+        });
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn set_read_only_stops_and_allows_typing(cx: &mut TestAppContext) {
+    let (handle, editor) = open(cx, "{}", false);
+    cx.update_window(handle.into(), |_, window, cx| {
+        editor.update(cx, |e, cx| e.set_read_only(true, cx));
+        window.render_frame(cx);
+        window.click("json.editor", cx);
+        window.input("x", cx);
+        assert_eq!(editor.read(cx).text(cx), "{}");
+        editor.update(cx, |e, cx| e.set_read_only(false, cx));
+        window.render_frame(cx);
+        window.input("x", cx);
+        assert_ne!(editor.read(cx).text(cx), "{}");
     })
     .unwrap();
 }

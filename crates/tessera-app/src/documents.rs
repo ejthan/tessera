@@ -53,6 +53,31 @@ pub trait DocumentsBackend: Send + Sync {
         collection: String,
         id: String,
     ) -> BoxFuture<Result<Value, Error>>;
+
+    /// Stores a new document; a taken id is an error.
+    fn create(
+        &self,
+        client: Client,
+        collection: String,
+        document: Value,
+    ) -> BoxFuture<Result<Value, Error>>;
+
+    /// Stores `document` whole, replacing the one with its id.
+    fn upsert(
+        &self,
+        client: Client,
+        collection: String,
+        document: Value,
+    ) -> BoxFuture<Result<Value, Error>>;
+
+    /// Merges `patch` into document `id` and answers with the whole document.
+    fn patch(
+        &self,
+        client: Client,
+        collection: String,
+        id: String,
+        patch: Value,
+    ) -> BoxFuture<Result<Value, Error>>;
 }
 
 /// The backend the views use.
@@ -102,6 +127,34 @@ impl DocumentsBackend for TokioBackend {
         id: String,
     ) -> BoxFuture<Result<Value, Error>> {
         self.run(async move { client.document(&collection, &id).await })
+    }
+
+    fn create(
+        &self,
+        client: Client,
+        collection: String,
+        document: Value,
+    ) -> BoxFuture<Result<Value, Error>> {
+        self.run(async move { client.create_document(&collection, &document).await })
+    }
+
+    fn upsert(
+        &self,
+        client: Client,
+        collection: String,
+        document: Value,
+    ) -> BoxFuture<Result<Value, Error>> {
+        self.run(async move { client.upsert_document(&collection, &document).await })
+    }
+
+    fn patch(
+        &self,
+        client: Client,
+        collection: String,
+        id: String,
+        patch: Value,
+    ) -> BoxFuture<Result<Value, Error>> {
+        self.run(async move { client.patch_document(&collection, &id, &patch).await })
     }
 }
 

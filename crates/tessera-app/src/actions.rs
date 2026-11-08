@@ -50,7 +50,12 @@ gpui_kit::actions!(
         OpenDocument,
         GoToId,
         CopyCell,
-        CopyRowJson
+        CopyRowJson,
+        NewDocument,
+        ReviewDocument,
+        ToggleSaveMode,
+        RevertDocument,
+        ApplyDocument
     ]
 );
 
@@ -73,6 +78,12 @@ pub const COLLECTION: &str = "Collection";
 pub const DOCUMENTS: &str = "Documents";
 /// Key context of the documents table.
 pub const DOCUMENTS_TABLE: &str = "Documents > DataTable";
+/// Key context of the inspector beside the documents table.
+pub const INSPECTOR: &str = "Inspector";
+/// Key context of the inspector's editor, whose own ⌘↩ / Ctrl+↩ would add a line.
+const INSPECTOR_EDITOR: &str = "Inspector > Input";
+/// Key context of the document review.
+pub const DOCUMENT_REVIEW: &str = "DocumentReview";
 /// Key context of the collections table; Enter opens the selected row only there, so a
 /// focused header keeps Enter for sorting.
 pub const COLLECTIONS_TABLE: &str = "Collections > DataTable";
@@ -207,6 +218,14 @@ const COPY_CELL: &str = "ctrl-c";
 const COPY_ROW: &str = "cmd-alt-c";
 #[cfg(not(target_os = "macos"))]
 const COPY_ROW: &str = "ctrl-alt-c";
+#[cfg(target_os = "macos")]
+const SAVE_MODE: &str = "cmd-shift-m";
+#[cfg(not(target_os = "macos"))]
+const SAVE_MODE: &str = "ctrl-shift-m";
+#[cfg(target_os = "macos")]
+const REVERT: &str = "cmd-shift-r";
+#[cfg(not(target_os = "macos"))]
+const REVERT: &str = "ctrl-shift-r";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -273,6 +292,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(TOGGLE_INSPECTOR, ToggleInspector, Some(DOCUMENTS)),
         KeyBinding::new(GO_TO_ID, GoToId, Some(DOCUMENTS)),
         KeyBinding::new(COPY_ROW, CopyRowJson, Some(DOCUMENTS)),
+        // The same chord as New collection, which is bound only in COLLECTIONS.
+        KeyBinding::new(NEW_COLLECTION, NewDocument, Some(DOCUMENTS)),
+        KeyBinding::new(SAVE, ReviewDocument, Some(INSPECTOR)),
+        KeyBinding::new(SAVE, ReviewDocument, Some(INSPECTOR_EDITOR)),
+        KeyBinding::new(SAVE_MODE, ToggleSaveMode, Some(INSPECTOR)),
+        KeyBinding::new(REVERT, RevertDocument, Some(INSPECTOR)),
+        KeyBinding::new(SAVE, ApplyDocument, Some(DOCUMENT_REVIEW)),
         KeyBinding::new("enter", OpenDocument, Some(DOCUMENTS_TABLE)),
         // Only on the table: elsewhere ⌘C copies the selected text.
         KeyBinding::new(COPY_CELL, CopyCell, Some(DOCUMENTS_TABLE)),
