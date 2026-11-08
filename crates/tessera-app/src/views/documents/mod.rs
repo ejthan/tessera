@@ -26,9 +26,9 @@ use gpui_kit::component::{
     resizable_panel, v_flex,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _, IntoElement,
-    ParentElement as _, Pixels, Point, Render, SharedString, Styled as _, Subscription, Task,
-    Window, anchored, deferred, div, prelude::*, px,
+    Action, App, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
+    IntoElement, ParentElement as _, Pixels, Point, Render, SharedString, Styled as _,
+    Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
 use rust_i18n::t;
 use tessera_client::{Collection, Error};
@@ -48,7 +48,7 @@ use crate::actions::{
     ClearFilter, CopyCell, CopyCsv, CopyCurl, CopyJsonl, CopyRowJson, DOCUMENTS, DeleteByQuery,
     DeleteDocuments, ExtendRows, FocusSearch, GoToId, NarrowerColumn, NewDocument, OpenDocument,
     SelectLoaded, SortByColumn, ToggleColumns, ToggleInspector, TogglePinColumn, ToggleRow,
-    UpdateByQuery, WiderColumn,
+    UpdateByQuery, WiderColumn, gated,
 };
 use crate::connection::{CollectionChanged, ConnectionState};
 use crate::documents::DocumentsBackendGlobal;
@@ -889,6 +889,43 @@ impl DocumentsView {
         }
     }
 
+    /// What the toolbar, the copy menu and the filter disable or do not show now, for
+    /// [`gated`].
+    fn gates(&self, cx: &App) -> [(bool, &'static dyn Action); 15] {
+        let table = self.table.read(cx);
+        let rows = table.delegate();
+        let busy = self.deleting || rows.query_pending();
+        let no_cell = table.selected_cell().is_none();
+        let no_id = self.selected_id(cx).is_none();
+        let no_sort = table
+            .selected_cell()
+            .and_then(|(_, col)| rows.column_at(col))
+            .is_none_or(|column| !column.sortable);
+        let no_column = self.selected_column(cx).is_none();
+        let clear = rows.filter.is_none() && self.filter.read(cx).value(cx).is_empty();
+        let no_rows = !copy::has_rows(self, cx);
+        [
+            (
+                busy || (rows.selection.is_empty() && no_id),
+                &DeleteDocuments,
+            ),
+            (busy || !self.has_schema, &DeleteByQuery),
+            (busy || !self.has_schema, &UpdateByQuery),
+            (!self.has_schema, &NewDocument),
+            (!self.has_schema, &GoToId),
+            (clear, &ClearFilter),
+            (no_cell, &CopyCell),
+            (no_id, &CopyRowJson),
+            (no_rows, &CopyJsonl),
+            (no_rows, &CopyCsv),
+            (no_sort, &SortByColumn),
+            (no_column, &TogglePinColumn),
+            (no_column, &NarrowerColumn),
+            (no_column, &WiderColumn),
+            (rows.found == 0, &SelectLoaded),
+        ]
+    }
+
     fn filter_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let applied = self.table.read(cx).delegate().filter.is_some();
         let clear = (applied || !self.filter.read(cx).value(cx).is_empty()).then(|| {
@@ -1148,7 +1185,7 @@ impl Render for DocumentsView {
         });
         v_flex()
             .track_focus(&self.focus_handle)
-            .key_context(DOCUMENTS)
+            .key_context(gated(DOCUMENTS, &self.gates(cx)))
             .on_action(
                 cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
             )

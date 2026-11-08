@@ -823,6 +823,22 @@ impl ConsoleView {
         cx.notify();
     }
 
+    /// What the toolbar and the panes disable or do not show now, for
+    /// [`gated`](crate::actions::gated).
+    pub fn gates(&self, cx: &App) -> [(bool, &'static dyn Action); 5] {
+        let has_body = self.has_body(cx);
+        [
+            (
+                parse_path(&self.path_text).is_err() || self.writing,
+                &SendRequest,
+            ),
+            (!self.writing, &StopWaiting),
+            (!has_body || self.file.is_some(), &AttachFile),
+            (!has_body || self.file.is_none(), &RemoveBodyFile),
+            (self.answer.is_none(), &RevealSecrets),
+        ]
+    }
+
     fn line(
         id: &'static str,
         text: SharedString,

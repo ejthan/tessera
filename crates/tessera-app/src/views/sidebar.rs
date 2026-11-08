@@ -407,7 +407,9 @@ impl Sidebar {
             // On the wrapper, so the context menu (a child of the row) resolves Enter too.
             .key_context(SIDEBAR_ENTRY)
             .on_action(move |_: &ConnectSelected, _, cx| connect(cx))
-            .on_action(move |_: &DisconnectSelected, _, cx| disconnect(cx))
+            .when(live, |el| {
+                el.on_action(move |_: &DisconnectSelected, _, cx| disconnect(cx))
+            })
             .when(saved || temporary, |el| {
                 let edit = edit.clone();
                 el.on_action(move |_: &EditConnection, window, cx| edit(window, cx))
@@ -590,7 +592,11 @@ impl Render for Sidebar {
             .on_action(cx.listener(|this, _: &ImportProfiles, window, cx| {
                 ImportDialog::open(this.state.clone(), window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ExportProfiles, window, cx| this.export(window, cx)))
+            .when(can_export, |el| {
+                el.on_action(
+                    cx.listener(|this, _: &ExportProfiles, window, cx| this.export(window, cx)),
+                )
+            })
             .on_action(cx.listener(|this, _: &ToggleReopenLast, _, cx| this.toggle_reopen_last(cx)))
             .gap_1()
             .p_2()

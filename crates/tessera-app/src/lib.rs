@@ -86,6 +86,11 @@ pub fn run(launch: Launch) -> Result<(), String> {
         tessera_core::search::saved::saved_path(),
     );
     let open = state.resolve(launch)?;
+    // Like the profiles: once, before the window opens.
+    let keymap = tessera_core::keymap::keymap_path().map_or_else(
+        || Ok(Vec::new()),
+        |path| tessera_core::keymap::read_keymap(&path),
+    );
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -118,6 +123,11 @@ pub fn run(launch: Launch) -> Result<(), String> {
         gpui_kit::init(cx);
         i18n::init();
         actions::bind_keys(cx);
+        // A file that does not parse changes nothing: the default shortcuts stay.
+        let keymap_errors = match keymap {
+            Ok(bindings) => actions::apply_keymap(&bindings, cx),
+            Err(detail) => vec![t!("keymap.error.file", detail = detail).to_string()],
+        };
         let options = WindowOptions {
             titlebar: Some(TitleBar::title_bar_options()),
             app_owns_titlebar_drag: true,
@@ -133,7 +143,11 @@ pub fn run(launch: Launch) -> Result<(), String> {
         }
         let (window, _) = gpui_kit::open_window(options, cx, |window, cx| {
             window.set_window_title(&t!("app.title"));
-            cx.new(|cx| views::root::RootView::new(state, window, cx))
+            cx.new(|cx| {
+                let mut root = views::root::RootView::new(state, window, cx);
+                root.set_keymap_errors(keymap_errors, cx);
+                root
+            })
         })
         .expect("failed to open the main window");
         if smoke {

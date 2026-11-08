@@ -134,6 +134,27 @@ async fn read_only_client_searches_and_multi_searches() {
 }
 
 #[tokio::test]
+async fn every_search_reaches_the_request_log_once() {
+    let server = MockServer::start().await;
+    mount_post(&server, r#"{"results":[{"found":1}]}"#).await;
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let client = client(&server.uri()).with_hook(std::sync::Arc::new(move |e| {
+        sink.lock().unwrap().push(e.path.clone());
+    }));
+    client.search("c", &params_of(5000)).await.unwrap();
+    let request = MultiSearch {
+        union: false,
+        searches: vec![json!({"collection":"c"}).as_object().unwrap().clone()],
+        page: None,
+        per_page: None,
+    };
+    client.multi_search(&request).await.unwrap();
+    assert_eq!(events.lock().unwrap().len(), 2, "{events:?}");
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn multi_search_fails_over() {
     let server = MockServer::start().await;
     mount_post(&server, r#"{"results":[{"found":1}]}"#).await;

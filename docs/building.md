@@ -91,6 +91,36 @@ Run them single-threaded: two tests stop and restart ts3. `TESSERA_CLUSTER_URLS`
 
 Everything stays in memory; nothing about a request reaches the disk. An entry holds its bodies cut to 1 MiB. A body up to 32 MiB also keeps its whole text beside the entries, 64 MiB over all of them, oldest out first, so the entry says "Full body no longer kept" once its text is gone. Document pages keep no response body at all. Show full (⇧⌘B / Ctrl+Shift+B in the log) masks the text on the background executor before it shows, and pages through it in chunks of 512 KiB; Copy all takes the whole masked text.
 
+## Keyboard shortcuts
+
+`keymap.toml` in the config directory adds to the default shortcuts or replaces them: `~/Library/Application Support/org.tessera.Tessera/` on macOS, `~/.config/tessera/` on Linux, `%APPDATA%\tessera\Tessera\config\` on Windows. The file is read once at start.
+
+```toml
+[[binding]]
+key = "cmd-shift-p"
+action = "tessera::OpenPalette"
+
+[[binding]]
+key = "cmd-k"        # no action: the chord does nothing
+context = "Workbench"
+```
+
+- `key` is one chord, or several separated by spaces, with the modifiers `cmd`, `ctrl`, `alt`, `shift`.
+- `action` is an action name such as `tessera::Refresh`, the names in `crates/tessera-app/src/actions.rs`. Leave it out to unbind the chord.
+- `context` limits the binding to a key context such as `Workbench`, `Console` or `Documents`. Leave it out for everywhere.
+- A binding without a modifier (`cmd`, `ctrl` or `alt`) also fires while typing in a field, so bind a chord.
+
+A control shows the chord that is bound now. A bad entry is skipped and named above the tabs, and the others apply. A file that does not parse, or has a field the format does not know, changes nothing: the default shortcuts stay, and the line above the tabs names the place. `escape` cannot be bound, because it closes every dialog. An unbound action stays reachable from its control and the palette.
+
+## Manual checks of the search milestone (M4)
+
+Nothing here has been done yet; record the results in PR D's description.
+
+- Open the Search tab, the Console, the palette, ⌘P and the keymap error line at 960×600 (the smallest window). Nothing may be cut off.
+- NF4: scroll a large response in Raw and in the request log's full view with the frame overlay on.
+- Press ⌘K / Ctrl+K in the documents table and run Delete documents: the confirmation names the rows.
+- Record the Linux release binary size from the CI job.
+
 ## Manual checks of the document browser (M3)
 
 Nothing here runs in CI or from a script: it needs a person at the machine, because the numbers come from the frame overlay on screen. NF2 is **not measured** until someone records the results below in PR C's description.

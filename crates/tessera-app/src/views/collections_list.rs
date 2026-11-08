@@ -12,7 +12,7 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, Focusable as _, IntoElement, Keystroke,
+    Action, App, AppContext as _, Context, Entity, Focusable as _, IntoElement, Keystroke,
     ParentElement as _, Render, SharedString, Stateful, Styled as _, Subscription, Task, Window,
     div, prelude::*, px, transparent_black,
 };
@@ -587,6 +587,18 @@ impl CollectionsList {
         let table = self.table.read(cx);
         let ix = table.selected_row()?;
         table.delegate().row(ix).map(|r| r.name.clone())
+    }
+
+    /// Actions with no target now, for [`gated`](crate::actions::gated).
+    pub fn gates(&self, cx: &App) -> [(bool, &'static dyn Action); 5] {
+        let none = self.visible_selected(cx).is_none();
+        [
+            (none, &ToggleFavorite),
+            (none, &CloneCollection),
+            (none, &EditSchema),
+            (none, &TruncateCollection),
+            (none, &DeleteCollection),
+        ]
     }
 
     /// Opens the tab of the selected collection.

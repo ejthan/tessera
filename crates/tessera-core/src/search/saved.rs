@@ -9,7 +9,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::search::history::HistoryItem;
+use crate::search::history::{HistoryItem, without_secrets};
 use crate::search::params::SearchDraft;
 use crate::store::{self, StoreError};
 
@@ -54,6 +54,15 @@ pub struct SavedQuery {
     pub union: bool,
     /// The drafts.
     pub searches: Vec<SearchDraft>,
+}
+
+/// `drafts` ready to be saved, without the parameters that would hold a key, and whether any
+/// parameter was dropped so the caller can say so.
+pub fn savable(drafts: &[SearchDraft]) -> (Vec<SearchDraft>, bool) {
+    let kept = without_secrets(drafts);
+    let count = |d: &[SearchDraft]| d.iter().map(|s| s.params.len()).sum::<usize>();
+    let dropped = count(&kept) != count(drafts);
+    (kept, dropped)
 }
 
 /// `saved_queries.json` in the platform data directory.
@@ -125,6 +134,19 @@ mod tests {
         let path = dir.path().join("saved_queries.json");
         std::fs::write(&path, r#"{"schema_version": 2, "future": true}"#).unwrap();
         assert!(matches!(load(&path), Err(StoreError::NewerSchema(2))));
+    }
+
+    #[test]
+    fn savable_drops_secret_params_and_says_so() {
+        let mut secret = SearchDraft::new("books");
+        secret
+            .params
+            .insert("x-typesense-api-key".into(), "k".into());
+        let (kept, dropped) = savable(&[secret]);
+        assert!(dropped);
+        assert!(!kept[0].params.contains_key("x-typesense-api-key"));
+        assert!(kept[0].params.contains_key("q"));
+        assert!(!savable(&[SearchDraft::new("books")]).1);
     }
 
     #[test]

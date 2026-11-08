@@ -6,7 +6,7 @@ use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::dock::{
     DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, PaneRef, PanelId, panel_handle,
 };
-use gpui_kit::component::{ActiveTheme as _, Theme, TitleBar, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Theme, TitleBar, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, prelude::*,
@@ -19,9 +19,13 @@ use super::dock::{
     CollectionPanel, CollectionsPanel, ConsolePanel, OverviewPanel, SearchPanel, SidebarPanel,
     WelcomePanel,
 };
+use super::palette::{self, PaletteMode};
 use super::request_log::RequestLogPanel;
 use super::{env_badge, status_bar};
-use crate::actions::{CopyAsCurl, NewConnection, OpenConsoleTab, OpenSearchTab, ToggleRequestLog};
+use crate::actions::{
+    CopyAsCurl, NewConnection, OpenConsoleTab, OpenPalette, OpenSearchTab, QuickSwitch,
+    ToggleRequestLog,
+};
 use crate::connection::ConnectionState;
 use crate::state::{
     AppState, CloseCollection, OpenCollection, OpenCollections, OpenConsole, OpenOverview,
@@ -30,6 +34,8 @@ use crate::state::{
 
 /// Width of the left sidebar.
 const SIDEBAR_WIDTH: f32 = 240.;
+/// Tallest the list of `keymap.toml` errors gets before it scrolls.
+const KEYMAP_ERRORS_HEIGHT: f32 = 96.;
 /// Height of the request log when open.
 const LOG_HEIGHT: f32 = 240.;
 
@@ -45,6 +51,8 @@ pub struct RootView {
     active: Option<PanelId>,
     /// The connection tabs on screen at the last layout change.
     displayed: Vec<PanelId>,
+    /// What was wrong with `keymap.toml`, in full. It stays until the file is fixed.
+    keymap_errors: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -104,7 +112,7 @@ impl RootView {
             ),
             cx.subscribe_in(&state, window, |this, _, event: &OpenSearch, window, cx| {
                 this.open_tab(event.0, Kind::Search, window, cx);
-                let Some(draft) = event.1.clone() else {
+                let Some((drafts, union)) = event.1.clone() else {
                     return;
                 };
                 let tab = this
@@ -112,7 +120,7 @@ impl RootView {
                     .and_then(|id| connection_tab(this.dock.read(cx), id));
                 if let Some(ConnectionTab::Search(panel)) = tab {
                     let workbench = panel.read(cx).workbench().clone();
-                    workbench.update(cx, |w, cx| w.load(vec![draft], false, window, cx));
+                    workbench.update(cx, |w, cx| w.load(drafts, union, window, cx));
                 }
             }),
             cx.subscribe_in(
@@ -145,6 +153,7 @@ impl RootView {
             log,
             active: None,
             displayed: Vec::new(),
+            keymap_errors: Vec::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -157,6 +166,18 @@ impl RootView {
     /// The request log panel.
     pub fn log_panel(&self) -> &Entity<RequestLogPanel> {
         &self.log
+    }
+
+    fn open_palette(&self, mode: PaletteMode, window: &mut Window, cx: &mut Context<Self>) {
+        if !window.has_active_dialog(cx) {
+            palette::open(mode, self.state.clone(), window, cx);
+        }
+    }
+
+    /// Shows what was wrong with `keymap.toml` above the tabs.
+    pub fn set_keymap_errors(&mut self, errors: Vec<String>, cx: &mut Context<Self>) {
+        self.keymap_errors = errors;
+        cx.notify();
     }
 
     /// The dock area, for tests that rearrange panels as a user would by dragging.
@@ -512,11 +533,17 @@ impl Render for RootView {
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
                 ConnectDialog::open_new(this.state.clone(), None, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &CopyAsCurl, _, cx| {
-                // A hidden log has no visible selection to copy.
-                if this.dock.read(cx).is_dock_open(DockPlacement::Bottom) {
+            // A hidden log has no visible selection to copy.
+            .when(log_open && self.log.read(cx).has_selection(), |el| {
+                el.on_action(cx.listener(|this, _: &CopyAsCurl, _, cx| {
                     this.log.update(cx, |log, cx| log.copy_as_curl(cx));
-                }
+                }))
+            })
+            .on_action(cx.listener(|this, _: &OpenPalette, window, cx| {
+                this.open_palette(PaletteMode::All, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &QuickSwitch, window, cx| {
+                this.open_palette(PaletteMode::Collections, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleRequestLog, window, cx| {
                 // Focus inside the hidden log would leave no element to receive ⌘J again.
@@ -541,6 +568,22 @@ impl Render for RootView {
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(TitleBar::new().child(switcher))
+            .when(!self.keymap_errors.is_empty(), |el| {
+                let text = SharedString::from(self.keymap_errors.join("\n"));
+                el.child(
+                    div()
+                        .id("keymap.errors")
+                        .test_support()
+                        .aria_label(text.clone())
+                        .flex_none()
+                        .max_h(px(KEYMAP_ERRORS_HEIGHT))
+                        .overflow_y_scroll()
+                        .p_2()
+                        .text_sm()
+                        .text_color(theme.danger)
+                        .child(text),
+                )
+            })
             .child(div().flex_1().min_h_0().child(self.dock.clone()))
             .child(status_bar::render(active, log_open, window, cx))
             // Last, so they draw over the content without moving it; they have no listeners,

@@ -11,8 +11,10 @@ use gpui_kit::base::{Placement, Root};
 use gpui_kit::component::dock::{DockArea, DockPlacement, InsertTarget, NodeId, PaneRef, PanelId};
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, WindowHandle};
+use tessera_app::actions::{Refresh, apply_keymap};
 use tessera_app::views::dock::OverviewPanel;
 use tessera_app::views::root::RootView;
+use tessera_core::keymap::UserBinding;
 use tessera_core::profile::{Environment, Profile};
 use tessera_core::store::StoreError;
 
@@ -569,4 +571,143 @@ fn request_log_toggle_shows_its_shortcut(cx: &mut TestAppContext) {
         .debug_bounds(key("kbd:cmd-j", "kbd:ctrl-j"))
         .expect("a Kbd for the shortcut is drawn");
     assert!(button.contains(&kbd.center()), "{kbd:?} not in {button:?}");
+}
+
+fn user(key: &str, action: Option<&str>, context: Option<&str>) -> UserBinding {
+    UserBinding {
+        key: key.into(),
+        action: action.map(Into::into),
+        context: context.map(Into::into),
+    }
+}
+
+fn draw(cx: &mut TestAppContext, handle: WindowHandle<Root>) {
+    cx.update_window(handle.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+}
+
+/// Whether `action` ran when `chord` was pressed, counted by a global listener.
+fn counts_refresh(cx: &mut TestAppContext) -> std::rc::Rc<std::cell::Cell<u32>> {
+    let count = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = count.clone();
+    cx.update(|cx| {
+        cx.on_action(move |_: &Refresh, _| seen.set(seen.get() + 1));
+    });
+    count
+}
+
+#[gpui_kit::test]
+fn unbind_stops_the_chord(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    let chord = key("cmd-k", "ctrl-k");
+    let errors = cx.update(|cx| apply_keymap(&[user(chord, None, None)], cx));
+    assert!(errors.is_empty(), "{errors:?}");
+    draw(cx, handle);
+    cx.update_window(handle.into(), |_, window, cx| window.press(chord, cx))
+        .unwrap();
+    cx.run_until_parked();
+    let opened = cx
+        .update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.try_find("palette").is_some()
+        })
+        .unwrap();
+    assert!(!opened);
+}
+
+#[gpui_kit::test]
+fn bad_entries_are_reported_and_others_apply(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    let count = counts_refresh(cx);
+    let errors = cx.update(|cx| {
+        apply_keymap(
+            &[
+                user("cmd-shift-1", Some("tessera::NoSuchAction"), None),
+                user("not-a-modifier-x-y", Some("tessera::Refresh"), None),
+                user("", Some("tessera::Refresh"), None),
+                user("cmd-shift-2", Some("tessera::Refresh"), Some("a &&")),
+                user("f6", Some("tessera::Refresh"), None),
+            ],
+            cx,
+        )
+    });
+    assert_eq!(errors.len(), 4, "{errors:?}");
+    assert!(errors[0].contains("tessera::NoSuchAction"), "{errors:?}");
+    assert!(errors[3].contains("a &&"), "{errors:?}");
+    draw(cx, handle);
+    cx.update_window(handle.into(), |_, window, cx| window.press("f6", cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(count.get(), 1);
+}
+
+#[gpui_kit::test]
+fn escape_stays_the_way_out_of_a_dialog(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    let errors = cx.update(|cx| {
+        apply_keymap(
+            &[
+                user("escape", None, None),
+                user("escape", None, Some("Dialog")),
+                user("escape", Some("tessera::ToggleRequestLog"), None),
+                user("escape x", Some("tessera::ToggleRequestLog"), None),
+                user("shift-escape", Some("tessera::ToggleRequestLog"), None),
+            ],
+            cx,
+        )
+    });
+    assert_eq!(errors.len(), 4, "{errors:?}");
+    draw(cx, handle);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press(NEW_CONNECTION, cx)
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(dialog_open(cx, handle));
+    cx.update_window(handle.into(), |_, window, cx| window.press("escape", cx))
+        .unwrap();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(!dialog_open(cx, handle));
+}
+
+fn dialog_open(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> bool {
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        gpui_kit::component::WindowExt::has_active_dialog(window, cx)
+    })
+    .unwrap()
+}
+
+#[gpui_kit::test]
+fn keymap_errors_show_in_the_window(cx: &mut TestAppContext) {
+    let handle = open(cx);
+    draw(cx, handle);
+    let root = handle
+        .update(cx, |root, _, _| {
+            root.view().clone().downcast::<RootView>().unwrap()
+        })
+        .unwrap();
+    let errors = cx.update_window(handle.into(), |_, window, _| {
+        window.try_find("keymap.errors").is_some()
+    });
+    assert_eq!(errors.ok(), Some(false));
+    cx.update(|cx| {
+        root.update(cx, |view, cx| {
+            view.set_keymap_errors(vec!["line 3: nope".into(), "line 9: no".into()], cx)
+        })
+    });
+    let text = cx
+        .update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window
+                .find("keymap.errors")
+                .label()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .unwrap();
+    assert!(text.contains("line 3: nope"), "{text}");
+    assert!(text.contains("line 9: no"), "{text}");
 }

@@ -4,7 +4,11 @@
 
 use gpui_kit::base::actions::{SelectDown, SelectUp};
 use gpui_kit::component::dock::{ClosePanel, ToggleZoom};
-use gpui_kit::{App, KeyBinding, NoAction};
+use std::rc::Rc;
+
+use gpui_kit::{Action, App, KeyBinding, KeyBindingContextPredicate, KeyContext, NoAction};
+use rust_i18n::t;
+use tessera_core::keymap::UserBinding;
 use tessera_widgets::{BODY_VIEW, NextChunk, PreviousChunk};
 
 gpui_kit::actions!(
@@ -102,7 +106,9 @@ gpui_kit::actions!(
         OpenPresets,
         LoadQuery,
         DeleteSavedQuery,
-        OpenExport
+        OpenExport,
+        OpenPalette,
+        QuickSwitch
     ]
 );
 
@@ -411,6 +417,14 @@ const OPEN_PRESETS: &str = "ctrl-alt-p";
 const OPEN_EXPORT: &str = "cmd-alt-e";
 #[cfg(not(target_os = "macos"))]
 const OPEN_EXPORT: &str = "ctrl-alt-e";
+#[cfg(target_os = "macos")]
+const OPEN_PALETTE: &str = "cmd-k";
+#[cfg(not(target_os = "macos"))]
+const OPEN_PALETTE: &str = "ctrl-k";
+#[cfg(target_os = "macos")]
+const QUICK_SWITCH: &str = "cmd-p";
+#[cfg(not(target_os = "macos"))]
+const QUICK_SWITCH: &str = "ctrl-p";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -420,11 +434,201 @@ const QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const QUIT: &str = "ctrl-q";
 
+macro_rules! action_labels {
+    ($($name:ident),* $(,)?) => {
+        &[$((concat!("tessera::", stringify!($name)), concat!("palette.action.", stringify!($name)))),*]
+    };
+}
+
+/// Each action the palette lists, with the key of its label.
+const ACTION_LABELS: &[(&str, &str)] = action_labels![
+    NewConnection,
+    Quit,
+    DisconnectSelected,
+    EditConnection,
+    DeleteConnection,
+    ImportProfiles,
+    ExportProfiles,
+    ToggleReopenLast,
+    ToggleRequestLog,
+    CopyAsCurl,
+    TogglePolling,
+    Refresh,
+    NewCollection,
+    ToggleFavorite,
+    FocusSearch,
+    LockAgain,
+    CloneCollection,
+    EditSchema,
+    ShowForm,
+    ShowJson,
+    TruncateCollection,
+    DeleteCollection,
+    ShowDocuments,
+    ShowSchema,
+    SortByColumn,
+    ToggleColumns,
+    TogglePinColumn,
+    NarrowerColumn,
+    WiderColumn,
+    ClearFilter,
+    ToggleInspector,
+    GoToId,
+    CopyCell,
+    CopyRowJson,
+    CopyJsonl,
+    CopyCsv,
+    CopyCurl,
+    NewDocument,
+    ReviewDocument,
+    ToggleSaveMode,
+    RevertDocument,
+    SelectLoaded,
+    DeleteDocuments,
+    DeleteByQuery,
+    UpdateByQuery,
+    OpenSearchTab,
+    OpenConsoleTab,
+    StopWaiting,
+    RemoveBodyFile,
+    ShowResponseBody,
+    ShowResponseHeaders,
+    ShowFullBody,
+    SendRequest,
+    AddQueryRow,
+    AttachFile,
+    FavoriteRequest,
+    RevealSecrets,
+    RunSearch,
+    ShowHits,
+    ShowRawResult,
+    ToggleInstant,
+    FocusQuery,
+    NextResultPage,
+    PreviousResultPage,
+    AddSearch,
+    RemoveSearch,
+    NextSearch,
+    PreviousSearch,
+    ToggleUnion,
+    OpenHistory,
+    OpenSaved,
+    SaveQuery,
+    OpenPresets,
+    OpenExport,
+    QuickSwitch,
+];
+
+/// Actions the palette never lists: steps that mean nothing outside their control, and
+/// actions of dialogs, over which the palette does not open.
+pub const PALETTE_HIDDEN: &[&str] = &[
+    "tessera::OpenPalette",
+    "tessera::ConnectSelected",
+    "tessera::TestConnection",
+    "tessera::SaveConnection",
+    "tessera::ToggleKeyMask",
+    "tessera::OpenCollectionRow",
+    "tessera::OpenLink",
+    "tessera::AddField",
+    "tessera::SubmitSchema",
+    "tessera::OpenDocument",
+    "tessera::ApplyDocument",
+    "tessera::ToggleRow",
+    "tessera::ExtendRows",
+    "tessera::BulkContinue",
+    "tessera::AddCondition",
+    "tessera::MoveChipLeft",
+    "tessera::MoveChipRight",
+    "tessera::RemoveChip",
+    "tessera::LoadQuery",
+    "tessera::DeleteSavedQuery",
+    "tessera::ToggleFrameOverlay",
+];
+
+/// The locale key of the label of action `name`, when the palette lists it.
+pub fn action_label(name: &str) -> Option<&'static str> {
+    ACTION_LABELS
+        .iter()
+        .find(|(action, _)| *action == name)
+        .map(|(_, key)| *key)
+}
+
+/// `context` naming the actions whose control is disabled now, for the palette to leave out.
+/// Their handlers stay registered: without one a chord would fall through to a shallower
+/// binding, or to an input's own key.
+pub fn gated(context: &str, gates: &[(bool, &dyn Action)]) -> KeyContext {
+    let mut key = KeyContext::try_from(context).unwrap_or_default();
+    for (_, action) in gates.iter().filter(|(disabled, _)| *disabled) {
+        key.add(action.name());
+    }
+    key
+}
+
+/// Applies the user's bindings after [`bind_keys`], so they win. A bad entry is skipped and
+/// named in the returned lines; the others apply.
+pub fn apply_keymap(bindings: &[UserBinding], cx: &mut App) -> Vec<String> {
+    let mut errors = Vec::new();
+    for entry in bindings {
+        match user_binding(entry, cx) {
+            Ok(binding) => cx.bind_keys([binding]),
+            Err(error) => errors.push(error),
+        }
+    }
+    errors
+}
+
+fn user_binding(entry: &UserBinding, cx: &App) -> Result<KeyBinding, String> {
+    let key = entry.key.as_str();
+    let action = match &entry.action {
+        None => Box::new(NoAction),
+        Some(name) => cx.build_action(name, None).map_err(|e| {
+            let detail = e.to_string();
+            t!(
+                "keymap.error.action",
+                key = key,
+                action = name,
+                detail = detail
+            )
+            .to_string()
+        })?,
+    };
+    let context = match &entry.context {
+        None => None,
+        Some(text) => Some(Rc::new(KeyBindingContextPredicate::parse(text).map_err(
+            |e| {
+                let detail = e.to_string();
+                t!(
+                    "keymap.error.context",
+                    key = key,
+                    context = text,
+                    detail = detail
+                )
+                .to_string()
+            },
+        )?)),
+    };
+    let binding = KeyBinding::load(key, action, context, false, None, cx).map_err(|e| {
+        let detail = e.to_string();
+        t!("keymap.error.key", key = key, detail = detail).to_string()
+    })?;
+    let Some(first) = binding.keystrokes().first().map(|k| k.inner()) else {
+        return Err(t!("keymap.error.empty").to_string());
+    };
+    // Esc is how a dialog closes, and how a confirmation is refused: no entry may take it,
+    // nor start a sequence with it, which would hold it back.
+    if first.key == "escape" && !first.modifiers.modified() {
+        return Err(t!("keymap.error.reserved", key = key).to_string());
+    }
+    Ok(binding)
+}
+
 /// Registers global key bindings and app-level action handlers.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(NEW_CONNECTION, NewConnection, None),
         KeyBinding::new(QUIT, Quit, None),
+        KeyBinding::new(OPEN_PALETTE, OpenPalette, None),
+        KeyBinding::new(QUICK_SWITCH, QuickSwitch, None),
         KeyBinding::new(TOGGLE_LOG, ToggleRequestLog, None),
         // Global, so the selected log entry can be copied wherever focus is.
         KeyBinding::new(COPY_CURL, CopyAsCurl, None),

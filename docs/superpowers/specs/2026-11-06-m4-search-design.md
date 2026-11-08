@@ -533,12 +533,13 @@ Tabs above the toolbar edit `drafts`. ⌘T adds a copy of the active draft, up t
 `views/palette.rs`. ⌘K / Ctrl+K and ⌘P / Ctrl+P are global bindings handled on `RootView`. An open dialog stops them (`has_active_dialog`).
 
 - **Kit.** `gpui-component-0.9.0/src/command/`: `CommandState`, `Command`, `CommandGroup`, `CommandItem`. The kit's filter is a substring match, so `.filterable(false)` hands the query to `.on_query` and `search::fuzzy::rank` orders the items, at most `PALETTE_LIMIT`.
+- **Disabled controls.** A view keeps the handler of a disabled control, because a chord without one would fall through to a shallower binding or to an input's own key (⌘↩ would add a line while Run is blocked). `actions::gated(context, gates)` adds the action's name to the view's `KeyContext` instead, and `open` leaves out any action named in `window.context_stack()`. Where nothing can fall through, the handler is simply not registered (`LockAgain` while locked, `CopyAsCurl` with no selected entry).
 - **Why items carry no `.action`.** `CommandState::confirm` dispatches an item's action from the palette's own focus, where `DOCUMENTS` and the other contexts are out of reach. So `.on_confirm(IndexPath)` closes the dialog and then dispatches with `window.dispatch_action` in `window.defer`, after focus returned. The shortcut is drawn by `.child`, which the kit documents as owning the hint, with `Kbd::binding_for_action_in(action, &previous_focus, window)`.
 - **Actions.** `window.available_actions(cx)` is read before the dialog takes focus, so it lists what the focused view can do, and the list has no dead control. Names keep the `tessera::` prefix and need an entry in `actions::action_label(name) -> Option<&'static str>`, a key under `palette.action.*`. The table is a test: every action in `gpui_kit::actions!` is either labelled or listed in `PALETTE_HIDDEN` (selection steps, dialog internals).
 - **Other groups.** Collections of open connections (opens the tab), saved queries of the selected connection (opens Search with it), connections (Enter connects or selects). Each row names its connection, and prod carries the badge in the row (UX rule 1).
 - **⌘P** is the same palette with collections only. Enter opens the tab.
 - Destructive actions open their usual dialogs; the palette adds no way around a confirmation.
-- `Esc` closes through `.on_cancel`.
+- `Esc` clears a query, then closes: the kit's `Cancel` reaches the hosting dialog, which restores the focus. No `.on_cancel` is needed.
 
 ### 7.11 keymap.toml
 
@@ -549,7 +550,7 @@ Tabs above the toolbar edit `drafts`. ⌘T adds a copy of the active draft, up t
 - `KeyBinding::load` builds the binding, and `cx.bind_keys` adds it. Later bindings win at the same depth, and `Kbd::binding_for_action` picks the highest precedence, so every control shows the user's chord.
 - No action binds `NoAction`, which unbinds.
 
-Each bad entry is skipped and named in a notification after the window opens: a background event, so a toast. `docs/building.md` documents the file.
+Each bad entry is skipped; a file that does not parse changes nothing and the defaults stay. Either way the lines show in full above the tabs (`RootView::set_keymap_errors`), not in a toast, until the file is fixed and the app restarts. A misspelt field is a parse error, since it would otherwise read as an unbind. `escape`, alone or as the first stroke of a sequence, is refused in any context: it is how every dialog closes, and a user binding must not take it. `docs/building.md` documents the file.
 
 ### 7.12 Shortcuts
 
@@ -640,7 +641,7 @@ Recorded in `docs/spec.md` together with this design:
 | Palette dispatch after `window.defer` races focus return | Action lands on the wrong context | UI test from `DOCUMENTS` and from the workbench. If it fails, focus the stored handle explicitly first |
 | Drag and drop of chips inside a scroll view | Awkward on trackpads | ⌥← / ⌥→ is the full path; drag is a convenience |
 | Saved or history files hold query text with personal data | Local privacy | Same trust as `connections.json`; Clear history exists; temporary connections write nothing |
-| `keymap.toml` can unbind safety chords | User can remove a shortcut | The controls stay, and a chord never skips a dialog |
+| `keymap.toml` can unbind safety chords | User can remove a shortcut | The controls stay, a chord never skips a dialog, and Esc cannot be rebound |
 | Union `found` semantics change between versions | Status line misleading | The wording says "before duplicates" and the integration job covers the shape only |
 | Analytics was probed on 30.0 only | 30.2 may differ | The docs say the same (`enable_analytics: false`), and sending the flag is harmless either way |
 | `POST` reads hide in dashboards that count writes | The log's Writes filter would mislead | Fixed in §4.2 |

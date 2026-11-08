@@ -24,12 +24,13 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement as _,
-    Render, SharedString, Styled as _, Subscription, Task, Window, div, prelude::*, px,
+    Action, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div,
+    prelude::*, px,
 };
 use rust_i18n::t;
 use serde_json::{Map, Value};
-use tessera_client::{Client, Collection, Error};
+use tessera_client::{Client, Collection, Error, MULTI_SEARCH_LIMIT};
 use tessera_core::profile::Node;
 use tessera_core::search::INSTANT_DEBOUNCE_MS;
 use tessera_core::search::export::ExportLang;
@@ -507,6 +508,30 @@ impl SearchWorkbench {
     /// There is nothing to send: a draft without collection, or JSON that does not parse.
     fn run_blocked(&self) -> bool {
         self.drafts.iter().any(|d| d.collection.is_empty()) || self.json_error.is_some()
+    }
+
+    /// What the toolbar, the tabs and the pager disable now, for
+    /// [`gated`](crate::actions::gated).
+    pub fn gates(&self, cx: &App) -> Vec<(bool, &'static dyn Action)> {
+        let run = self.run_blocked();
+        let edit = self.json_error.is_some();
+        let single = self.drafts.len() < 2;
+        let (page, pages) = self
+            .result()
+            .map_or((0, 0), |result| (self.page(), self.last_page(result)));
+        vec![
+            (run, &RunSearch),
+            (self.save_blocked(cx), &SaveQuery),
+            (run, &OpenExport),
+            (run, &CopyCurl),
+            (page <= 1 || edit, &PreviousResultPage),
+            (page >= pages || edit, &NextResultPage),
+            (self.drafts.len() >= MULTI_SEARCH_LIMIT || edit, &AddSearch),
+            (single || edit, &RemoveSearch),
+            (single || edit, &NextSearch),
+            (single || edit, &PreviousSearch),
+            (single, &ToggleUnion),
+        ]
     }
 
     /// The draft changed: starts the wait for an instant run. Only the last change of a burst

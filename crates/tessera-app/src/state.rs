@@ -90,8 +90,9 @@ pub struct OpenCollections(pub Uuid);
 /// Asks the window to show the tab of one collection of a profile.
 pub struct OpenCollection(pub Uuid, pub String);
 
-/// Asks the window to show the search tab of a profile, with `.1` loaded into it when given.
-pub struct OpenSearch(pub Uuid, pub Option<SearchDraft>);
+/// Asks the window to show the search tab of a profile, with `.1` loaded into it when given:
+/// the searches and whether they run as a union.
+pub struct OpenSearch(pub Uuid, pub Option<(Vec<SearchDraft>, bool)>);
 
 /// Asks the window to show the console tab of a profile.
 pub struct OpenConsole(pub Uuid);
@@ -819,10 +820,15 @@ impl AppState {
         cx.notify();
     }
 
-    /// Asks for the search tab of profile `id`, showing `draft` when given.
-    pub fn open_search(&mut self, id: Uuid, draft: Option<SearchDraft>, cx: &mut Context<Self>) {
+    /// Asks for the search tab of profile `id`, showing `loaded` when given.
+    pub fn open_search(
+        &mut self,
+        id: Uuid,
+        loaded: Option<(Vec<SearchDraft>, bool)>,
+        cx: &mut Context<Self>,
+    ) {
         self.selected = Some(id);
-        cx.emit(OpenSearch(id, draft));
+        cx.emit(OpenSearch(id, loaded));
         cx.notify();
     }
 

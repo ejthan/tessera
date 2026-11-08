@@ -30,7 +30,7 @@ use super::{env_badge, unlock, welcome};
 use crate::actions::{
     COLLECTION, COLLECTIONS, CONSOLE, CloneCollection, DeleteCollection, EditSchema, FocusSearch,
     LockAgain, NewCollection, OVERVIEW, OpenCollectionRow, Refresh, ShowDocuments, ShowSchema,
-    ToggleFavorite, TogglePolling, TruncateCollection, WORKBENCH,
+    ToggleFavorite, TogglePolling, TruncateCollection, WORKBENCH, gated,
 };
 use crate::connection::ConnectionState;
 use crate::poller::Poller;
@@ -177,9 +177,11 @@ impl Render for OverviewPanel {
         v_flex()
             .track_focus(&self.focus_handle)
             .key_context(OVERVIEW)
-            .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
-                this.connection.update(cx, |c, cx| c.lock(cx));
-            }))
+            .when(self.connection.read(cx).writes_unlocked, |el| {
+                el.on_action(cx.listener(|this, _: &LockAgain, _, cx| {
+                    this.connection.update(cx, |c, cx| c.lock(cx));
+                }))
+            })
             .on_action(cx.listener(|this, _: &TogglePolling, _, cx| {
                 this.connection
                     .update(cx, |c, cx| c.set_paused(!c.paused, cx));
@@ -261,10 +263,12 @@ impl Render for CollectionsPanel {
         let edge = env_badge::color(self.connection.read(cx).profile.color, cx.theme());
         v_flex()
             .track_focus(&self.focus_handle)
-            .key_context(COLLECTIONS)
-            .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
-                this.connection.update(cx, |c, cx| c.lock(cx));
-            }))
+            .key_context(gated(COLLECTIONS, &self.list.read(cx).gates(cx)))
+            .when(self.connection.read(cx).writes_unlocked, |el| {
+                el.on_action(cx.listener(|this, _: &LockAgain, _, cx| {
+                    this.connection.update(cx, |c, cx| c.lock(cx));
+                }))
+            })
             .on_action(cx.listener(|this, _: &Refresh, _, cx| {
                 this.list.update(cx, |l, cx| l.reload(cx));
             }))
@@ -461,10 +465,12 @@ impl Render for CollectionPanel {
         let on_schema = self.view == CollectionView::Schema;
         v_flex()
             .track_focus(&self.focus_handle)
-            .key_context(COLLECTION)
-            .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
-                this.connection.update(cx, |c, cx| c.lock(cx));
-            }))
+            .key_context(gated(COLLECTION, &self.schema.read(cx).gates(on_schema)))
+            .when(self.connection.read(cx).writes_unlocked, |el| {
+                el.on_action(cx.listener(|this, _: &LockAgain, _, cx| {
+                    this.connection.update(cx, |c, cx| c.lock(cx));
+                }))
+            })
             .on_action(cx.listener(|this, _: &ClosePanel, window, cx| {
                 this.documents.update(cx, |d, cx| d.close_tab(window, cx));
             }))
@@ -619,10 +625,12 @@ impl Render for SearchPanel {
         let edge = env_badge::color(self.connection.read(cx).profile.color, cx.theme());
         v_flex()
             .track_focus(&self.focus_handle)
-            .key_context(WORKBENCH)
-            .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
-                this.connection.update(cx, |c, cx| c.lock(cx));
-            }))
+            .key_context(gated(WORKBENCH, &self.workbench.read(cx).gates(cx)))
+            .when(self.connection.read(cx).writes_unlocked, |el| {
+                el.on_action(cx.listener(|this, _: &LockAgain, _, cx| {
+                    this.connection.update(cx, |c, cx| c.lock(cx));
+                }))
+            })
             .size_full()
             .border_t_2()
             .border_color(edge)
@@ -708,10 +716,12 @@ impl Render for ConsolePanel {
         let edge = env_badge::color(self.connection.read(cx).profile.color, cx.theme());
         v_flex()
             .track_focus(&self.focus_handle)
-            .key_context(CONSOLE)
-            .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
-                this.connection.update(cx, |c, cx| c.lock(cx));
-            }))
+            .key_context(gated(CONSOLE, &self.view.read(cx).gates(cx)))
+            .when(self.connection.read(cx).writes_unlocked, |el| {
+                el.on_action(cx.listener(|this, _: &LockAgain, _, cx| {
+                    this.connection.update(cx, |c, cx| c.lock(cx));
+                }))
+            })
             .size_full()
             .border_t_2()
             .border_color(edge)
