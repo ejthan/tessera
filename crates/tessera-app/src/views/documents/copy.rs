@@ -6,7 +6,7 @@ use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::{ClipboardItem, Context, Window};
 use rust_i18n::t;
 use serde_json::{Map, Value};
-use tessera_client::{Client, Error, Method, collection_path, document_path, encode_query};
+use tessera_client::{Client, Error, Method, SearchRoute, document_path, search_route};
 use tessera_core::documents::columns::sort_key;
 use tessera_core::documents::export::{to_csv, to_jsonl};
 use tessera_core::documents::ids::id_batches;
@@ -175,9 +175,10 @@ pub fn copy_curl(view: &mut DocumentsView, cx: &mut Context<DocumentsView>) {
         return;
     };
     let node = connected.client.base_url().clone();
+    // (method, path, query, body): a long filter goes by POST /multi_search, as the client sends it.
     let result = match view.selected_id(cx) {
-        Some(id) => document_path(&view.name, &id).map(|p| (p, None)),
-        None => collection_path(&view.name, "/documents/search").map(|p| {
+        Some(id) => document_path(&view.name, &id).map(|p| (Method::GET, p, None, None)),
+        None => {
             let rows = view.table.read(cx).delegate();
             let per_page = PER_PAGE.to_string();
             let sort = rows.sort.as_ref().map(|(k, asc)| sort_key(k, *asc));
@@ -192,17 +193,29 @@ pub fn copy_curl(view: &mut DocumentsView, cx: &mut Context<DocumentsView>) {
             if let Some(sort) = sort.as_deref() {
                 pairs.push(("sort_by", sort));
             }
-            (p, Some(encode_query(&pairs)))
-        }),
+            let owned: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            search_route(&view.name, &owned).map(|route| match route {
+                SearchRoute::Get { path, query } => (Method::GET, path, Some(query), None),
+                SearchRoute::Post { query, body } => (
+                    Method::POST,
+                    "multi_search".to_string(),
+                    query,
+                    Some(body.to_string()),
+                ),
+            })
+        }
     };
     match result {
-        Ok((path, query)) => {
+        Ok((method, path, query, body)) => {
             let text = tessera_core::curl::request(
                 &node,
-                &Method::GET,
+                &method,
                 &format!("/{path}"),
                 query.as_deref(),
-                None,
+                body.as_deref(),
             );
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             view.copied(cx);

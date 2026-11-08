@@ -7,6 +7,7 @@ mod documents;
 mod error;
 mod event;
 mod models;
+mod search;
 mod send;
 
 use std::fmt;
@@ -21,6 +22,10 @@ pub use error::Error;
 pub use event::{BODY_LIMIT, Body, Origin, RequestEvent, RequestHook};
 pub use models::{CollectionSummary, Debug, Health, KeyAccess, Metrics, RaftState, Stats};
 pub use reqwest::Method;
+pub use search::{
+    GET_QUERY_LIMIT, MULTI_SEARCH_LIMIT, MultiSearch, Preset, SearchRoute, multi_route,
+    search_route,
+};
 use secrecy::SecretString;
 use serde_json::Value;
 use url::Url;
@@ -84,6 +89,8 @@ pub struct Client {
     hook: Option<RequestHook>,
     origin: Origin,
     keep_response_body: bool,
+    /// Set only by `as_read_post`: a `POST` that reads, allowed when read-only.
+    read_post: bool,
 }
 
 impl fmt::Debug for Client {
@@ -169,6 +176,7 @@ impl Client {
             hook: None,
             origin: Origin::User,
             keep_response_body: true,
+            read_post: false,
         })
     }
 
@@ -516,7 +524,7 @@ impl Client {
             return self.send(node, method, path, query, body, timeout).await;
         }
         let start = self.active_node();
-        let retries = if FAILOVER_METHODS.contains(&method) {
+        let retries = if FAILOVER_METHODS.contains(&method) || self.read_post {
             self.retries as usize
         } else {
             0

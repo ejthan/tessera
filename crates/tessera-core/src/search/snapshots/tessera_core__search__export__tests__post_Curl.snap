@@ -1,0 +1,17 @@
+---
+source: crates/tessera-core/src/search/export.rs
+expression: code
+---
+curl -X POST 'https://ts.example.net:8443/multi_search' \
+  -H "X-TYPESENSE-API-KEY: $TYPESENSE_API_KEY" \
+  --data-binary @- <<'EOF'
+{
+  "searches": [
+    {
+      "collection": "books",
+      "q": "*",
+      "filter_by": "aaa…"
+    }
+  ]
+}
+EOF

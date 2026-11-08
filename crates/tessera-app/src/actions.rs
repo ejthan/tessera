@@ -2,6 +2,7 @@
 
 //! App-wide actions and their key bindings.
 
+use gpui_kit::base::actions::{SelectDown, SelectUp};
 use gpui_kit::component::dock::{ClosePanel, ToggleZoom};
 use gpui_kit::{App, KeyBinding, NoAction};
 
@@ -65,7 +66,31 @@ gpui_kit::actions!(
         DeleteDocuments,
         DeleteByQuery,
         UpdateByQuery,
-        BulkContinue
+        BulkContinue,
+        OpenSearchTab,
+        RunSearch,
+        ShowHits,
+        ShowRawResult,
+        ToggleInstant,
+        FocusQuery,
+        NextResultPage,
+        PreviousResultPage,
+        AddCondition,
+        MoveChipLeft,
+        MoveChipRight,
+        RemoveChip,
+        AddSearch,
+        RemoveSearch,
+        NextSearch,
+        PreviousSearch,
+        ToggleUnion,
+        OpenHistory,
+        OpenSaved,
+        SaveQuery,
+        OpenPresets,
+        LoadQuery,
+        DeleteSavedQuery,
+        OpenExport
     ]
 );
 
@@ -109,6 +134,22 @@ pub const SIDEBAR_LINK: &str = "SidebarLink";
 pub const SCHEMA_DIALOG: &str = "SchemaDialog";
 /// Key context of the dialog's last field row, where ⌘↩ / Ctrl+↩ adds the next field.
 pub const SCHEMA_LAST_FIELD: &str = "SchemaLastField";
+/// Key context of a search tab.
+pub const WORKBENCH: &str = "Workbench";
+/// An input in a search tab, which has its own ⌘↩.
+const WORKBENCH_INPUT: &str = "Workbench > Input";
+/// Key context of the Add condition row, deeper than Run.
+pub const CONDITION_ROW: &str = "ConditionRow";
+/// The value input of that row.
+const CONDITION_INPUT: &str = "ConditionRow > Input";
+/// Key context of a list in a search tab's toolbar.
+pub const QUERY_LIST: &str = "QueryList";
+/// The filter of that list, which keeps the focus while the arrows move the selection.
+const QUERY_LIST_INPUT: &str = "QueryList > Input";
+/// Key context of the hit list.
+pub const SEARCH_HITS: &str = "SearchHits";
+/// Key context of a focused `query_by` chip.
+pub const CHIP: &str = "SearchChip";
 
 #[cfg(target_os = "macos")]
 const NEW_CONNECTION: &str = "cmd-n";
@@ -264,6 +305,66 @@ const DELETE_QUERY: &str = "ctrl-shift-k";
 const UPDATE_QUERY: &str = "cmd-shift-u";
 #[cfg(not(target_os = "macos"))]
 const UPDATE_QUERY: &str = "ctrl-shift-u";
+#[cfg(target_os = "macos")]
+const OPEN_SEARCH: &str = "cmd-shift-e";
+#[cfg(not(target_os = "macos"))]
+const OPEN_SEARCH: &str = "ctrl-shift-e";
+#[cfg(target_os = "macos")]
+const SHOW_HITS: &str = "cmd-3";
+#[cfg(not(target_os = "macos"))]
+const SHOW_HITS: &str = "ctrl-3";
+#[cfg(target_os = "macos")]
+const SHOW_RAW: &str = "cmd-4";
+#[cfg(not(target_os = "macos"))]
+const SHOW_RAW: &str = "ctrl-4";
+#[cfg(target_os = "macos")]
+const TOGGLE_INSTANT: &str = "cmd-alt-l";
+#[cfg(not(target_os = "macos"))]
+const TOGGLE_INSTANT: &str = "ctrl-alt-l";
+#[cfg(target_os = "macos")]
+const PREVIOUS_PAGE: &str = "cmd-alt-up";
+#[cfg(not(target_os = "macos"))]
+const PREVIOUS_PAGE: &str = "ctrl-alt-up";
+#[cfg(target_os = "macos")]
+const NEXT_PAGE: &str = "cmd-alt-down";
+#[cfg(not(target_os = "macos"))]
+const NEXT_PAGE: &str = "ctrl-alt-down";
+#[cfg(target_os = "macos")]
+const ADD_SEARCH: &str = "cmd-t";
+#[cfg(not(target_os = "macos"))]
+const ADD_SEARCH: &str = "ctrl-t";
+#[cfg(target_os = "macos")]
+const REMOVE_SEARCH: &str = "cmd-shift-w";
+#[cfg(not(target_os = "macos"))]
+const REMOVE_SEARCH: &str = "ctrl-shift-w";
+#[cfg(target_os = "macos")]
+const NEXT_SEARCH: &str = "cmd-alt-right";
+#[cfg(not(target_os = "macos"))]
+const NEXT_SEARCH: &str = "ctrl-alt-right";
+#[cfg(target_os = "macos")]
+const PREVIOUS_SEARCH: &str = "cmd-alt-left";
+#[cfg(not(target_os = "macos"))]
+const PREVIOUS_SEARCH: &str = "ctrl-alt-left";
+#[cfg(target_os = "macos")]
+const OPEN_HISTORY: &str = "cmd-shift-h";
+#[cfg(not(target_os = "macos"))]
+const OPEN_HISTORY: &str = "ctrl-shift-h";
+#[cfg(target_os = "macos")]
+const OPEN_SAVED: &str = "cmd-o";
+#[cfg(not(target_os = "macos"))]
+const OPEN_SAVED: &str = "ctrl-o";
+#[cfg(target_os = "macos")]
+const SAVE_QUERY: &str = "cmd-s";
+#[cfg(not(target_os = "macos"))]
+const SAVE_QUERY: &str = "ctrl-s";
+#[cfg(target_os = "macos")]
+const OPEN_PRESETS: &str = "cmd-alt-p";
+#[cfg(not(target_os = "macos"))]
+const OPEN_PRESETS: &str = "ctrl-alt-p";
+#[cfg(target_os = "macos")]
+const OPEN_EXPORT: &str = "cmd-alt-e";
+#[cfg(not(target_os = "macos"))]
+const OPEN_EXPORT: &str = "ctrl-alt-e";
 #[cfg(all(feature = "frame-overlay", target_os = "macos"))]
 const FRAME_OVERLAY: &str = "cmd-alt-f";
 #[cfg(all(feature = "frame-overlay", not(target_os = "macos")))]
@@ -362,6 +463,44 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(SAVE, SubmitSchema, Some(SCHEMA_DIALOG)),
         // Deeper than the dialog, so in the last row ⌘↩ adds a field instead of creating.
         KeyBinding::new(SAVE, AddField, Some(SCHEMA_LAST_FIELD)),
+        KeyBinding::new(OPEN_SEARCH, OpenSearchTab, None),
+        KeyBinding::new(LOCK_AGAIN, LockAgain, Some(WORKBENCH)),
+        KeyBinding::new(SAVE, RunSearch, Some(WORKBENCH)),
+        KeyBinding::new(SAVE, RunSearch, Some(WORKBENCH_INPUT)),
+        KeyBinding::new(SHOW_FORM, ShowForm, Some(WORKBENCH)),
+        KeyBinding::new(SHOW_JSON, ShowJson, Some(WORKBENCH)),
+        KeyBinding::new(SHOW_HITS, ShowHits, Some(WORKBENCH)),
+        KeyBinding::new(SHOW_RAW, ShowRawResult, Some(WORKBENCH)),
+        KeyBinding::new(TOGGLE_INSTANT, ToggleInstant, Some(WORKBENCH)),
+        KeyBinding::new(FIND, FocusQuery, Some(WORKBENCH)),
+        KeyBinding::new(PREVIOUS_PAGE, PreviousResultPage, Some(WORKBENCH)),
+        KeyBinding::new(NEXT_PAGE, NextResultPage, Some(WORKBENCH)),
+        KeyBinding::new(ADD_SEARCH, AddSearch, Some(WORKBENCH)),
+        KeyBinding::new(REMOVE_SEARCH, RemoveSearch, Some(WORKBENCH)),
+        KeyBinding::new(NEXT_SEARCH, NextSearch, Some(WORKBENCH)),
+        KeyBinding::new(PREVIOUS_SEARCH, PreviousSearch, Some(WORKBENCH)),
+        KeyBinding::new(SAVE_MODE, ToggleUnion, Some(WORKBENCH)),
+        KeyBinding::new(OPEN_HISTORY, OpenHistory, Some(WORKBENCH)),
+        KeyBinding::new(OPEN_SAVED, OpenSaved, Some(WORKBENCH)),
+        KeyBinding::new(SAVE_QUERY, SaveQuery, Some(WORKBENCH)),
+        KeyBinding::new(OPEN_PRESETS, OpenPresets, Some(WORKBENCH)),
+        KeyBinding::new(OPEN_EXPORT, OpenExport, Some(WORKBENCH)),
+        KeyBinding::new(COPY_DOC_CURL, CopyCurl, Some(WORKBENCH)),
+        // Deeper than the input's own keys, so the filter keeps the focus.
+        KeyBinding::new("up", SelectUp, Some(QUERY_LIST_INPUT)),
+        KeyBinding::new("down", SelectDown, Some(QUERY_LIST_INPUT)),
+        KeyBinding::new("enter", LoadQuery, Some(QUERY_LIST_INPUT)),
+        KeyBinding::new(DELETE, DeleteSavedQuery, Some(QUERY_LIST_INPUT)),
+        // Deeper than Run, so in the row ⌘↩ adds the condition.
+        KeyBinding::new(SAVE, AddCondition, Some(CONDITION_ROW)),
+        KeyBinding::new(SAVE, AddCondition, Some(CONDITION_INPUT)),
+        // Only here: an input keeps its arrows.
+        KeyBinding::new("up", SelectUp, Some(SEARCH_HITS)),
+        KeyBinding::new("down", SelectDown, Some(SEARCH_HITS)),
+        KeyBinding::new("alt-left", MoveChipLeft, Some(CHIP)),
+        KeyBinding::new("alt-right", MoveChipRight, Some(CHIP)),
+        KeyBinding::new("delete", RemoveChip, Some(CHIP)),
+        KeyBinding::new("backspace", RemoveChip, Some(CHIP)),
     ]);
     #[cfg(feature = "frame-overlay")]
     cx.bind_keys([KeyBinding::new(

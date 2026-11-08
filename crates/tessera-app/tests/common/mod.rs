@@ -22,6 +22,7 @@ use tessera_app::connection::{Connected, ConnectorGlobal, ServerInfo};
 use tessera_app::documents::{DocumentsBackend, DocumentsBackendGlobal, PageResult};
 use tessera_app::poller::{CollectionsFetcherGlobal, NodeSample, PollFetcherGlobal, SampleFuture};
 use tessera_app::runtime::Tokio;
+use tessera_app::search::{MultiAnswer, SearchAnswer, SearchBackend, SearchBackendGlobal};
 use tessera_app::state::AppState;
 use tessera_app::views::dock::CollectionPanel;
 use tessera_app::views::root::RootView;
@@ -31,6 +32,7 @@ use tessera_client::{
 };
 use tessera_core::documents::page::DocumentPage;
 use tessera_core::profile::{Environment, Node, Profile, ProfileColor, Protocol};
+use tessera_core::search::results::{parse_multi, parse_result};
 use tessera_core::secrets::{MemoryStore, SecretStore};
 use tessera_core::store::{ConnectionsFile, StoreError};
 
@@ -750,6 +752,175 @@ pub fn fake_documents(cx: &mut TestAppContext) -> Arc<FakeDocs> {
     docs
 }
 
+/// One search the fake was asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchCall {
+    /// The collection.
+    pub collection: String,
+    /// The parameters as sent.
+    pub params: Vec<(String, String)>,
+}
+
+impl SearchCall {
+    /// The value of parameter `key`.
+    pub fn param(&self, key: &str) -> Option<&str> {
+        let found = self.params.iter().find(|(k, _)| k == key);
+        found.map(|(_, v)| v.as_str())
+    }
+}
+
+/// A search backend that answers with a set text and records what it was asked.
+pub struct FakeSearch {
+    /// The body of each answer.
+    pub body: Mutex<String>,
+    /// Every search, in order.
+    pub calls: Mutex<Vec<SearchCall>>,
+    /// Answers fail with this status and Typesense message.
+    pub fail: Mutex<Option<(u16, String)>>,
+    /// When set, the next answer waits until the sender fires or is dropped.
+    pub hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Every multi-search, in order.
+    pub multi_calls: Mutex<Vec<tessera_client::MultiSearch>>,
+    /// The body of each multi-search answer; by default [`search_body`] of 12 per search.
+    pub multi_body: Mutex<Option<String>>,
+    /// The presets on the server.
+    pub presets: Mutex<Vec<tessera_client::Preset>>,
+    /// Every preset saved, in order.
+    pub saved_presets: Mutex<Vec<(String, serde_json::Value)>>,
+}
+
+impl FakeSearch {
+    /// Holds the next answer until the returned sender fires. The sender reports closed
+    /// once the view dropped the search.
+    pub fn hold_next(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        *self.hold.lock().unwrap() = Some(rx);
+        tx
+    }
+
+    /// The searches asked so far.
+    pub fn calls(&self) -> Vec<SearchCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    /// The multi-searches asked so far.
+    pub fn multi_calls(&self) -> Vec<tessera_client::MultiSearch> {
+        self.multi_calls.lock().unwrap().clone()
+    }
+}
+
+/// The body of a search that found `found` documents.
+pub fn search_body(found: u64) -> String {
+    format!(r#"{{"found":{found},"out_of":100,"page":1,"search_time_ms":3,"hits":[]}}"#)
+}
+
+pub struct FakeSearchBackend(pub Arc<FakeSearch>);
+
+impl SearchBackend for FakeSearchBackend {
+    fn search(
+        &self,
+        _: Client,
+        collection: String,
+        params: Vec<(String, String)>,
+        tags: (String, String),
+    ) -> tessera_app::collections::BoxFuture<Result<SearchAnswer, Error>> {
+        let fake = &self.0;
+        fake.calls
+            .lock()
+            .unwrap()
+            .push(SearchCall { collection, params });
+        let body = fake.body.lock().unwrap().clone();
+        let fail = fake.fail.lock().unwrap().clone();
+        let hold = fake.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            if let Some(e) = fail {
+                return Err(http_error(e));
+            }
+            let result = parse_result(&body, (&tags.0, &tags.1)).map_err(Error::Decode)?;
+            Ok(SearchAnswer {
+                text: body.into(),
+                result,
+            })
+        })
+    }
+
+    fn multi(
+        &self,
+        _: Client,
+        request: tessera_client::MultiSearch,
+        tags: Vec<(String, String)>,
+    ) -> tessera_app::collections::BoxFuture<Result<MultiAnswer, Error>> {
+        let fake = &self.0;
+        fake.multi_calls.lock().unwrap().push(request.clone());
+        let body = fake.multi_body.lock().unwrap().clone().unwrap_or_else(|| {
+            let results = vec![search_body(12); request.searches.len()].join(",");
+            if request.union {
+                search_body(12)
+            } else {
+                format!(r#"{{"results":[{results}]}}"#)
+            }
+        });
+        let fail = fake.fail.lock().unwrap().clone();
+        let hold = fake.hold.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(hold) = hold {
+                hold.await.ok();
+            }
+            if let Some(e) = fail {
+                return Err(http_error(e));
+            }
+            let (start, end) = &tags[0];
+            let result = parse_multi(&body, request.union, (start, end)).map_err(Error::Decode)?;
+            Ok(MultiAnswer {
+                text: body.into(),
+                result,
+            })
+        })
+    }
+
+    fn presets(
+        &self,
+        _: Client,
+    ) -> tessera_app::collections::BoxFuture<Result<Vec<tessera_client::Preset>, Error>> {
+        let fake = &self.0;
+        let presets = fake.presets.lock().unwrap().clone();
+        let fail = fake.fail.lock().unwrap().clone();
+        Box::pin(async move { fail.map_or(Ok(presets), |e| Err(http_error(e))) })
+    }
+
+    fn save_preset(
+        &self,
+        _: Client,
+        name: String,
+        value: serde_json::Value,
+    ) -> tessera_app::collections::BoxFuture<Result<(), Error>> {
+        let fake = &self.0;
+        fake.saved_presets.lock().unwrap().push((name, value));
+        let fail = fake.fail.lock().unwrap().clone();
+        Box::pin(async move { fail.map_or(Ok(()), |e| Err(http_error(e))) })
+    }
+}
+
+/// Installs a search backend answering with [`search_body`] of 12 documents.
+pub fn install_search_fake(cx: &mut TestAppContext) -> Arc<FakeSearch> {
+    let fake = Arc::new(FakeSearch {
+        body: Mutex::new(search_body(12)),
+        calls: Mutex::default(),
+        fail: Mutex::default(),
+        hold: Mutex::default(),
+        multi_calls: Mutex::default(),
+        multi_body: Mutex::default(),
+        presets: Mutex::default(),
+        saved_presets: Mutex::default(),
+    });
+    let installed = FakeSearchBackend(fake.clone());
+    cx.update(|cx| cx.set_global(SearchBackendGlobal(Arc::new(installed))));
+    fake
+}
+
 /// Installs a node fetcher that answers with `answer` and records every node URL it polls.
 pub fn fake_poll(
     cx: &mut TestAppContext,
@@ -845,6 +1016,23 @@ pub const COPY_DOC_CURL: &str = key("cmd-alt-u", "ctrl-alt-u");
 pub const NEW_DOCUMENT: &str = key("cmd-shift-n", "ctrl-shift-n");
 pub const SAVE_MODE: &str = key("cmd-shift-m", "ctrl-shift-m");
 pub const REVERT: &str = key("cmd-shift-r", "ctrl-shift-r");
+pub const OPEN_SEARCH: &str = key("cmd-shift-e", "ctrl-shift-e");
+pub const OPEN_HISTORY: &str = key("cmd-shift-h", "ctrl-shift-h");
+pub const OPEN_SAVED: &str = key("cmd-o", "ctrl-o");
+pub const SAVE_QUERY: &str = key("cmd-s", "ctrl-s");
+pub const OPEN_PRESETS: &str = key("cmd-alt-p", "ctrl-alt-p");
+pub const OPEN_EXPORT: &str = key("cmd-alt-e", "ctrl-alt-e");
+pub const SHOW_FORM: &str = key("cmd-1", "ctrl-1");
+pub const SHOW_JSON: &str = key("cmd-2", "ctrl-2");
+pub const SHOW_HITS: &str = key("cmd-3", "ctrl-3");
+pub const SHOW_RAW: &str = key("cmd-4", "ctrl-4");
+pub const TOGGLE_INSTANT: &str = key("cmd-alt-l", "ctrl-alt-l");
+pub const ADD_SEARCH: &str = key("cmd-t", "ctrl-t");
+pub const REMOVE_SEARCH: &str = key("cmd-shift-w", "ctrl-shift-w");
+pub const NEXT_SEARCH: &str = key("cmd-alt-right", "ctrl-alt-right");
+pub const PREVIOUS_SEARCH: &str = key("cmd-alt-left", "ctrl-alt-left");
+pub const TOGGLE_UNION: &str = key("cmd-shift-m", "ctrl-shift-m");
+pub const NEXT_PAGE: &str = key("cmd-alt-down", "ctrl-alt-down");
 
 /// Installs a connector that answers immediately with `result` (or derives it from the profile).
 pub fn fake_connector(

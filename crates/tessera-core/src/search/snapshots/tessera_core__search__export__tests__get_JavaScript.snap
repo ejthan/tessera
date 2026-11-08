@@ -1,0 +1,19 @@
+---
+source: crates/tessera-core/src/search/export.rs
+expression: "text(lang, &node(), &target)"
+---
+import Typesense from "typesense";
+
+const client = new Typesense.Client({
+  nodes: [{"host":"ts.example.net","port":8443,"protocol":"https"}],
+  apiKey: process.env.TYPESENSE_API_KEY,
+});
+
+const searchParameters = {
+  "q": "dune",
+  "query_by": "title",
+  "filter_by": "genre:=`a b` && year:>1"
+};
+
+const results = await client.collections("books").documents().search(searchParameters);
+console.log(results);

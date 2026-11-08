@@ -6,6 +6,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -41,11 +42,11 @@ impl Default for ConnectionsFile {
     }
 }
 
-/// Why loading or saving `connections.json` failed.
+/// Why loading or saving a JSON file failed.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     /// Reading, writing or renaming failed.
-    #[error("cannot access connections file: {0}")]
+    #[error("cannot access file: {0}")]
     Io(#[from] std::io::Error),
     /// The file exists but is not valid; it is left untouched.
     #[error("cannot parse {}: {message}", path.display())]
@@ -56,7 +57,7 @@ pub enum StoreError {
         message: String,
     },
     /// The file was written by a newer Tessera.
-    #[error("connections file uses schema version {0}, which this version does not understand")]
+    #[error("file uses schema version {0}, which this version does not understand")]
     NewerSchema(u32),
 }
 
@@ -71,9 +72,18 @@ pub fn config_dir() -> Option<PathBuf> {
 
 /// Loads the file at `path`. A missing file yields an empty default.
 pub fn load(path: &Path) -> Result<ConnectionsFile, StoreError> {
+    load_versioned(path, SCHEMA_VERSION)
+}
+
+/// Loads a file with a `schema_version` up to `version`. A missing file yields the default; a
+/// bad or newer one is an error, and the caller must not write over it.
+pub(crate) fn load_versioned<T: Default + DeserializeOwned>(
+    path: &Path,
+    version: u32,
+) -> Result<T, StoreError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ConnectionsFile::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
         Err(e) => return Err(e.into()),
     };
     let parse_err = |e: serde_json::Error| StoreError::Parse {
@@ -83,7 +93,7 @@ pub fn load(path: &Path) -> Result<ConnectionsFile, StoreError> {
     // Check the version first: a newer file may not match today's shape.
     let value: serde_json::Value = serde_json::from_str(&text).map_err(parse_err)?;
     if let Some(v) = value.get("schema_version").and_then(|v| v.as_u64())
-        && v > u64::from(SCHEMA_VERSION)
+        && v > u64::from(version)
     {
         return Err(StoreError::NewerSchema(
             u32::try_from(v).unwrap_or(u32::MAX),
@@ -94,6 +104,11 @@ pub fn load(path: &Path) -> Result<ConnectionsFile, StoreError> {
 
 /// Writes `file` as pretty JSON via [`write_atomic`].
 pub fn save(path: &Path, file: &ConnectionsFile) -> Result<(), StoreError> {
+    save_pretty(path, file)
+}
+
+/// Writes `file` as pretty JSON via [`write_atomic`].
+pub(crate) fn save_pretty<T: Serialize>(path: &Path, file: &T) -> Result<(), StoreError> {
     let json = serde_json::to_string_pretty(file).map_err(|e| StoreError::Parse {
         path: path.to_path_buf(),
         message: e.to_string(),

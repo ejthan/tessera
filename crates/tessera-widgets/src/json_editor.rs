@@ -59,6 +59,8 @@ pub enum JsonEditorEvent {
 pub struct JsonEditor {
     state: Entity<EditorState>,
     read_only: bool,
+    /// Shows any text: no highlighting and nothing to report about its syntax.
+    plain: bool,
     error: Option<JsonError>,
     _subscription: Subscription,
 }
@@ -75,6 +77,26 @@ impl JsonEditor {
                 .folding(true)
                 .default_value(text.to_string())
         });
+        Self::build(state, read_only, false, cx)
+    }
+
+    /// A read-only view of `text` of any size and syntax, without highlighting.
+    pub fn plain(text: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let state = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .line_number(true)
+                .soft_wrap(false)
+                .default_value(text.to_string())
+        });
+        Self::build(state, true, true, cx)
+    }
+
+    fn build(
+        state: Entity<EditorState>,
+        read_only: bool,
+        plain: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscription = cx.subscribe(&state, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.reparse(cx);
@@ -84,6 +106,7 @@ impl JsonEditor {
         let mut editor = Self {
             state,
             read_only,
+            plain,
             error: None,
             _subscription: subscription,
         };
@@ -162,6 +185,9 @@ impl JsonEditor {
     }
 
     fn reparse(&mut self, cx: &mut Context<Self>) {
+        if self.plain {
+            return;
+        }
         let text = self.text(cx);
         self.error = serde_json::from_str::<serde_json::Value>(&text)
             .err()

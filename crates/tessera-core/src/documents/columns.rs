@@ -17,11 +17,11 @@ pub struct ColumnDef {
     pub in_schema: bool,
 }
 
-fn is_vector(f: &Field) -> bool {
+pub(crate) fn is_vector(f: &Field) -> bool {
     f.r#type == "float[]" && (f.attr("num_dim").is_some() || f.attr("embed").is_some())
 }
 
-fn is_sortable(f: &Field) -> bool {
+pub(crate) fn is_sortable(f: &Field) -> bool {
     matches!(
         f.r#type.as_str(),
         "int32" | "int64" | "float" | "bool" | "string"

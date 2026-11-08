@@ -10,6 +10,7 @@ pub mod review;
 pub mod selection;
 pub mod table;
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -64,7 +65,7 @@ fn next_sort(current: Option<(String, bool)>, key: String) -> Option<(String, bo
 
 /// What the filter bar offers: `id` and the indexed fields of the schema. Filtering a field
 /// with `index: false` is a 400.
-fn filter_fields(collection: &Collection) -> Vec<FilterField> {
+pub(crate) fn filter_fields(collection: &Collection) -> Vec<FilterField> {
     let id = FilterField {
         name: "id".into(),
         r#type: "string".into(),
@@ -82,15 +83,19 @@ fn filter_fields(collection: &Collection) -> Vec<FilterField> {
     std::iter::once(id).chain(fields).collect()
 }
 
-/// Facet values of `collection` for a filter input, through the user's client.
-fn facet_fetch(connection: Entity<ConnectionState>, collection: String) -> FacetFetch {
+/// Facet values of `collection`, read at each fetch, for a filter input, through the user's
+/// client.
+pub(crate) fn facet_fetch(
+    connection: Entity<ConnectionState>,
+    collection: Rc<RefCell<String>>,
+) -> FacetFetch {
     Rc::new(move |field, prefix, cx: &mut App| {
         let Some(connected) = &connection.read(cx).connected else {
             return Task::ready(Vec::new());
         };
         let values = cx.global::<DocumentsBackendGlobal>().0.facet_values(
             connected.client.clone(),
-            collection.clone(),
+            collection.borrow().clone(),
             field,
             prefix,
         );
@@ -160,7 +165,7 @@ impl DocumentsView {
                 .col_selectable(false)
                 .col_movable(false)
         });
-        let fetch = facet_fetch(connection.clone(), name.clone());
+        let fetch = facet_fetch(connection.clone(), Rc::new(RefCell::new(name.clone())));
         let filter = cx.new(|cx| FilterInput::new(Vec::new(), fetch, window, cx));
         let inspector = cx.new(|cx| Inspector::new(connection.clone(), name.clone(), window, cx));
         let goto = cx.new(|cx| {

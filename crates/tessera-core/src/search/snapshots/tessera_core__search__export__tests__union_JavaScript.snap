@@ -1,0 +1,41 @@
+---
+source: crates/tessera-core/src/search/export.rs
+expression: "text(lang, &node(), &target)"
+---
+import Typesense from "typesense";
+
+const client = new Typesense.Client({
+  nodes: [{"host":"ts.example.net","port":8443,"protocol":"https"}],
+  apiKey: process.env.TYPESENSE_API_KEY,
+});
+
+const searchRequests = {
+  "union": true,
+  "searches": [
+    {
+      "collection": "a",
+      "q": "*",
+      "exhaustive": true,
+      "n": null,
+      "l": [
+        1
+      ]
+    },
+    {
+      "collection": "b",
+      "q": "*",
+      "exhaustive": true,
+      "n": null,
+      "l": [
+        1
+      ]
+    }
+  ]
+};
+const commonParams = {
+  "page": 2,
+  "per_page": 5
+};
+
+const results = await client.multiSearch.perform(searchRequests, commonParams);
+console.log(results);

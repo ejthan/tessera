@@ -29,7 +29,10 @@ impl Client {
         body: Option<&Value>,
         timeout: Option<Duration>,
     ) -> Result<(u16, String), Error> {
-        if self.is_read_only() && !crate::READ_METHODS.contains(&method) {
+        if self.is_read_only()
+            && !crate::READ_METHODS.contains(&method)
+            && !(self.read_post && method == Method::POST)
+        {
             return Err(Error::ReadOnly { method });
         }
         let base = &self.nodes[node];

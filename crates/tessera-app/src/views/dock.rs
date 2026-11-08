@@ -23,12 +23,13 @@ use super::documents::DocumentsView;
 use super::import_dialog::ImportDialog;
 use super::overview::Overview;
 use super::schema_view::{SchemaFailed, SchemaLoaded, SchemaView};
+use super::search::SearchWorkbench;
 use super::sidebar::Sidebar;
 use super::{env_badge, unlock, welcome};
 use crate::actions::{
     COLLECTION, COLLECTIONS, CloneCollection, DeleteCollection, EditSchema, FocusSearch, LockAgain,
     NewCollection, OVERVIEW, OpenCollectionRow, Refresh, ShowDocuments, ShowSchema, ToggleFavorite,
-    TogglePolling, TruncateCollection,
+    TogglePolling, TruncateCollection, WORKBENCH,
 };
 use crate::connection::ConnectionState;
 use crate::poller::Poller;
@@ -433,8 +434,14 @@ impl Panel for CollectionPanel {
     }
 }
 
-/// One entry of a collection tab's view switch, with its shortcut.
-fn view_tab(id: &'static str, label: SharedString, action: &dyn Action, window: &Window) -> Tab {
+/// One entry of a tab's view switch, with its shortcut in key context `context`.
+pub(super) fn view_tab(
+    id: &'static str,
+    label: SharedString,
+    action: &dyn Action,
+    context: &str,
+    window: &Window,
+) -> Tab {
     Tab::new()
         .aria_label(label.clone())
         .child(
@@ -444,7 +451,7 @@ fn view_tab(id: &'static str, label: SharedString, action: &dyn Action, window: 
                 .aria_label(label.clone())
                 .child(label),
         )
-        .suffix(div().children(Kbd::binding_for_action(action, Some(COLLECTION), window)))
+        .suffix(div().children(Kbd::binding_for_action(action, Some(context), window)))
 }
 
 impl Render for CollectionPanel {
@@ -513,12 +520,14 @@ impl Render for CollectionPanel {
                         "collection.view.documents",
                         t!("documents.view").to_string().into(),
                         &ShowDocuments,
+                        COLLECTION,
                         window,
                     ))
                     .child(view_tab(
                         "collection.view.schema",
                         t!("documents.schema_view").to_string().into(),
                         &ShowSchema,
+                        COLLECTION,
                         window,
                     )),
             )
@@ -529,6 +538,95 @@ impl Render for CollectionPanel {
                     el.child(self.documents.clone())
                 }
             }))
+    }
+}
+
+/// A center tab searching one connection.
+pub struct SearchPanel {
+    connection: Entity<ConnectionState>,
+    workbench: Entity<SearchWorkbench>,
+    focus_handle: FocusHandle,
+    _subscription: Subscription,
+}
+
+impl SearchPanel {
+    /// The search tab of `connection`.
+    pub fn new(
+        connection: Entity<ConnectionState>,
+        state: Entity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            _subscription: cx.observe(&connection, |_, _, cx| cx.notify()),
+            workbench: cx.new(|cx| SearchWorkbench::new(state, connection.clone(), window, cx)),
+            connection,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    /// The connection this tab shows.
+    pub fn connection(&self) -> &Entity<ConnectionState> {
+        &self.connection
+    }
+
+    /// The workbench.
+    pub fn workbench(&self) -> &Entity<SearchWorkbench> {
+        &self.workbench
+    }
+}
+
+impl EventEmitter<PanelEvent> for SearchPanel {}
+
+impl Focusable for SearchPanel {
+    /// The workbench: its shortcuts work from the moment the tab shows.
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.workbench.focus_handle(cx)
+    }
+}
+
+impl BasePanel for SearchPanel {
+    fn panel_name(&self) -> &'static str {
+        "Search"
+    }
+}
+
+impl Panel for SearchPanel {
+    /// Color dot, "Search" and environment badge (UX rule 1).
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let conn = self.connection.read(cx);
+        let (profile, unlocked) = (&conn.profile, conn.writes_unlocked);
+        let tab_id = format!("tab.{}.search", profile.id);
+        let name = SharedString::from(t!("sidebar.search").to_string());
+        h_flex()
+            .id(SharedString::from(tab_id.clone()))
+            .test_support()
+            .aria_label(name.clone())
+            .gap_2()
+            .items_center()
+            .child(env_badge::dot(profile.color, cx))
+            .child(name)
+            .child(env_badge::render(&profile.environment, cx))
+            .when(profile.read_only, |el| {
+                el.child(env_badge::lock(&tab_id, unlocked, cx))
+            })
+    }
+}
+
+impl Render for SearchPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let edge = env_badge::color(self.connection.read(cx).profile.color, cx.theme());
+        v_flex()
+            .track_focus(&self.focus_handle)
+            .key_context(WORKBENCH)
+            .on_action(cx.listener(|this, _: &LockAgain, _, cx| {
+                this.connection.update(cx, |c, cx| c.lock(cx));
+            }))
+            .size_full()
+            .border_t_2()
+            .border_color(edge)
+            .children(unlock::banner(&self.connection, WORKBENCH, window, cx))
+            .child(div().flex_1().min_h_0().child(self.workbench.clone()))
     }
 }
 

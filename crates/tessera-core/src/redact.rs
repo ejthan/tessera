@@ -13,7 +13,17 @@ const SECRET_KEYS: [&str; 5] = [
     "client_secret",
 ];
 
-/// Masks the string values of the keys in `SECRET_KEYS` (`api_key`, `value` and the
+/// Whether a request parameter of this name would hold a key: `api_key`, `x-typesense-api-key`,
+/// `scoped_key` and the like, or a name in `SECRET_KEYS`, in any case and with `-` or `_`.
+pub fn is_secret_param(name: &str) -> bool {
+    let name = name.to_ascii_lowercase().replace('-', "_");
+    ["api_key", "apikey", "scoped_key"]
+        .iter()
+        .any(|part| name.contains(part))
+        || SECRET_KEYS.contains(&name.as_str())
+}
+
+/// Masks the string values of the keys [`is_secret_param`] names (`api_key`, `value`, the
 /// embedding model credentials) at any depth.
 ///
 /// Valid JSON comes back pretty-printed. Text that is not valid JSON (for example a body
@@ -33,13 +43,13 @@ pub fn key(prefix: &str) -> String {
     format!("{prefix}{MASK}")
 }
 
-/// A query string with the value of an `x-typesense-api-key` parameter (any case) masked.
-/// Typesense accepts the key as a query parameter too.
+/// A query string with the value of every parameter [`is_secret_param`] names masked. Typesense
+/// accepts the key as a query parameter too.
 pub fn query(query: &str) -> String {
     query
         .split('&')
         .map(|pair| match pair.split_once('=') {
-            Some((name, _)) if is_key_param(name) => format!("{name}={MASK}"),
+            Some((name, _)) if is_secret_query_name(name) => format!("{name}={MASK}"),
             _ => pair.to_string(),
         })
         .collect::<Vec<_>>()
@@ -47,10 +57,10 @@ pub fn query(query: &str) -> String {
 }
 
 /// Compares the percent-decoded name, so `x%2Dtypesense-api-key` counts too.
-fn is_key_param(name: &str) -> bool {
+fn is_secret_query_name(name: &str) -> bool {
     url::form_urlencoded::parse(name.as_bytes())
         .next()
-        .is_some_and(|(k, _)| k.eq_ignore_ascii_case(KEY_PARAM))
+        .is_some_and(|(k, _)| is_secret_param(&k))
 }
 
 /// Free text (for example an error message) with the query of every URL in it passed through
@@ -77,14 +87,12 @@ pub fn text_query_params(text: &str) -> String {
     out
 }
 
-const KEY_PARAM: &str = "x-typesense-api-key";
-
 /// Masks the secret string values in `v` in place, at any depth (for display of a parsed body).
 pub fn mask_value(v: &mut Value) {
     match v {
         Value::Object(map) => {
             for (k, child) in map.iter_mut() {
-                if SECRET_KEYS.contains(&k.as_str()) && child.is_string() {
+                if is_secret_param(k) && child.is_string() {
                     *child = Value::String(MASK.into());
                 } else {
                     mask_value(child);
@@ -142,7 +150,7 @@ fn mask_text(text: &str) -> String {
         let name = text.get(i + 1..end.saturating_sub(1)).unwrap_or("");
         let colon = skip_ws(b, end);
         let val = skip_ws(b, colon + 1);
-        if SECRET_KEYS.contains(&name)
+        if is_secret_param(name)
             && b.get(end - 1) == Some(&b'"')
             && b.get(colon) == Some(&b':')
             && b.get(val) == Some(&b'"')
@@ -212,6 +220,24 @@ mod tests {
             "q=dune&X-TYPESENSE-API-KEY=••••&x-typesense-api-key=••••&k=v"
         );
         assert_eq!(query("q=a=b&flag"), "q=a=b&flag");
+    }
+
+    #[test]
+    fn query_masks_every_secret_parameter() {
+        assert_eq!(
+            query("api_key=a&SCOPED_KEY=b&x_typesense_api_key=c&a%70i_key=d&q=e"),
+            "api_key=••••&SCOPED_KEY=••••&x_typesense_api_key=••••&a%70i_key=••••&q=e"
+        );
+    }
+
+    #[test]
+    fn json_masks_every_secret_parameter() {
+        let body = r#"{"x-typesense-api-key":"a","s":[{"scoped_key":"b"}],"q":"keep"}"#;
+        let out = json(body);
+        assert_eq!(out.matches(MASK).count(), 2, "{out}");
+        assert!(out.contains("keep"));
+        let cut = mask_text(&body[..body.len() - 2]);
+        assert_eq!(cut.matches(MASK).count(), 2, "{cut}");
     }
 
     #[test]

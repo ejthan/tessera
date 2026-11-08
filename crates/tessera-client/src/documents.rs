@@ -94,8 +94,11 @@ pub fn document_path(collection: &str, id: &str) -> Result<String, Error> {
 
 impl Client {
     async fn search_raw(&self, collection: &str, pairs: &[(&str, &str)]) -> Result<RawPage, Error> {
-        let path = collection_path(collection, "/documents/search")?;
-        let body = self.get_ok(None, &path, Some(&encode_query(pairs))).await?;
+        let params: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let body = self.search(collection, &params).await?;
         serde_json::from_str(&body).map_err(Error::Decode)
     }
 

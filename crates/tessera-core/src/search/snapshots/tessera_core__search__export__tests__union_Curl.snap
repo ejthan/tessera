@@ -1,0 +1,31 @@
+---
+source: crates/tessera-core/src/search/export.rs
+expression: "text(lang, &node(), &target)"
+---
+curl -X POST 'https://ts.example.net:8443/multi_search?page=2&per_page=5' \
+  -H "X-TYPESENSE-API-KEY: $TYPESENSE_API_KEY" \
+  --data-binary @- <<'EOF'
+{
+  "union": true,
+  "searches": [
+    {
+      "collection": "a",
+      "q": "*",
+      "exhaustive": true,
+      "n": null,
+      "l": [
+        1
+      ]
+    },
+    {
+      "collection": "b",
+      "q": "*",
+      "exhaustive": true,
+      "n": null,
+      "l": [
+        1
+      ]
+    }
+  ]
+}
+EOF

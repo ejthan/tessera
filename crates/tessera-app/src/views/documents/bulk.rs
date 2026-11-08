@@ -3,7 +3,8 @@
 //! Delete and update by query: a dialog with a filter, its live count and, for an update, the
 //! fields to set.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::base::TestSupportExt as _;
@@ -102,7 +103,10 @@ pub fn open(
     };
     let fields = schema.as_ref().map(filter_fields).unwrap_or_default();
     let profile = connection.read(cx).profile.clone();
-    let fetch = facet_fetch(connection.clone(), collection.clone());
+    let fetch = facet_fetch(
+        connection.clone(),
+        Rc::new(RefCell::new(collection.clone())),
+    );
     let bulk = cx.new(|cx| {
         let input = cx.new(|cx| FilterInput::new(fields, fetch, window, cx));
         let mut subscriptions = vec![cx.subscribe(

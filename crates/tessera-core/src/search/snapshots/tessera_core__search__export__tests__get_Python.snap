@@ -1,0 +1,27 @@
+---
+source: crates/tessera-core/src/search/export.rs
+expression: "text(lang, &node(), &target)"
+---
+import os
+
+import typesense
+
+client = typesense.Client({
+    "nodes": [
+        {
+            "host": "ts.example.net",
+            "port": 8443,
+            "protocol": "https",
+        },
+    ],
+    "api_key": os.environ["TYPESENSE_API_KEY"],
+})
+
+search_parameters = {
+    "q": "dune",
+    "query_by": "title",
+    "filter_by": "genre:=`a b` && year:>1",
+}
+
+results = client.collections["books"].documents.search(search_parameters)
+print(results)
