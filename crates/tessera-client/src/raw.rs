@@ -108,12 +108,21 @@ fn check_path(base: &Url, path: &str) -> Result<(), Error> {
     check_stays_on_node(base, &base.join(path).map_err(|_| invalid())?)
 }
 
+/// Whether `path` below `base` is `POST /keys`'s route, in any spelling the server takes.
+fn is_keys(base: &Url, path: &str) -> bool {
+    base.join(path).is_ok_and(|url| {
+        let below = url.path().strip_prefix(base.path()).unwrap_or(url.path());
+        below.trim_matches('/') == "keys"
+    })
+}
+
 impl Client {
     /// Sends `request` once to the active node, with [`LONG_TIMEOUT`] and no failover.
     ///
     /// Any HTTP status is `Ok`, because the status is what the console shows. A read-only
     /// client refuses everything but `GET` and `HEAD`, also a `POST` to `multi_search`. A path
-    /// that leaves the node is [`Error::InvalidUrl`], and nothing is sent.
+    /// that leaves the node is [`Error::InvalidUrl`], and nothing is sent. The event of a
+    /// `POST /keys` keeps no body: the answer holds a value, and the request can choose one.
     pub async fn raw(&self, request: RawRequest) -> Result<RawResponse, Error> {
         let node = self.active_node();
         check_path(&self.nodes[node], &request.path)?;
@@ -122,7 +131,14 @@ impl Client {
             RawBody::Text(text) => (text, "text/plain"),
         });
         let start = Instant::now();
-        let (status, headers, body) = self
+        let creates_key =
+            request.method == Method::POST && is_keys(&self.nodes[node], &request.path);
+        let client = if creates_key {
+            self.without_bodies()
+        } else {
+            self.clone()
+        };
+        let (status, headers, body) = client
             .send_with(
                 node,
                 request.method,

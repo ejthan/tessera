@@ -135,8 +135,8 @@ Everything in the repository is written in English: code, comments, docs, commit
 | Errors | `thiserror` (libraries), `anyhow` (app) | |
 | Logging | `tracing`, `tracing-subscriber`, `tracing-appender` | rotating log files, key redaction |
 | Versions | `semver` | feature gating by server version |
-| Scoped keys | `hmac`, `sha2`, `base64` | §7.14 |
-| Time | `jiff` or `time` | `expires_at`, timestamps |
+| Scoped keys | `hmac`, `sha2`, `base64` | §7.14, `tessera-core` only |
+| Time | `jiff` | `expires_at`, timestamps. `chrono` only in the app, for the date picker |
 | i18n | `rust-i18n`, `sys-locale` | the same crate GPUI Kit's components use; EN and DE at launch |
 | Temporary files | `tempfile` | error report spool (D47); tests |
 | Tests | `wiremock`, `insta`, `testcontainers` (optional), `gpui_kit::test` | §12 |
@@ -247,12 +247,12 @@ GPUI has its own executor, integrated into the platform event loop. `reqwest` ne
 | Set attachment | `synonym_sets` and `curation_sets` arrays on the collection: `POST /collections`, `PATCH /collections/{name}` replaces the array (verified on 30.0 and 30.2) | §7.9, §7.10 |
 | Stopwords | `GET /stopwords`, `PUT/GET/DELETE /stopwords/{id}` (`GET` of one wraps the answer in `stopwords`) | §7.11 |
 | Presets | `GET /presets`, `PUT/GET/DELETE /presets/{name}` | §7.12 |
-| Stemming dictionaries | `GET /stemming/dictionaries`, `GET …/{id}`, `POST /stemming/dictionaries/import?id=…` | §7.13 |
-| API keys | `GET/POST /keys`, `GET/DELETE /keys/{id}` | §7.14 |
-| Analytics rules | `GET/POST /analytics/rules`, `PUT/GET/DELETE /analytics/rules/{name}` (v30 format ⚠ verify) | §7.15 |
-| Analytics events | `POST /analytics/events` | §7.15 |
-| Conversation models (RAG) | `GET/POST /conversations/models`, `GET/PUT/DELETE …/{id}` | §7.16 |
-| NL search models | `GET/POST /nl_search_models`, `GET/PUT/DELETE …/{id}` | §7.16 |
+| Stemming dictionaries | `GET /stemming/dictionaries`, `GET/DELETE …/{id}`, `POST /stemming/dictionaries/import?id=…` (an import merges; a bad line keeps the lines before it; `DELETE` is not in the OpenAPI file; verified on 30.0 and 30.2) | §7.13 |
+| API keys | `GET/POST /keys`, `GET/DELETE /keys/{id}` (any action string is accepted; what counts is `<path>:<verb>`, D70; verified on 30.0 and 30.2) | §7.14 |
+| Analytics rules | `GET/POST /analytics/rules`, `PUT/GET/DELETE /analytics/rules/{name}` (`PUT` is an upsert; an unknown name answers 400; verified on 30.0 and 30.2) | §7.15 |
+| Analytics events | `POST /analytics/events` (5 requests per minute by default), `POST /analytics/flush` | §7.15 |
+| Conversation models (RAG) | `GET/POST /conversations/models`, `GET/PUT/DELETE …/{id}` (`PUT` merges and stores a mask as the key, D77; verified on 30.0 and 30.2) | §7.16 |
+| NL search models | `GET/POST /nl_search_models`, `GET/PUT/DELETE …/{id}` (same; `nl_query` with a bad model answers 200 as a plain search) | §7.16 |
 | Raw | anything | §7.17 |
 
 **v30 specifics (important):** From v30 on, synonyms and curation rules (formerly "overrides") are **global resources** (`/synonym_sets`, `/curation_sets`). They can be attached to several collections. A synonym set can also be passed as the search parameter `synonym_sets`, which adds to the attached sets; a curation set cannot: `curation_sets` is not a search parameter on 30.0 or 30.2 (D57). Deleting an attached synonym set makes every search on that collection answer 404 (D58). API keys with the old `overrides:*` actions do not grant access to the new endpoints. The key editor must offer the new actions (`curation_sets:*`, `synonym_sets:*`).
@@ -368,10 +368,10 @@ Each module lists acceptance criteria (AC).
 - List with target collection and a state for broken aliases (target missing or empty, target is an alias, hidden by a collection of the same name); create, repoint (upsert), delete.
 - **Reindex assistant** (P1) for switching without downtime, started from an alias. A collection without an alias must get one first, since a name cannot be both:
   1. New collection from the existing or a changed schema (name with timestamp suffix). A preflight names unstored fields, joins from other collections, other aliases, missing sets, embedding fields and blanked keys (D64)
-  2. Import data (from a file, or export to a private temp directory and import from there, D63)
-  3. Compare document counts
-  4. Switch the alias, after reading it again; a difference in the counts raises the confirmation (D65). A switch back stays available until step 5
-  5. Optionally delete the old collection after confirmation
+  2. Import data (from a file, or export to a private temp directory and import from there, D63). An export that finished short stops before the import. If the export found more documents than counted, it warns and goes on
+  3. Compare document counts. A compare that fails, or finds the alias deleted, counts as a stopped copy: the new collection can be deleted or left, and Compare again stays available
+  4. Switch the alias, after reading it again; a difference in the counts refuses the switch (D62, D65). A switch back stays available until step 5
+  5. Optionally delete the old collection after confirmation. Each delete reads the alias and counts again when confirmed, and is refused if the collection now serves. Start refuses a deleted alias. A temp directory left by a crash goes at a start once older than a day, if owned by this user
 
 The assistant is a tab per alias, and closing it keeps its state and jobs (D66). Joins from other collections fail after a switch, and upserting their documents does not repair them, so the confirmation names them.
 
@@ -401,20 +401,20 @@ CRUD for search presets (`value` = search parameters or a multi-search body). Th
 
 ### 7.13 Stemming dictionaries (P2)
 
-List, detail view and import (JSONL with `word`/`root`) via `POST /stemming/dictionaries/import?id=…`.
+List, detail view, import (JSONL with `word`/`root`) via `POST /stemming/dictionaries/import?id=…`, and delete. An import merges into an existing dictionary, so the dialog says so and reports changed roots. A file is checked whole first (D76).
 
 ### 7.14 API keys and scoped search keys (P0)
 
 - **List:** `id`, description, `value_prefix`, actions, collections, `expires_at` (flagging expired keys and keys about to expire). Delete.
 - **Create:**
-  - Actions as a checkbox matrix grouped by resource, with every action listed in the docs, including `curation_sets:*`, `synonym_sets:*`, `documents:*`, `collections:*`, `analytics:*` …
+  - Actions as a checkbox matrix grouped by resource, with every action the server enforces, including `curation_sets:*`, `synonym_sets:*`, `documents:*`, `collections:*`, `analytics/rules:*` … Several documented names do nothing (D70).
   - Wildcard `*` with a warning.
   - Collections: a list or a regex pattern.
   - `expires_at` with a date picker, a "never expires" option, and templates (search only, import only, admin).
   - The new key value is shown **only once**, with a copy button and a warning. Then it is discarded, unless the user explicitly saves it into a connection profile.
 - **Scoped search key generator** (missing in the reference):
-  - Inputs: parent key (search-only), embedded parameters in a JSON editor (`filter_by`, `expires_at`, `limit_multi_searches` …).
-  - Algorithm (per the Typesense docs, ⚠ verify): `digest = base64(HMAC-SHA256(key = parent_key, msg = params_json))`, `scoped_key = base64(digest + parent_key[0..4] + params_json)`.
+  - Inputs: parent key, which must hold exactly one action, `documents:search` (D71), embedded parameters in a JSON editor (`filter_by`, `expires_at`, `limit_multi_searches` …).
+  - Algorithm (verified in `typesense-js` 3.2.0): `digest = base64(HMAC-SHA256(key = parent_key, msg = params_json))` as base64 text of 44 characters, `scoped_key = base64(digest + parent_key[0..4] + params_json)`. `params_json` is `JSON.stringify` of the input after arrays under 16 list parameters such as `query_by` are joined by commas (D69).
   - Computed locally, without a server request.
   - **Decoder:** paste a scoped key to see its embedded parameters. With the parent key known, the signature is verified.
   - **Test:** run a search with the scoped key and show which documents are visible.
@@ -424,16 +424,17 @@ List, detail view and import (JSONL with `word`/`root`) via `POST /stemming/dict
 
 ### 7.15 Analytics (P1)
 
-- Rules in the v30 format: CRUD for popular queries, no-hits queries, counter events and other rule types. Source and destination collections are picked from dropdowns.
-- View of the destination collections (top queries, no hits) as a sorted table, with a jump into the search workbench.
+- Rules in the v30 format: CRUD for popular queries, no-hits queries, counter events and log rules. Source and destination collections are picked from dropdowns.
+- View of the destination collections (top queries, no hits) as a sorted table, with a jump into the search workbench and a Flush now button.
 - **Send a test event** (`POST /analytics/events`) from a form.
+- Aggregation needs `--enable-search-analytics=true` and `--analytics-dir` on the server. No endpoint reveals them, and a server without them accepts rules and events, so the view always says so (D73).
 
 ### 7.16 AI features (P1)
 
 - **Conversation models (RAG):** CRUD (model name, provider API key field masked, `history_collection`, `system_prompt`, `max_bytes`). Test chat with `conversation=true` against a collection, showing the source documents.
 - **NL search models:** CRUD and a test panel showing which `q`/`filter_by`/`sort_by` the model produced from a natural-language query.
 - **Embedding fields:** built-in models and external providers selectable in the schema editor; provider keys are masked.
-- Provider keys entered in forms are never stored locally, only sent to the server.
+- Provider keys entered in forms are never stored locally, only sent to the server, and they stay out of the request log too (D77, D79).
 
 ### 7.17 Raw API console (P0)
 
@@ -660,7 +661,7 @@ Each milestone ends with green CI, an updated CHANGELOG and a short demo (GIF in
 | **M4 Search and raw console** | §7.5 (without P2 parts), multi-search, history, saved queries, code export. §7.17 raw console. §7.20 command palette. §7.19 full view of truncated bodies. Details: `docs/superpowers/specs/2026-11-06-m4-search-design.md`, decisions D33–D44 | Exported curl reproduces the response (live test, 30.0 and 30.2); the checks on screen are still open, steps in `docs/building.md` |
 | **M5 Import/export** | §7.6, §7.7 including schema inference, error report, cancel. Jobs panel. The backup and restore assistant is M8. Details: `docs/superpowers/specs/2026-11-06-m5-import-export-design.md`, decisions D45–D54 | NF3 met headlessly: 1,000,000 documents in JSONL, JSON and CSV add at most 25 MB to the process and total at most 118 MB with the app's baseline, limit 300 MB (`cargo xtask nf3`, D53, record in `docs/building.md`); the run through the window and the Linux binary size (NF5) are still open |
 | **M6 Relevance resources** | §7.8 aliases including the reindex assistant, §7.9 synonym sets, §7.10 curation sets, §7.11 stopwords, §7.12 presets. Details: `docs/superpowers/specs/2026-11-06-m6-relevance-design.md`, decisions D56–D68 | CRUD and test panels work against 30.0 and 30.2: the live client and core tests pass on both, the views are covered by UI tests with fakes; the checks on screen are still open, steps in `docs/building.md` |
-| **M7 Keys, analytics, AI** | §7.14 including the scoped key generator and decoder, §7.15, §7.16, §7.13 | Scoped key test vectors identical to typesense-js |
+| **M7 Keys, analytics, AI** | §7.14 including the scoped key generator and decoder, §7.15, §7.16, §7.13. Details: `docs/superpowers/specs/2026-11-06-m7-keys-analytics-ai-design.md`, decisions D69–D82 | Scoped key test vectors identical to typesense-js |
 | **M8 Operations and hardening** | §7.18, safety UX §8.2 complete, backup/restore assistant, §9 audit (redaction tests) | Security checklist done |
 | **M9 Release 1.0** | i18n EN/DE complete, accessibility pass, onboarding, packaging for all platforms (`cargo-packager`, `xtask dist`), docs website (mdBook), QA checklist | v1.0.0 published |
 | **v1.x** | Legacy < 30 (§7.22), compare mode and ES translator (§7.5), JOIN graph (§7.3), key rotation, card view, Flatpak/winget, optional WASM build | – |
@@ -757,10 +758,24 @@ These rules are repeated in `CLAUDE.md` at the repository root.
 | D62 | Confirmations in M6 | New, item save, attach, detach: none, a plain confirmation on prod. Item delete: a plain confirmation. Whole-set save that removes items: a plain confirmation, typed on prod. Alias repoint or delete, stopwords delete, preset delete: a plain confirmation, typed on prod. Set delete: a plain confirmation, typed when attached or on prod. Reindex switch: refused while the counts differ, otherwise a plain confirmation, typed on prod or when joins would fail |
 | D63 | Does the reindex copy go through a temp file? | Yes: export to a private temp directory, then import that file, as two ordinary jobs, with no change to either pipeline. One stream was the first design, but the server closes an export whose reader stalls for 50 to 70 s (30.0 and 30.2), and one slow batch does that. The cost is free disk of about the export's size while the copy runs |
 | D64 | What blocks a reindex? | A required `store: false` field for a copy from the old collection, a blank embedding key, or a bad or taken name. Optional unstored fields, joins from other collections and other aliases are warnings: the operator may accept them |
-| D65 | What guards the switch? | Counts are compared and shown; a difference raises the confirmation to typing the alias. The alias is read right before the `PUT`, and the assistant stops if it moved. The `PUT` is read back. A switch back stays until clean-up |
+| D65 | What guards the switch? | Counts are compared and shown; a difference refuses the switch and the delete of the old collection. The alias is read right before the `PUT`, and the assistant stops if it moved. The `PUT` is read back. A switch back stays until clean-up |
 | D66 | Where does the assistant live? | A center tab per alias, with its state on the connection, so closing the tab keeps it, and the copy in the jobs panel. Nothing can be half-switched, so a disconnect loses only the wizard |
 | D67 | CSV of a synonym set | `id,root,synonyms,locale,symbols_to_index`, lists joined by `;`, or a JSON array in the cell when a value holds `;` or the list starts with `[`. Lossless and readable for business teams. D55 applies |
 | D68 | Where do stopwords and presets go in the sidebar? | Their own rows after Curations. One tab per kind and connection, one panel type |
+| D69 | What bytes does a scoped key sign? | `JSON.stringify` of the input after the 16 list parameters are joined, as `typesense-js` 3.2.0 does. Tessera writes that text itself. A number or key that JavaScript and Rust would print or order differently is refused instead of emulated: integers above 2^53, floats below 1e-6 or from 1e21, and keys like `"1"`. The decoder verifies the exact bytes it finds, so a key from any library verifies |
+| D70 | Which actions does the key form offer? | The names the server enforces, measured on 30.0 and 30.2, not the docs' list: `aliases:upsert`, `stopwords:upsert`, `synonym_sets:upsert`, `stemming/dictionaries/import:create`, `analytics/rules:*`. The documented `analytics:*` and `stopwords:create` grant nothing. A live test fails if this changes. Unknown actions of existing keys show raw |
+| D71 | How is a bad parent key caught? | The server answers one 401 for everything, so the panel warns from the key list by prefix: not exactly `documents:search`, expired, or no such key. Generating still works, since the local check can be wrong for keys sharing a prefix. The Test section's 401 explains the rule |
+| D72 | Where can a new key's value go? | The dialog, the clipboard by Copy, and a new connection profile through the connect dialog, by the user's save. Esc cannot close the reveal. `POST /keys` keeps no response body in the request log, also from the raw console. No custom `value`: §7.14 does not ask for one |
+| D73 | How does the app know analytics runs? | It cannot: no endpoint tells, and rules, events and flush answer normally without the flags. The view always states the two flags. `dev/docker-compose.yml` and CI set them |
+| D74 | How is an analytics rule saved? | New posts, which refuses a taken name. Edit reads the rule first, then `PUT`s, because `PUT` recreates a rule a colleague deleted. A rule of an unknown type stays listed and deletable as JSON |
+| D75 | Is a test event a write? | Yes: a counter event changes a stored document. It needs an unlocked profile and asks on prod. It sends the rule's `event_type`, since the server counts a mismatch without a word. The limit of 5 per minute shows as the server's 500 with a hint |
+| D76 | How is a stemming file imported? | Checked whole first, because the server keeps the lines before a bad one and an import cannot be undone. Empty words are refused, though the server stores them. An existing id asks first, and the result counts changed roots. Delete is included, since nothing else undoes an import. It names the collections using the dictionary, which keep working |
+| D77 | How is an AI model edited? | One client module for both kinds. `PUT` sends only what changed and `api_key` only when typed, because the server stores a mask as the key and answers 200. Blank keeps the key. The form shows nothing of it. Model calls keep no bodies in the request log, and errors pass `scrub`, because a provider may echo the key |
+| D78 | What do the AI test panels do? | A chat turn is a write and needs an unlocked profile; NL is a read and runs by button. Calls allow 120 s and do not retry on timeout, since a retry would call the LLM and store the turn again. A missing `parsed_nl_query` counts as failure, whatever the status. `query_by` is limited to text and auto-embedding fields, because a plain vector field gets no answer from 30.0. A chat stays below the `GET` limit, because `POST /multi_search` loses `conversation` in `Client::search` |
+| D79 | How do embedding fields reach the schema editor? | A block on a `float[]` row writes `FieldDraft.embed`, which stays the one source for form and JSON. Clone blanking and the mask block stay. A schema write with `embed` keeps no bodies in the request log and gets the long timeout, because a built-in model downloads first. A stored embedding stays read-only |
+| D80 | Where do the new resources go? | Rows after Presets: API keys, Analytics, Stemming, AI, ⌥⌘6–9. One AI tab with two views, ⌘1 and ⌘2, as a collection tab has. Keys show on every server, the other three on v30 and later |
+| D81 | Confirmations in M7 | Key delete, rule delete, model delete: a plain confirmation, typed on prod. Dictionary delete: the same, also typed when a collection uses it. Import into an existing dictionary: a plain confirmation, typed on prod. New, save, flush: none. A test event: a plain confirmation on prod |
+| D82 | What is tested without a provider? | Keys, analytics and stemming need none. AI CRUD, chat, NL and remote embedding run against a local stub reached through `openai_url`, `api_url` and `url`, on both versions. Real provider answers stay a manual check in `docs/building.md`. Built-in models need Hugging Face, so that test runs nightly |
 
 ---
 

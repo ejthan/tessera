@@ -3,6 +3,7 @@
 //! Tessera desktop app.
 
 pub mod actions;
+pub mod admin;
 pub mod collections;
 pub mod connection;
 pub mod documents;
@@ -126,6 +127,9 @@ pub fn run(launch: Launch) -> Result<(), String> {
             handle.clone(),
         )));
         cx.set_global(relevance::RelevanceBackendGlobal(relevance::tokio_backend(
+            handle.clone(),
+        )));
+        cx.set_global(admin::AdminBackendGlobal(admin::tokio_backend(
             handle.clone(),
         )));
         handle.spawn_blocking(relevance::sweep_copies);

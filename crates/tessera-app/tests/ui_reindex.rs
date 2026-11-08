@@ -803,6 +803,30 @@ async fn switch_back_rechecks(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn reload_after_the_switch_keeps_the_step(cx: &mut TestAppContext) {
+    let f = Fixture::new(cx).await;
+    f.copied(cx, 10);
+    f.switch(cx);
+    let target = f.target(cx);
+    f.set_count(&target, 9);
+    cx.update_window(f.handle.into(), |_, window, cx| {
+        window.press(key("cmd-r", "ctrl-r"), cx);
+    })
+    .unwrap();
+    f.settle(cx);
+    assert_eq!(
+        f.step(cx),
+        Step::Switched(Compared {
+            expected: 10,
+            target: 9,
+            failed: 0,
+            unconfirmed: 0,
+        })
+    );
+    assert!(f.has(cx, "reindex.switch_back"));
+}
+
+#[gpui_kit::test]
 async fn referenced_by_is_in_the_consequences(cx: &mut TestAppContext) {
     let orders = Collection {
         name: "orders".into(),

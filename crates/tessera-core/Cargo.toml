@@ -7,8 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 csv.workspace = true
 directories.workspace = true
+hmac.workspace = true
 jiff.workspace = true
 keyring.workspace = true
 percent-encoding.workspace = true
@@ -16,6 +18,7 @@ secrecy.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 tessera-client.workspace = true
 thiserror.workspace = true

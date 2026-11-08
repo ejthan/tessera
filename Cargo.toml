@@ -14,11 +14,13 @@ tessera-core = { path = "crates/tessera-core" }
 tessera-widgets = { path = "crates/tessera-widgets" }
 
 anyhow = "=1.0.104"
+base64 = "=0.23.1"
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 csv = "=1.4.0"
 directories = "=6.0.0"
 futures = { version = "=0.3.34", default-features = false, features = ["std"] }
 gpui-kit = "=0.9.0"
+hmac = "=0.13.0"
 insta = "=1.49.0"
 jiff = "=0.2.39"
 keyring = "=4.2.0"
@@ -32,6 +34,7 @@ secrecy = "=0.10.3"
 semver = "=1.0.28"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+sha2 = { version = "=0.11.1", default-features = false }
 sys-locale = "=0.3.2"
 tempfile = "=3.27.0"
 thiserror = "=2.0.21"

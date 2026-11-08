@@ -7,9 +7,12 @@ pub mod attachment;
 pub mod curation_dialog;
 pub mod curations;
 pub(crate) mod item_save;
+pub mod key_dialog;
+pub mod keys;
 pub mod name_dialog;
 pub mod presets;
 pub mod reindex;
+pub mod scoped_keys;
 pub mod set_file;
 pub mod sets;
 pub mod stopwords;
@@ -36,6 +39,7 @@ use tessera_widgets::confirm;
 use tessera_widgets::confirm_danger::{self, DangerOptions};
 
 use self::aliases::AliasesView;
+use self::keys::KeysView;
 use self::presets::PresetsView;
 use self::sets::SetsView;
 use self::stopwords::StopwordsView;
@@ -54,6 +58,8 @@ pub enum ResourceView {
     Presets(Entity<PresetsView>),
     /// See [`SetsView`].
     Sets(Entity<SetsView>),
+    /// See [`KeysView`].
+    Keys(Entity<KeysView>),
 }
 
 impl ResourceView {
@@ -81,6 +87,9 @@ impl ResourceView {
             ResourceKind::Curations => {
                 Self::Sets(cx.new(|cx| SetsView::new(SetKind::Curation, connection, window, cx)))
             }
+            ResourceKind::Keys => {
+                Self::Keys(cx.new(|cx| KeysView::new(connection, state, window, cx)))
+            }
         }
     }
 
@@ -91,6 +100,7 @@ impl ResourceView {
             Self::Stopwords(view) => view.clone().into(),
             Self::Presets(view) => view.clone().into(),
             Self::Sets(view) => view.clone().into(),
+            Self::Keys(view) => view.clone().into(),
         }
     }
 
@@ -101,6 +111,7 @@ impl ResourceView {
             Self::Stopwords(view) => view.focus_handle(cx),
             Self::Presets(view) => view.focus_handle(cx),
             Self::Sets(view) => view.focus_handle(cx),
+            Self::Keys(view) => view.focus_handle(cx),
         }
     }
 
@@ -111,6 +122,7 @@ impl ResourceView {
             Self::Stopwords(view) => view.read(cx).gates(cx),
             Self::Presets(view) => view.read(cx).gates(cx),
             Self::Sets(view) => view.read(cx).gates(cx),
+            Self::Keys(view) => view.read(cx).gates(cx),
         }
     }
 }

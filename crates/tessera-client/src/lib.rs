@@ -7,6 +7,7 @@ mod documents;
 mod error;
 mod event;
 mod export;
+mod keys;
 mod models;
 mod raw;
 mod search;
@@ -28,6 +29,7 @@ pub use documents::{
 pub use error::Error;
 pub use event::{BODY_LIMIT, Body, FULL_BODY_MAX, Origin, RequestEvent, RequestHook};
 pub use export::{ExportQuery, ExportStream, MAX_LINE, STREAM_STALL};
+pub use keys::{ApiKey, CreatedKey, NewKey};
 pub use models::{CollectionSummary, Debug, Health, KeyAccess, Metrics, RaftState, Stats};
 pub use raw::{RawBody, RawRequest, RawResponse};
 pub use reqwest::Method;

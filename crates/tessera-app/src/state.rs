@@ -124,16 +124,19 @@ pub enum ResourceKind {
     Stopwords,
     /// Presets.
     Presets,
+    /// API keys.
+    Keys,
 }
 
 impl ResourceKind {
     /// Every kind, in sidebar order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Aliases,
         Self::Synonyms,
         Self::Curations,
         Self::Stopwords,
         Self::Presets,
+        Self::Keys,
     ];
 
     /// The part of the ids of its row and tab.
@@ -144,6 +147,7 @@ impl ResourceKind {
             Self::Curations => "curations",
             Self::Stopwords => "stopwords",
             Self::Presets => "presets",
+            Self::Keys => "keys",
         }
     }
 

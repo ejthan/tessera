@@ -364,6 +364,19 @@ mod tests {
     }
 
     #[test]
+    fn raw_entry_masks_a_chosen_key_value() {
+        let body = r#"{"description":"d","value":"topsecret"}"#;
+        let entry = raw_entry("POST", "keys", None, Some(body));
+        let item = HistoryItem {
+            at: 1,
+            profile: Uuid::new_v4(),
+            entry,
+        };
+        let line = to_line(&item).unwrap();
+        assert!(!line.contains("topsecret"), "{line}");
+    }
+
+    #[test]
     fn a_huge_search_stays_out() {
         let mut draft = SearchDraft::new("books");
         let fits = search_entry(false, std::slice::from_ref(&draft));
